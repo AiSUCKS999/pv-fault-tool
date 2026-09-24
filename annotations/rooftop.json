@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "location_id": "rooftop",
+  "image_space": {
+    "width": 763,
+    "height": 402
+  },
+  "note": "Fill each row bbox and module bbox from a real PV image. The app will split each module into 6x2 numbered cells unless cells are provided directly.",
+  "rows": [
+    {
+      "row": 1,
+      "bbox": [
+        199,
+        81,
+        609,
+        103
+      ],
+      "module_cell_cols": 6,
+      "module_cell_rows": 2,
+      "modules": [],
+      "cells": []
+    },
+    {
+      "row": 2,
+      "bbox": [
+        199,
+        149,
+        609,
+        171
+      ],
+      "module_cell_cols": 6,
+      "module_cell_rows": 2,
+      "modules": [],
+      "cells": []
+    },
+    {
+      "row": 3,
+      "bbox": [
+        199,
+        217,
+        609,
+        239
+      ],
+      "module_cell_cols": 6,
+      "module_cell_rows": 2,
+      "modules": [],
+      "cells": []
+    },
+    {
+      "row": 4,
+      "bbox": [
+        199,
+        285,
+        609,
+        307
+      ],
+      "module_cell_cols": 6,
+      "module_cell_rows": 2,
+      "modules": [],
+      "cells": []
+    }
+  ]
+}
