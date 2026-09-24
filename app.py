@@ -2548,6 +2548,24 @@ def data_uri(image):
     return f"data:image/png;base64,{encoded}"
 
 
+def draw_row_bounding_boxes(image, location_id, selected_row_id):
+    boxed = image.convert("RGBA")
+    overlay = Image.new("RGBA", boxed.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    for panel in panels(location_id):
+        selected = panel["id"] == selected_row_id
+        outline = (250, 204, 21, 255) if selected else (56, 189, 248, 245)
+        fill = (250, 204, 21, 42) if selected else (56, 189, 248, 30)
+        width = 5 if selected else 4
+        draw.rectangle(
+            (panel["x1"], panel["y1"], panel["x2"], panel["y2"]),
+            outline=outline,
+            fill=fill,
+            width=width,
+        )
+    return Image.alpha_composite(boxed, overlay).convert("RGB")
+
+
 def crop_box_for_row(row):
     margin_x = max(16, int((row["x2"] - row["x1"]) * 0.06))
     if custom_layout_enabled():
@@ -2638,6 +2656,8 @@ def draw_visible_cell_grid_on_crop(cropped, location_id, selected_row_id, select
 
 
 def render_photo_map(image, location_id, view, selected_row_id, selected_cell_id, include_links, show_bounding_boxes=False):
+    if include_links and show_bounding_boxes:
+        image = draw_row_bounding_boxes(image, location_id, selected_row_id)
     uri = data_uri(image)
     svg_parts = [
         f'<svg width="{BASE_SIZE[0]}" height="{BASE_SIZE[1]}" viewBox="0 0 {BASE_SIZE[0]} {BASE_SIZE[1]}" xmlns="http://www.w3.org/2000/svg">',
