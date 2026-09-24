@@ -2792,8 +2792,8 @@ def main():
         st.caption(location["terrain"])
         st.caption("Use the tabs below for layout, target selection, random faults, and outputs.")
 
-    scene_tab, generation_tab, output_tab = st.tabs(
-        ["Terrain vs Panel", "Generation", "Output"]
+    scene_tab, generation_tab, output_tab, big_screen_tab = st.tabs(
+        ["Terrain vs Panel", "Generation", "Output", "Big Screen Test"]
     )
 
     fault_scale = DEFAULT_FAULT_SCALE
@@ -2984,6 +2984,17 @@ def main():
 
     terrain = scene_image_with_faults(location["id"], view, False, selected_row_id, selected_cell_id, fault_type, fault_scale, display_records)
     pv_scene = scene_image_with_faults(location["id"], view, True, selected_row_id, selected_cell_id, fault_type, fault_scale, display_records)
+    thermal_records = records_for_view(display_records, "thermal")
+    big_screen_thermal = scene_image_with_faults(
+        location["id"],
+        "thermal",
+        True,
+        selected_row_id,
+        selected_cell_id,
+        fault_type,
+        fault_scale,
+        thermal_records,
+    )
     metadata = scene_metadata(location, view, selected_row, selected_cell, display_records)
 
     with scene_tab:
@@ -3036,6 +3047,13 @@ def main():
                     for cell in row_cells
                 ]
             )
+
+    with big_screen_tab:
+        st.caption(
+            f"Thermal test view | {location['name']} | rows: {metadata['row_count']} | "
+            f"modules/row: {metadata['modules_per_row']} | faults: {metadata['fault_count']}"
+        )
+        st.image(big_screen_thermal, use_container_width=True)
 
 
 if __name__ == "__main__":
