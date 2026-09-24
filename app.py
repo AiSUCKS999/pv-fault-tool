@@ -2548,21 +2548,41 @@ def data_uri(image):
     return f"data:image/png;base64,{encoded}"
 
 
-def draw_row_bounding_boxes(image, location_id, selected_row_id):
+def draw_fault_bounding_boxes(image, location_id, fault_records):
     boxed = image.convert("RGBA")
     overlay = Image.new("RGBA", boxed.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    for panel in panels(location_id):
-        selected = panel["id"] == selected_row_id
-        outline = (250, 204, 21, 255) if selected else (56, 189, 248, 245)
-        fill = (250, 204, 21, 42) if selected else (56, 189, 248, 30)
-        width = 5 if selected else 4
+    font = grid_font(12)
+    for record in fault_records or []:
+        if record.get("location_id") != location_id:
+            continue
+        row = row_by_id(location_id, record["row_id"])
+        cell = cell_by_id(location_id, row["id"], record["target_cell_id"])
+        label = record["fault_type"]
+        x1, y1, x2, y2 = cell["x1"], cell["y1"], cell["x2"], cell["y2"]
+        box_x1 = max(0, min(x1 - 3, BASE_SIZE[0] - 1))
+        box_y1 = max(0, min(y1 - 3, BASE_SIZE[1] - 1))
+        box_x2 = min(BASE_SIZE[0], max(x2 + 3, box_x1 + 14))
+        box_y2 = min(BASE_SIZE[1], max(y2 + 3, box_y1 + 14))
         draw.rectangle(
-            (panel["x1"], panel["y1"], panel["x2"], panel["y2"]),
-            outline=outline,
-            fill=fill,
-            width=width,
+            (box_x1, box_y1, box_x2, box_y2),
+            outline=(34, 197, 94, 255),
+            fill=(34, 197, 94, 34),
+            width=4,
         )
+        text_bbox = draw.textbbox((0, 0), label, font=font)
+        text_w = text_bbox[2] - text_bbox[0]
+        text_h = text_bbox[3] - text_bbox[1]
+        label_x = max(0, min(box_x1, BASE_SIZE[0] - text_w - 10))
+        label_y = box_y1 + 2 if box_y2 - box_y1 >= text_h + 8 else max(0, box_y1 - text_h - 8)
+        draw.rounded_rectangle(
+            (label_x, label_y, label_x + text_w + 10, label_y + text_h + 6),
+            radius=2,
+            fill=(22, 163, 74, 235),
+            outline=(187, 247, 208, 255),
+            width=1,
+        )
+        draw.text((label_x + 5, label_y + 3), label, fill=(255, 255, 255, 255), font=font)
     return Image.alpha_composite(boxed, overlay).convert("RGB")
 
 
@@ -2655,9 +2675,9 @@ def draw_visible_cell_grid_on_crop(cropped, location_id, selected_row_id, select
     return image.convert("RGB")
 
 
-def render_photo_map(image, location_id, view, selected_row_id, selected_cell_id, include_links, show_bounding_boxes=False):
+def render_photo_map(image, location_id, view, selected_row_id, selected_cell_id, include_links, show_bounding_boxes=False, fault_records=None):
     if include_links and show_bounding_boxes:
-        image = draw_row_bounding_boxes(image, location_id, selected_row_id)
+        image = draw_fault_bounding_boxes(image, location_id, fault_records)
     uri = data_uri(image)
     svg_parts = [
         f'<svg width="{BASE_SIZE[0]}" height="{BASE_SIZE[1]}" viewBox="0 0 {BASE_SIZE[0]} {BASE_SIZE[1]}" xmlns="http://www.w3.org/2000/svg">',
@@ -2666,10 +2686,10 @@ def render_photo_map(image, location_id, view, selected_row_id, selected_cell_id
     if include_links:
         for panel in panels(location_id):
             selected = panel["id"] == selected_row_id
-            stroke = "#facc15" if selected and show_bounding_boxes else "#38bdf8"
-            opacity = "1.0" if show_bounding_boxes else "0.0"
-            width = "4" if selected and show_bounding_boxes else "3" if show_bounding_boxes else "1"
-            fill_opacity = "0.10" if selected and show_bounding_boxes else "0.07" if show_bounding_boxes else "0.001"
+            stroke = "#38bdf8"
+            opacity = "0.0"
+            width = "1"
+            fill_opacity = "0.001"
             hit_pad_y = max(8, int((panel["y2"] - panel["y1"]) * 0.9)) if custom_layout_enabled() else 0
             hit_y1 = max(0, panel["y1"] - hit_pad_y)
             hit_y2 = min(BASE_SIZE[1], panel["y2"] + hit_pad_y)
@@ -3029,7 +3049,7 @@ def main():
             render_photo_map(terrain, location["id"], view, selected_row_id, selected_cell_id, False)
         with right:
             st.subheader("Same location with PV rows")
-            render_photo_map(pv_scene, location["id"], view, selected_row_id, selected_cell_id, True, show_bounding_boxes)
+            render_photo_map(pv_scene, location["id"], view, selected_row_id, selected_cell_id, True, show_bounding_boxes, display_records)
             st.caption("Click a row in this image. The selected row opens in the output tab for cell-level inspection.")
         with st.expander("Scene metadata", expanded=False):
             st.json(metadata)
