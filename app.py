@@ -2646,10 +2646,10 @@ def render_photo_map(image, location_id, view, selected_row_id, selected_cell_id
     if include_links:
         for panel in panels(location_id):
             selected = panel["id"] == selected_row_id
-            stroke = "#38bdf8" if selected else "#ffffff"
-            opacity = "0.95" if selected and show_bounding_boxes else "0.45" if show_bounding_boxes else "0.0"
-            width = "3" if selected and show_bounding_boxes else "2" if show_bounding_boxes else "1"
-            fill_opacity = "0.05" if show_bounding_boxes else "0.001"
+            stroke = "#facc15" if selected and show_bounding_boxes else "#38bdf8"
+            opacity = "1.0" if show_bounding_boxes else "0.0"
+            width = "4" if selected and show_bounding_boxes else "3" if show_bounding_boxes else "1"
+            fill_opacity = "0.10" if selected and show_bounding_boxes else "0.07" if show_bounding_boxes else "0.001"
             hit_pad_y = max(8, int((panel["y2"] - panel["y1"]) * 0.9)) if custom_layout_enabled() else 0
             hit_y1 = max(0, panel["y1"] - hit_pad_y)
             hit_y2 = min(BASE_SIZE[1], panel["y2"] + hit_pad_y)
@@ -2661,7 +2661,7 @@ def render_photo_map(image, location_id, view, selected_row_id, selected_cell_id
                 f'<title>{title}</title>'
                 f'<rect x="{panel["x1"]}" y="{panel["y1"]}" width="{panel["x2"] - panel["x1"]}" '
                 f'height="{panel["y2"] - panel["y1"]}" fill="#38bdf8" fill-opacity="{fill_opacity}" '
-                f'stroke="{stroke}" stroke-width="{width}" stroke-dasharray="8 5" opacity="{opacity}" '
+                f'stroke="{stroke}" stroke-width="{width}" opacity="{opacity}" '
                 f'pointer-events="all"/></a>'
                 f'<a href="{esc(target)}" target="_parent">'
                 f'<title>{title}</title>'
