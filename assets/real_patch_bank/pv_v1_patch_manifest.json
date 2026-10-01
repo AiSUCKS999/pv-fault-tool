@@ -1,0 +1,45 @@
+{
+  "zip": "C:\\Users\\ammar.AMMAR\\Downloads\\pv.v1i.yolov11.zip",
+  "class_to_target": {
+    "1": "SoilingDust",
+    "9": "SoilingDust",
+    "7": "CellCracking",
+    "12": "CellCracking"
+  },
+  "saved": {
+    "SoilingDust": 260,
+    "CellCracking": 180
+  },
+  "saved_by_source_class": {
+    "9": 135,
+    "1": 125,
+    "7": 119,
+    "12": 61
+  },
+  "skipped": {
+    "source_filter_CellCracking": 250,
+    "source_filter_SoilingDust": 2366
+  },
+  "examples": {
+    "SoilingDust": [
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\SoilingDust\\pv_v1_dust_0001.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\SoilingDust\\pv_v1_dust_0002.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\SoilingDust\\pv_v1_dust_0003.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\SoilingDust\\pv_v1_dust_0004.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\SoilingDust\\pv_v1_dust_0005.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\SoilingDust\\pv_v1_dust_0006.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\SoilingDust\\pv_v1_dust_0007.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\SoilingDust\\pv_v1_dust_0008.png"
+    ],
+    "CellCracking": [
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\CellCracking\\pv_v1_glass_breakage_0001.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\CellCracking\\pv_v1_glass_breakage_0002.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\CellCracking\\pv_v1_glass_breakage_0003.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\CellCracking\\pv_v1_glass_breakage_0004.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\CellCracking\\pv_v1_glass_breakage_0005.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\CellCracking\\pv_v1_glass_breakage_0006.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\CellCracking\\pv_v1_glass_breakage_0007.png",
+      "local_pv_tool\\assets\\real_patch_bank\\faults\\CellCracking\\pv_v1_glass_breakage_0008.png"
+    ]
+  }
+}

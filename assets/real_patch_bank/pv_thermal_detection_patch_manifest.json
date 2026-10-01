@@ -1,0 +1,32 @@
+{
+  "zip": "C:\\Users\\ammar.AMMAR\\Downloads\\PV thermal detection.v1i.yolov11.zip",
+  "saved": {
+    "PartialShading": 116,
+    "StringReversedPolarity": 12
+  },
+  "source_class_counts": {
+    "Vegetation": 116,
+    "Reverse polarity": 12
+  },
+  "skipped": {
+    "not_detection_box": 498
+  },
+  "examples": {
+    "PartialShading": [
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\PartialShading\\pvthermal_vegetation_0001.png",
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\PartialShading\\pvthermal_vegetation_0002.png",
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\PartialShading\\pvthermal_vegetation_0003.png",
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\PartialShading\\pvthermal_vegetation_0004.png",
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\PartialShading\\pvthermal_vegetation_0005.png",
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\PartialShading\\pvthermal_vegetation_0006.png"
+    ],
+    "StringReversedPolarity": [
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\StringReversedPolarity\\pvthermal_reverse_polarity_0001.png",
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\StringReversedPolarity\\pvthermal_reverse_polarity_0002.png",
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\StringReversedPolarity\\pvthermal_reverse_polarity_0003.png",
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\StringReversedPolarity\\pvthermal_reverse_polarity_0004.png",
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\StringReversedPolarity\\pvthermal_reverse_polarity_0005.png",
+      "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\local_pv_tool\\assets\\real_patch_bank\\faults\\StringReversedPolarity\\pvthermal_reverse_polarity_0006.png"
+    ]
+  }
+}
