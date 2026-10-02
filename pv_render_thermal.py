@@ -945,14 +945,12 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
             if custom_layout_enabled():
                 module_count = custom_panels_per_row(location_id)
                 for layout in module_layouts_for_row(row, module_count):
-                    ox1, oy1, ox2, oy2 = layout["outer"]
-                    cv2.rectangle(
-                        shadow_mask,
-                        (ox1 + offset, oy2 - max(1, row_h // 12)),
-                        (min(BASE_SIZE[0] - 1, ox2 + offset), min(BASE_SIZE[1] - 1, oy2 + offset)),
-                        180,
-                        -1,
-                    )
+                    poly = module_visual_polygon(row, layout, "outer").copy()
+                    poly[:, 0] += offset
+                    poly[:, 1] += max(1, offset // 2)
+                    poly[:, 0] = np.clip(poly[:, 0], 0, BASE_SIZE[0] - 1)
+                    poly[:, 1] = np.clip(poly[:, 1], 0, BASE_SIZE[1] - 1)
+                    cv2.fillPoly(shadow_mask, [np.round(poly).astype(np.int32)], 180, cv2.LINE_AA)
             else:
                 cv2.rectangle(
                     shadow_mask,
@@ -1024,8 +1022,10 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
 
             if custom_layout_enabled():
                 for layout in module_layouts_for_row(row, module_count):
-                    ox1, oy1, ox2, oy2 = layout["outer"]
-                    cv2.rectangle(row_mask, (ox1 - x1, oy1 - y1), (ox2 - x1, oy2 - y1), 255, -1)
+                    poly = module_visual_polygon(row, layout, "outer").copy()
+                    poly[:, 0] -= x1
+                    poly[:, 1] -= y1
+                    cv2.fillPoly(row_mask, [np.round(poly).astype(np.int32)], 255, cv2.LINE_AA)
             else:
                 cv2.rectangle(row_mask, (0, 0), (row_w - 1, row_h - 1), 255, -1)
 
@@ -1041,12 +1041,14 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
                 draw_thermal_module_cell_seams(temp, row, module_count, panel_min, include_string_grid=True)
 
                 for layout in module_layouts_for_row(row, module_count):
-                    ox1, oy1, ox2, oy2 = layout["outer"]
+                    outer = module_visual_polygon(row, layout, "outer")
+                    left_top = tuple(np.round(outer[0]).astype(int))
+                    left_bottom = tuple(np.round(outer[3]).astype(int))
                     if not actual_panel_model_enabled():
                         draw_wavy_line(
                             temp,
-                            (ox1, oy1 + 1),
-                            (ox1, oy2 - 1),
+                            left_top,
+                            left_bottom,
                             edge_temp - 30,
                             1,
                             seed_for(row["id"], layout["module_number"], "thermal-gap-left"),

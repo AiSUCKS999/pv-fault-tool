@@ -96,7 +96,7 @@ LAYOUT_CAPS = {
     "desert_farm": {"rows": 3, "modules": 5, "module_height": 108},
     "farm_lake": {"rows": 3, "modules": 4, "module_height": 96},
     # Rooftop needs shorter modules so 3 generated rows fit without merging.
-    "rooftop": {"rows": 3, "modules": 5, "module_height": 64},
+    "rooftop": {"rows": 4, "modules": 8, "module_height": 78},
 }
 
 CAP_JUSTIFICATIONS = {
@@ -117,7 +117,7 @@ CAP_JUSTIFICATIONS = {
         "the module count is lower than the land scenes."
     ),
     "rooftop": (
-        "Cap: 3 rows x 5 modules. Rooftop arrays stay close-up by default, with extra modules "
+        "Cap: 4 rows x 8 modules. Rooftop arrays stay close-up by default, with extra modules "
         "available when you want a denser row."
     ),
 }
@@ -125,13 +125,13 @@ CAP_JUSTIFICATIONS = {
 CUSTOM_LAYOUT_X_LIMITS = {
     # Keep max custom layouts inside the usable physical area of each source.
     "farm_lake": (226, 539),  # inner water square, away from the concrete frame
-    "rooftop": (199, 609),    # user-marked black-box roof target zone
+    "rooftop": (58, 707),     # use more of the real roof so dense arrays do not look pasted-on
 }
 
 CUSTOM_LAYOUT_Y_LIMITS = {
     # Spread generated rows through a realistic usable zone instead of copying thin OG row strips.
     "farm_lake": (90, 310),
-    "rooftop": (80, 310),
+    "rooftop": (62, 358),
 }
 
 LOCATION_PANEL_DEFS = {
@@ -616,6 +616,17 @@ def custom_row_defs_for_location(location_id=None):
         row_x1, top, row_x2, bottom = dynamic_custom_row_bounds(
             row_x1, row_x2, center_y, step, module_count, location_id
         )
+        if location_id == "rooftop" and row_count > 1:
+            # Rooftop drone footage rarely sees the array as identical CAD rows.
+            # Let lower rows read slightly closer/wider, with a small side drift.
+            perspective = idx / max(1, row_count - 1)
+            current_w = row_x2 - row_x1
+            target_w = int(round(current_w * (0.92 + perspective * 0.12)))
+            center_x = (row_x1 + row_x2) / 2 + (perspective - 0.5) * 18
+            row_x1 = int(round(center_x - target_w / 2))
+            row_x2 = int(round(center_x + target_w / 2))
+            row_x1 = clamp(row_x1, CUSTOM_LAYOUT_X_LIMITS[location_id][0], BASE_SIZE[0] - 2)
+            row_x2 = clamp(row_x2, row_x1 + 80, CUSTOM_LAYOUT_X_LIMITS[location_id][1])
         row_w = max(1, row_x2 - row_x1)
         dx = int(round(row_rng.normal(0, max(1.0, min(7.0, row_w * 0.008)))))
         dw = int(round(row_rng.normal(0, max(1.0, min(5.0, row_w * 0.004)))))

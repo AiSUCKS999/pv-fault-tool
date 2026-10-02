@@ -548,6 +548,10 @@ def draw_thermal_module_cell_seams(temp, row, module_count, panel_min, include_s
     for layout in module_layouts_for_row(row, module_count):
         ox1, oy1, ox2, oy2 = layout["outer"]
         ix1, iy1, ix2, iy2 = layout["inner"]
+        outer_quad = module_visual_polygon(row, layout, "outer")
+        inner_quad = module_visual_polygon(row, layout, "inner")
+        outer_i = np.round(outer_quad).astype(np.int32)
+        inner_i = np.round(inner_quad).astype(np.int32)
         cell_w = max(1, ix2 - ix1)
         cell_h = max(1, iy2 - iy1)
         seam_w = max(1, min(2, int(round(min(cell_w / CUSTOM_MODULE_CELL_COLS, cell_h / CUSTOM_MODULE_CELL_ROWS) * 0.16))))
@@ -555,8 +559,8 @@ def draw_thermal_module_cell_seams(temp, row, module_count, panel_min, include_s
 
         # Module frame/gap: colder than the cell separators, as seen in UAV IR
         # crops where rows have dark purple physical gaps.
-        cv2.rectangle(temp, (ox1, oy1), (ox2, oy2), module_gap_temp, frame_w, cv2.LINE_AA)
-        cv2.rectangle(temp, (ix1, iy1), (ix2, iy2), subtle_rim_temp, 1, cv2.LINE_AA)
+        cv2.polylines(temp, [outer_i], True, module_gap_temp, frame_w, cv2.LINE_AA)
+        cv2.polylines(temp, [inner_i], True, subtle_rim_temp, 1, cv2.LINE_AA)
         if include_string_grid:
             draw_cell_string_dot_texture(
                 temp,
@@ -571,11 +575,29 @@ def draw_thermal_module_cell_seams(temp, row, module_count, panel_min, include_s
             )
 
         for idx in range(1, CUSTOM_MODULE_CELL_COLS):
-            x = int(ix1 + idx * cell_w / CUSTOM_MODULE_CELL_COLS)
-            cv2.line(temp, (x, iy1), (x, iy2), cell_gap_temp, seam_w, cv2.LINE_AA)
+            u = idx / CUSTOM_MODULE_CELL_COLS
+            p1 = quad_point(inner_quad, u, 0.0)
+            p2 = quad_point(inner_quad, u, 1.0)
+            cv2.line(
+                temp,
+                tuple(np.round(p1).astype(int)),
+                tuple(np.round(p2).astype(int)),
+                cell_gap_temp,
+                seam_w,
+                cv2.LINE_AA,
+            )
         for idx in range(1, CUSTOM_MODULE_CELL_ROWS):
-            y = int(iy1 + idx * cell_h / CUSTOM_MODULE_CELL_ROWS)
-            cv2.line(temp, (ix1, y), (ix2, y), cell_gap_temp, seam_w, cv2.LINE_AA)
+            v = idx / CUSTOM_MODULE_CELL_ROWS
+            p1 = quad_point(inner_quad, 0.0, v)
+            p2 = quad_point(inner_quad, 1.0, v)
+            cv2.line(
+                temp,
+                tuple(np.round(p1).astype(int)),
+                tuple(np.round(p2).astype(int)),
+                cell_gap_temp,
+                seam_w,
+                cv2.LINE_AA,
+            )
         if not include_string_grid:
             draw_cell_string_dot_texture(
                 temp,
@@ -604,6 +626,87 @@ def jittered_module_polygon(box, seed, max_jitter=1.2):
         ],
         dtype=np.int32,
     )
+
+
+def module_visual_polygon(row, layout, variant="outer"):
+    """Return a small perspective/skew polygon for a module, while hit boxes stay rectangular."""
+    ox1, oy1, ox2, oy2 = layout[variant]
+    w = max(1, ox2 - ox1)
+    h = max(1, oy2 - oy1)
+    rng = np.random.default_rng(seed_for(row["id"], layout["module_number"], "visual-module-polygon", variant))
+    row_rng = np.random.default_rng(seed_for(row["id"], "visual-row-angle"))
+    is_rooftop = str(row.get("id", "")).startswith("RT")
+
+    slope_scale = 0.078 if is_rooftop else 0.066
+    tilt_scale = 0.030 if is_rooftop else 0.020
+    shear_scale = 0.045 if is_rooftop else 0.038
+    taper_min = 0.018 if is_rooftop else 0.014
+    taper_max = 0.040 if is_rooftop else 0.032
+
+    row_slope = float(row_rng.normal(0, max(0.8, h * slope_scale)))
+    row_tilt = float(row_rng.normal(0, tilt_scale))
+    if is_rooftop:
+        row_tilt = -0.038 + float(row_rng.normal(0, 0.005))
+    row_center_x = (row["x1"] + row["x2"]) / 2
+    module_center_x = (ox1 + ox2) / 2
+    y_shift = (module_center_x - row_center_x) * row_tilt
+    shear = float(rng.normal(0, max(1.0, h * shear_scale)))
+    taper = float(rng.uniform(max(0.9, w * taper_min), max(1.6, w * taper_max)))
+    corner = max(0.25, min(w, h) * (0.014 if is_rooftop else 0.016))
+
+    pts = np.array(
+        [
+            [ox1 + taper + shear * 0.20, oy1 + y_shift + row_slope * -0.55 + rng.normal(0, corner)],
+            [ox2 - taper + shear * 0.55, oy1 + y_shift + row_slope * 0.55 + rng.normal(0, corner)],
+            [ox2 - taper - shear * 0.20, oy2 + y_shift + row_slope * 0.35 + rng.normal(0, corner)],
+            [ox1 + taper - shear * 0.55, oy2 + y_shift + row_slope * -0.35 + rng.normal(0, corner)],
+        ],
+        dtype=np.float32,
+    )
+    pts[:, 0] = np.clip(pts[:, 0], 0, BASE_SIZE[0] - 1)
+    pts[:, 1] = np.clip(pts[:, 1], 0, BASE_SIZE[1] - 1)
+    return pts
+
+
+def module_visual_polygon_local(row, layout, variant="outer"):
+    pts = module_visual_polygon(row, layout, variant)
+    ox1, oy1, _, _ = layout[variant]
+    local = pts.copy()
+    local[:, 0] -= ox1
+    local[:, 1] -= oy1
+    return local
+
+
+def quad_point(quad, u, v):
+    top = quad[0] * (1 - u) + quad[1] * u
+    bottom = quad[3] * (1 - u) + quad[2] * u
+    return top * (1 - v) + bottom * v
+
+
+def warp_rgba_to_polygon(patch, polygon, canvas_size=BASE_SIZE):
+    src = np.array(patch.convert("RGBA"))
+    ph, pw = src.shape[:2]
+    if pw < 2 or ph < 2:
+        return np.zeros((canvas_size[1], canvas_size[0], 4), dtype=np.uint8)
+    src_quad = np.array([[0, 0], [pw - 1, 0], [pw - 1, ph - 1], [0, ph - 1]], dtype=np.float32)
+    transform = cv2.getPerspectiveTransform(src_quad, polygon.astype(np.float32))
+    return cv2.warpPerspective(
+        src,
+        transform,
+        canvas_size,
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0, 0),
+    )
+
+
+def alpha_composite_rgba_array(base_rgb, overlay_rgba):
+    alpha = overlay_rgba[:, :, 3:4].astype(np.float32) / 255.0
+    if not np.any(alpha > 0):
+        return base_rgb
+    base = base_rgb.astype(np.float32)
+    over = overlay_rgba[:, :, :3].astype(np.float32)
+    return np.clip(base * (1 - alpha) + over * alpha, 0, 255).astype(np.uint8)
 
 
 def procedural_panel_row(size, module_count, seed, location_id=None, source_textures=None):
@@ -1013,7 +1116,6 @@ def composite_panel_row(output_rgb, row, module_count, seed, location_id=None, s
     x1, y1 = clamp(x1, 0, BASE_SIZE[0] - 1), clamp(y1, 0, BASE_SIZE[1] - 1)
     x2, y2 = clamp(x2, x1 + 1, BASE_SIZE[0]), clamp(y2, y1 + 1, BASE_SIZE[1])
     row_w, row_h = x2 - x1, y2 - y1
-    terrain_crop = output_rgb[y1:y2, x1:x2].copy()
     source_textures = []
     if source is not None and source_row is not None:
         for module_number in range(1, module_count + 1):
@@ -1023,40 +1125,45 @@ def composite_panel_row(output_rgb, row, module_count, seed, location_id=None, s
                 crop = None
             if crop is not None and crop.width >= 8 and crop.height >= 6:
                 source_textures.append(np.array(crop))
-    panel = procedural_panel_row((row_w, row_h), module_count, seed, location_id, source_textures=source_textures)
-    panel = color_match_array_to_background(panel, terrain_crop)
-    panel = cv2.convertScaleAbs(panel, alpha=1.08, beta=1)
-    if not actual_panel_model_enabled():
-        panel = redraw_visible_module_geometry(panel, module_count)
     layouts = module_layouts_for_row(row, module_count)
     output_rgb = apply_mounting_hardware(output_rgb, row, module_count, seed_for(seed, "mounting-hardware"), location_id)
+    terrain_image = Image.fromarray(output_rgb.copy()).convert("RGB")
+    row_cells = cells_for_row(location_id, row["id"]) if location_id else []
 
     # Ground contact shadow: offset slightly down/right, blurred, and applied
     # before compositing the glass surface.
     shadow = np.zeros(output_rgb.shape[:2], dtype=np.uint8)
     offset = max(1, int(row_h * 0.13))
     for layout in layouts:
-        ox1, oy1, ox2, oy2 = layout["outer"]
-        sx1 = clamp(ox1 + offset, 0, BASE_SIZE[0] - 1)
-        sy1 = clamp(oy1 + max(1, offset // 2), 0, BASE_SIZE[1] - 1)
-        sx2 = clamp(ox2 + offset, sx1 + 1, BASE_SIZE[0])
-        sy2 = clamp(oy2 + offset, sy1 + 1, BASE_SIZE[1])
-        cv2.rectangle(shadow, (sx1, sy1), (sx2, sy2), 180, -1)
+        poly = module_visual_polygon(row, layout, "outer").copy()
+        poly[:, 0] += offset
+        poly[:, 1] += max(1, offset // 2)
+        poly[:, 0] = np.clip(poly[:, 0], 0, BASE_SIZE[0] - 1)
+        poly[:, 1] = np.clip(poly[:, 1], 0, BASE_SIZE[1] - 1)
+        cv2.fillPoly(shadow, [np.round(poly).astype(np.int32)], 180, cv2.LINE_AA)
     shadow = cv2.GaussianBlur(shadow, (0, 0), max(1.6, row_h * 0.22)).astype(np.float32) / 255.0
     output_rgb[:] = np.clip(output_rgb.astype(np.float32) * (1.0 - shadow[..., None] * 0.18), 0, 255).astype(np.uint8)
 
-    mask = np.zeros(output_rgb.shape[:2], dtype=np.uint8)
     for layout in layouts:
         ox1, oy1, ox2, oy2 = layout["outer"]
-        cv2.rectangle(mask, (ox1, oy1), (ox2, oy2), 255, -1)
-    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-    feather = max(2.0, row_h * 0.12)
-    alpha = np.clip(dist / feather, 0, 1).astype(np.float32)
-    edge_noise = cv2.GaussianBlur(np.random.default_rng(seed).normal(1.0, 0.025, alpha.shape).astype(np.float32), (0, 0), 0.7)
-    alpha = np.clip(alpha * edge_noise, 0, 1)
-    local_alpha = alpha[y1:y2, x1:x2][..., None]
-    blended = terrain_crop.astype(np.float32) * (1.0 - local_alpha) + panel.astype(np.float32) * local_alpha
-    output_rgb[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
+        module_cells = [
+            cell for cell in row_cells
+            if cell.get("module_number") == layout["module_number"]
+        ]
+        source_patch = None
+        if source_textures:
+            source_patch = Image.fromarray(source_textures[(layout["module_number"] - 1) % len(source_textures)]).convert("RGB")
+        patch = draw_realistic_module_patch(
+            (max(4, ox2 - ox1), max(4, oy2 - oy1)),
+            seed_for(seed, layout["module_number"], "module-patch"),
+            terrain_image,
+            (ox1, oy1, ox2, oy2),
+            module_cells,
+            source_patch=source_patch,
+        )
+        polygon = module_visual_polygon(row, layout, "outer")
+        warped = warp_rgba_to_polygon(patch, polygon)
+        output_rgb = alpha_composite_rgba_array(output_rgb, warped)
     return output_rgb
 
 
