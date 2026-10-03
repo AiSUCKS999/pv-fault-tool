@@ -77,8 +77,8 @@ HOTSPOT_FAULTS = {"SingleHotSpot", "MultiHotSpot"}
 HIDDEN_SYMPTOM_FAULTS = set()
 LOW_CONFIDENCE_LEGACY_FAULTS = {"DB", "DL", "TB"}
 HIDDEN_MULTICELL_FAULTS = {"MultiDiode", "MultiByPassed"}
-HIDDEN_TOOL_FAULTS = HOTSPOT_FAULTS | LOW_CONFIDENCE_LEGACY_FAULTS | HIDDEN_MULTICELL_FAULTS | {"PartialShading"}
-FAR_SCOUT_FAULT_TYPES = ["SingleHotSpot", "MultiHotSpot", "StringOpenCircuit"]
+HIDDEN_TOOL_FAULTS = HOTSPOT_FAULTS | LOW_CONFIDENCE_LEGACY_FAULTS | HIDDEN_MULTICELL_FAULTS
+FAR_SCOUT_FAULT_TYPES = ["SingleHotSpot", "MultiHotSpot", "PartialShading", "StringOpenCircuit"]
 CLOSE_DIAGNOSTIC_FAULT_TYPES = [
     fault_type for fault_type in FAULT_TYPES
     if fault_type not in HOTSPOT_FAULTS | LOW_CONFIDENCE_LEGACY_FAULTS | HIDDEN_MULTICELL_FAULTS
@@ -105,8 +105,6 @@ USER_SELECTABLE_FAULT_TYPES = [
 
 def fault_available_in_location(location_id, fault_type):
     fault_type = canonical_fault_type(fault_type)
-    if fault_type in SURFACE_OBSTRUCTION_FAULTS:
-        return location_id in SURFACE_OBSTRUCTION_LOCATIONS
     return fault_type in USER_SELECTABLE_FAULT_TYPES or fault_type in HOTSPOT_FAULTS
 
 

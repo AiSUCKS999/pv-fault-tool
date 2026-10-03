@@ -1163,6 +1163,9 @@ def module_field_image(location_id, view, selected_row_id, selected_cell_id, fau
                 shadow = shadow.filter(ImageFilter.GaussianBlur(2.6))
                 field.alpha_composite(shadow, (x - 8, y - 6))
             field.paste(tile, (x, y))
+            if show_grid:
+                outline = (56, 189, 248, 180) if records else (224, 242, 254, 80)
+                draw.rectangle((x, y, x + tile_w, y + tile_h), outline=outline, width=2)
             if is_selected:
                 selected_rect = (x, y, x + tile_w, y + tile_h)
 
@@ -1333,6 +1336,7 @@ def main():
                         "At cap: row/panel limits preserve solar-panel aspect ratio, readable cell labels, "
                         "and prevent layouts from spilling into unusable image areas."
                     )
+            show_bounding_boxes = st.checkbox("Show bounding boxes", value=False)
         with target_col:
             st.subheader("Fault Target")
             current_custom_layout = custom_layout_enabled()
@@ -1396,10 +1400,10 @@ def main():
                 selected_module_number = module_numbers[0]
             if module_numbers:
                 module_choice = st.selectbox(
-                    "Module in selected panel",
+                    "Module inside selected panel (1 of 4)",
                     module_numbers,
                     index=module_numbers.index(selected_module_number),
-                    format_func=lambda module_number: f"Module {(module_number - 1) % SOLAR_PANEL_MODULES + 1}",
+                    format_func=lambda module_number: f"Module {(module_number - 1) % SOLAR_PANEL_MODULES + 1} of {SOLAR_PANEL_MODULES}",
                     key=f"fault_module_{layout_key}_{selected_row_id}_{panel_choice}",
                 )
                 module_cells_for_choice = [
@@ -1532,7 +1536,7 @@ def main():
         selected_row_id,
         selected_cell_id,
         display_records,
-        show_grid=show_cell_grid,
+        show_grid=show_bounding_boxes,
     ).convert("RGB")
     thermal_records = records_for_view(display_records, "thermal")
     if view == "thermal":
@@ -1555,7 +1559,7 @@ def main():
             selected_row_id,
             selected_cell_id,
             display_records,
-            show_grid=show_cell_grid,
+            show_grid=show_bounding_boxes,
             image=pv_scene,
         )
         selected_module_number = selected_cell.get("module_number")
@@ -1591,7 +1595,7 @@ def main():
             selected_row_id,
             selected_cell_id,
             display_records,
-            show_grid=show_cell_grid,
+            show_grid=show_bounding_boxes,
         )
         st.caption(
             f"Module {selected_module_number or selected_cell.get('panel_number')} fills the diagnostic view. "
