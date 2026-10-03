@@ -1284,7 +1284,9 @@ def main():
         st.caption("Panel array view with single-module diagnostics.")
         show_cell_grid = False
 
-    main_tab, output_tab, big_screen_tab = st.tabs(["Main", "Output", "Big Screen Test"])
+    main_tab, output_tab, cell_faults_tab, data_tab, big_screen_tab = st.tabs(
+        ["Main", "Output", "Cell Faults", "Data", "Big Screen Test"]
+    )
 
     fault_scale = DEFAULT_FAULT_SCALE
     fault_type = "CellCracking"
@@ -1300,7 +1302,7 @@ def main():
     show_bounding_boxes = False
 
     with output_tab:
-        target_col, panel_fault_col = st.columns([1, 1])
+        target_col, preview_col = st.columns([1, 1])
         with target_col:
             st.subheader("Fault Target")
             row_options = [row["id"] for row in all_rows]
@@ -1405,6 +1407,18 @@ def main():
                     f"({CUSTOM_MODULE_CELL_COLS}x{CUSTOM_MODULE_CELL_ROWS} module-cell grid)"
                 )
 
+        with preview_col:
+            st.subheader("Close Panel Workflow")
+            st.caption(
+                "Use this tab to choose the row, panel, module, and target cell. "
+                "Use Cell Faults to assign faults across the selected panel."
+            )
+            st.metric("Selected row", selected_row["label"])
+            st.metric("Selected panel", selected_cell.get("panel_number"))
+            st.metric("Selected cell", selected_cell["id"])
+
+    with cell_faults_tab:
+        left_spacer, panel_fault_col = st.columns([0.15, 0.85])
         with panel_fault_col:
             st.subheader("Selected Panel Fault Map")
             panel_fault_records = st.session_state.get("panel_cell_fault_records", [])
@@ -1663,22 +1677,6 @@ def main():
             f"{CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS} cells/module."
         )
     with output_tab:
-        st.subheader("Fault Summary")
-        summary_rows = fault_summary_rows(display_records)
-        if summary_rows:
-            st.table(summary_rows)
-        else:
-            st.caption("No faults selected.")
-
-        st.subheader("AI Classifier Check")
-        if big_screen_thermal is not None:
-            render_classifier_check(big_screen_thermal)
-        else:
-            st.caption("Switch Camera view to Thermal to run the classifier check without generating an extra thermal scene in RGB mode.")
-
-        st.subheader("Fault Table")
-        st.table(fault_table_rows(display_records))
-
         st.subheader("Close diagnostic module")
         selected_module_number, module_cell_count = render_module_zoom_map(
             pv_scene,
@@ -1697,6 +1695,23 @@ def main():
         st.subheader("Stable field context")
         st.image(pv_scene, use_container_width=True)
         st.caption("Same static scene framing as the main view; use the close diagnostic module for precise cell targeting.")
+
+    with data_tab:
+        st.subheader("Fault Summary")
+        summary_rows = fault_summary_rows(display_records)
+        if summary_rows:
+            st.table(summary_rows)
+        else:
+            st.caption("No faults selected.")
+
+        st.subheader("AI Classifier Check")
+        if big_screen_thermal is not None:
+            render_classifier_check(big_screen_thermal)
+        else:
+            st.caption("Switch Camera view to Thermal to run the classifier check without generating an extra thermal scene in RGB mode.")
+
+        st.subheader("Fault Table")
+        st.table(fault_table_rows(display_records))
 
         with st.expander("PV cell IDs and coordinates for selected row", expanded=True):
             st.table(
