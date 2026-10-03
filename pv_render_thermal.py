@@ -34,23 +34,35 @@ def temperature_to_rgb(temp):
 
 
 def thermal_terrain_settings(location_id):
+    location_id = normalize_location_id(location_id)
     settings = {
         "scenario_1": (146, 42),
+        "grass_open": (146, 42),
         "agri_rows": (150, 44),
+        "agri_field_new": (150, 44),
         "desert_farm": (108, 40),
+        "desert_track": (108, 40),
         "farm_lake": (118, 34),
+        "floating_water": (118, 34),
         "rooftop": (150, 38),
+        "rooftop_warehouse": (150, 38),
     }
     return settings.get(location_id, (146, 40))
 
 
 def thermal_overlay_alpha(location_id):
+    location_id = normalize_location_id(location_id)
     settings = {
         "desert_farm": 0.60,
+        "desert_track": 0.60,
         "scenario_1": 0.66,
+        "grass_open": 0.66,
         "agri_rows": 0.62,
+        "agri_field_new": 0.62,
         "farm_lake": 0.58,
+        "floating_water": 0.58,
         "rooftop": 0.66,
+        "rooftop_warehouse": 0.66,
     }
     return settings.get(location_id, 0.64)
 
@@ -878,29 +890,46 @@ def apply_thermal_fault(temp, cell, fault_type, scale):
     return temp
 
 
-def apply_sensor_model(temp, location_id):
-    """Make the scalar temperature field behave more like a low-res thermal camera."""
+def apply_sensor_model(temp, location_id, scene_distance="close"):
+    """Make the scalar temperature field behave like a thermal camera."""
     h, w = temp.shape
-    rng = np.random.default_rng(seed_for(location_id, "sensor-model"))
+    settings = thermal_scene_settings(scene_distance)
+    sensor_scale = float(settings["sensor_scale"])
+    sensor_blur = float(settings["sensor_blur"])
+    detail_strength = float(settings["detail_strength"])
+    rng = np.random.default_rng(seed_for(location_id, "sensor-model", scene_distance))
 
-    out = cv2.GaussianBlur(temp.astype(np.float32), (0, 0), 0.65)
+    out = cv2.GaussianBlur(temp.astype(np.float32), (0, 0), sensor_blur)
 
-    small = cv2.resize(out, (max(8, int(w * 0.72)), max(8, int(h * 0.72))), interpolation=cv2.INTER_AREA)
+    small = cv2.resize(
+        out,
+        (max(8, int(round(w * sensor_scale))), max(8, int(round(h * sensor_scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
     sh, sw = small.shape
     small += rng.normal(0, 1.6, small.shape).astype(np.float32)
-    small += rng.normal(0, 0.9, (1, sw)).astype(np.float32)
-    small += rng.normal(0, 0.6, (sh, 1)).astype(np.float32)
+    small += rng.normal(0, 0.9 * detail_strength, (1, sw)).astype(np.float32)
+    small += rng.normal(0, 0.6 * detail_strength, (sh, 1)).astype(np.float32)
 
     out = cv2.resize(small, (w, h), interpolation=cv2.INTER_CUBIC)
 
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    r2 = ((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2
-    out = out - r2 * 4.0
+    r2 = ((xx - w / 2.0) / max(1.0, w / 2.0)) ** 2 + ((yy - h / 2.0) / max(1.0, h / 2.0)) ** 2
+    out = out - r2 * (3.0 + 2.0 * detail_strength)
 
     return np.clip(out, 0, 255)
 
 
-def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None, fault_scale=DEFAULT_FAULT_SCALE, fault_records=None):
+def thermalize(
+    image,
+    location_id,
+    include_pv,
+    fault_cell=None,
+    fault_type=None,
+    fault_scale=DEFAULT_FAULT_SCALE,
+    fault_records=None,
+    scene_distance="close",
+):
     rgb = ImageOps.exif_transpose(image).convert("RGB")
     frame = np.array(rgb)
     gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
@@ -910,10 +939,15 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
 
     terrain_low, terrain_high = {
         "desert_farm": (8, 82),
+        "desert_track": (8, 82),
         "rooftop": (14, 92),
+        "rooftop_warehouse": (14, 92),
         "agri_rows": (12, 94),
+        "agri_field_new": (12, 94),
         "farm_lake": (10, 82),
+        "floating_water": (10, 82),
         "scenario_1": (12, 94),
+        "grass_open": (12, 94),
     }.get(location_id, (12, 94))
 
     temp = cv2.normalize(clahe, None, terrain_low, terrain_high, cv2.NORM_MINMAX).astype(np.float32)
@@ -945,14 +979,12 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
             if custom_layout_enabled():
                 module_count = custom_panels_per_row(location_id)
                 for layout in module_layouts_for_row(row, module_count):
-                    ox1, oy1, ox2, oy2 = layout["outer"]
-                    cv2.rectangle(
-                        shadow_mask,
-                        (ox1 + offset, oy2 - max(1, row_h // 12)),
-                        (min(BASE_SIZE[0] - 1, ox2 + offset), min(BASE_SIZE[1] - 1, oy2 + offset)),
-                        180,
-                        -1,
-                    )
+                    poly = module_visual_polygon(row, layout, "outer").copy()
+                    poly[:, 0] += offset
+                    poly[:, 1] += max(1, offset // 2)
+                    poly[:, 0] = np.clip(poly[:, 0], 0, BASE_SIZE[0] - 1)
+                    poly[:, 1] = np.clip(poly[:, 1], 0, BASE_SIZE[1] - 1)
+                    cv2.fillPoly(shadow_mask, [np.round(poly).astype(np.int32)], 180, cv2.LINE_AA)
             else:
                 cv2.rectangle(
                     shadow_mask,
@@ -963,7 +995,7 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
                 )
 
         shadow_mask = cv2.GaussianBlur(shadow_mask, (0, 0), 3.5).astype(np.float32) / 255.0
-        shadow_strength = 5 if location_id == "desert_farm" else 14
+        shadow_strength = 5 if location_id in {"desert_farm", "desert_track"} else 14
         temp -= shadow_mask * shadow_strength
 
         for row in panels(location_id):
@@ -977,10 +1009,15 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
 
             panel_min, panel_max = {
                 "desert_farm": (168, 200),
+                "desert_track": (168, 200),
                 "rooftop": (162, 194),
+                "rooftop_warehouse": (162, 194),
                 "agri_rows": (164, 196),
+                "agri_field_new": (164, 196),
                 "farm_lake": (158, 190),
+                "floating_water": (158, 190),
                 "scenario_1": (164, 196),
+                "grass_open": (164, 196),
             }.get(location_id, (164, 196))
 
             module_count = (
@@ -1018,14 +1055,31 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
                     mrng = np.random.default_rng(
                         seed_for(location_id, row["id"], layout["module_number"], "module-temp")
                     )
-                    panel_local[ly1:ly2, lx1:lx2] += float(mrng.normal(0, 3.0))
+                    module_h = max(1, ly2 - ly1)
+                    module_w = max(1, lx2 - lx1)
+                    yy = np.linspace(0.0, 1.0, module_h, dtype=np.float32)[:, None]
+                    xx = np.linspace(-1.0, 1.0, module_w, dtype=np.float32)[None, :]
+                    tilt_heat = np.linspace(-8.0, 10.5, module_h, dtype=np.float32)[:, None]
+                    center_heat = np.exp(-(xx ** 2 * 1.55 + (yy - 0.62) ** 2 * 3.8)) * 6.2
+                    edge_y = np.minimum(yy, 1.0 - yy)
+                    edge_x = np.minimum((xx + 1.0) / 2.0, (1.0 - xx) / 2.0)
+                    edge_cool = np.minimum(edge_y, edge_x)
+                    edge_cool = (1.0 - np.clip(edge_cool * 5.5, 0, 1)) * -2.4
+                    panel_local[ly1:ly2, lx1:lx2] += (
+                        float(mrng.normal(0, 2.0))
+                        + tilt_heat
+                        + center_heat
+                        + edge_cool
+                    )
 
             row_mask = np.zeros((row_h, row_w), dtype=np.uint8)
 
             if custom_layout_enabled():
                 for layout in module_layouts_for_row(row, module_count):
-                    ox1, oy1, ox2, oy2 = layout["outer"]
-                    cv2.rectangle(row_mask, (ox1 - x1, oy1 - y1), (ox2 - x1, oy2 - y1), 255, -1)
+                    poly = module_visual_polygon(row, layout, "outer").copy()
+                    poly[:, 0] -= x1
+                    poly[:, 1] -= y1
+                    cv2.fillPoly(row_mask, [np.round(poly).astype(np.int32)], 255, cv2.LINE_AA)
             else:
                 cv2.rectangle(row_mask, (0, 0), (row_w - 1, row_h - 1), 255, -1)
 
@@ -1038,15 +1092,24 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
 
             if custom_layout_enabled():
                 module_count = custom_panels_per_row(location_id)
-                draw_thermal_module_cell_seams(temp, row, module_count, panel_min, include_string_grid=True)
+                draw_thermal_module_cell_seams(
+                    temp,
+                    row,
+                    module_count,
+                    panel_min,
+                    include_string_grid=(scene_distance != "far"),
+                    scene_distance=scene_distance,
+                )
 
                 for layout in module_layouts_for_row(row, module_count):
-                    ox1, oy1, ox2, oy2 = layout["outer"]
+                    outer = module_visual_polygon(row, layout, "outer")
+                    left_top = tuple(np.round(outer[0]).astype(int))
+                    left_bottom = tuple(np.round(outer[3]).astype(int))
                     if not actual_panel_model_enabled():
                         draw_wavy_line(
                             temp,
-                            (ox1, oy1 + 1),
-                            (ox1, oy2 - 1),
+                            left_top,
+                            left_bottom,
                             edge_temp - 30,
                             1,
                             seed_for(row["id"], layout["module_number"], "thermal-gap-left"),
@@ -1063,7 +1126,14 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
                     seed_for(row["id"], "thermal-row-bottom"),
                     0.4,
                 )
-                draw_thermal_module_cell_seams(temp, row, module_count, panel_min, include_string_grid=True)
+                draw_thermal_module_cell_seams(
+                    temp,
+                    row,
+                    module_count,
+                    panel_min,
+                    include_string_grid=(scene_distance != "far"),
+                    scene_distance=scene_distance,
+                )
 
         if fault_records:
             for record in fault_records:
@@ -1084,10 +1154,15 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
         for row in panels(location_id):
             panel_min = {
                 "desert_farm": 168,
+                "desert_track": 168,
                 "rooftop": 162,
+                "rooftop_warehouse": 162,
                 "agri_rows": 164,
+                "agri_field_new": 164,
                 "farm_lake": 158,
+                "floating_water": 158,
                 "scenario_1": 164,
+                "grass_open": 164,
             }.get(location_id, 164)
 
             module_count = (
@@ -1100,9 +1175,16 @@ def thermalize(image, location_id, include_pv, fault_cell=None, fault_type=None,
                 )
             )
 
-            draw_thermal_module_cell_seams(temp, row, module_count, panel_min, include_string_grid=False)
+            draw_thermal_module_cell_seams(
+                temp,
+                row,
+                module_count,
+                panel_min,
+                include_string_grid=False,
+                scene_distance=scene_distance,
+            )
 
-    temp = apply_sensor_model(temp, location_id)
+    temp = apply_sensor_model(temp, location_id, scene_distance)
 
     dither = np.random.default_rng(seed_for(location_id, "thermal-dither")).uniform(
         -0.5,

@@ -1,61 +1,78 @@
 # Panel rows, modules, cells, layout caps, and target geometry.
 LOCATIONS = [
     {
-        "id": "scenario_1",
-        "name": "Location 1 - grass field",
-        "terrain": "Original scene rebuilt as realistic grass terrain with the OG PVs removed.",
-        "source": "scenario_1_terrain_balanced_topdown.png",
-        "pv_source": "scenario_1_og_pv.jpeg",
+        "id": "grass_open",
+        "name": "Open Grass Field",
+        "terrain": "Drone view of open grass terrain.",
+        "image": "bg_grass_open.png",
+        "source": "bg_grass_open.png",
+        "pv_source": "bg_grass_open.png",
         "crop": None,
         "blur": 0,
         "color": (1.00, 1.00, 1.00),
         "prebuilt": True,
     },
     {
-        "id": "agri_rows",
-        "name": "Location 2 - agricultural rows",
-        "terrain": "Real top-down green PV field reference prepared for realistic module-level inspection.",
-        "source": "agri_green_real_topdown_terrain_ai_filled.png",
-        "pv_source": "agri_green_real_topdown_with_pvs.png",
+        "id": "agri_field_new",
+        "name": "Agricultural Field",
+        "terrain": "Drone view of agricultural rows and service road.",
+        "image": "bg_agri_field_new.png",
+        "source": "bg_agri_field_new.png",
+        "pv_source": "bg_agri_field_new.png",
         "crop": None,
         "blur": 0,
         "color": (1.00, 1.00, 1.00),
         "prebuilt": True,
     },
     {
-        "id": "desert_farm",
-        "name": "Location 3 - desert solar farm",
-        "terrain": "Flat real desert reference from the supplied top-down PV image.",
-        "source": "desert_background_no_pvs_flat_rough_balanced.png",
-        "pv_source": "desert_user_reference_with_pvs.png",
+        "id": "desert_track",
+        "name": "Desert Utility Site",
+        "terrain": "Drone view of desert prepared land and road boundary.",
+        "image": "bg_desert_track.png",
+        "source": "bg_desert_track.png",
+        "pv_source": "bg_desert_track.png",
         "crop": None,
         "blur": 0,
         "color": (1.00, 1.00, 1.00),
         "prebuilt": True,
     },
     {
-        "id": "farm_lake",
-        "name": "Location 4 - offshore water platform",
-        "terrain": "Top-down offshore/water platform scene for floating PV placement.",
-        "source": "offshore_water_platform_topdown.png",
-        "pv_source": "offshore_water_platform_topdown.png",
+        "id": "rooftop_warehouse",
+        "name": "Warehouse Rooftop",
+        "terrain": "Drone view of large flat industrial rooftop.",
+        "image": "bg_rooftop_warehouse.png",
+        "source": "bg_rooftop_warehouse.png",
+        "pv_source": "bg_rooftop_warehouse.png",
         "crop": None,
         "blur": 0,
         "color": (1.00, 1.00, 1.00),
         "prebuilt": True,
     },
     {
-        "id": "rooftop",
-        "name": "Location 5 - real rooftop",
-        "terrain": "Cleaned real rooftop reference with the old roof panels removed; OG PVs are reinstalled on the roof.",
-        "source": "rooftop_background_balanced_topdown.png",
-        "pv_source": "rooftop_with_og_pvs_center_pack_tool.png",
+        "id": "floating_water",
+        "name": "Floating PV Water Site",
+        "terrain": "Drone view of water platform site.",
+        "image": "bg_floating_water.png",
+        "source": "bg_floating_water.png",
+        "pv_source": "bg_floating_water.png",
         "crop": None,
         "blur": 0,
         "color": (1.00, 1.00, 1.00),
         "prebuilt": True,
     },
 ]
+
+LOCATION_ALIASES = {
+    "scenario_1": "grass_open",
+    "agri_rows": "agri_field_new",
+    "desert_farm": "desert_track",
+    "farm_lake": "floating_water",
+    "rooftop": "rooftop_warehouse",
+}
+
+
+def normalize_location_id(location_id):
+    return LOCATION_ALIASES.get(str(location_id), location_id)
 
 # Visible PV rows in the OG scenario image. These drive masking, click targets, and fault placement.
 ROW_DEFS = [
@@ -88,62 +105,43 @@ AGRI_GREEN_ROW_DEFS = [
 ]
 
 LAYOUT_CAPS = {
-    # Matrix evidence is mostly UAV/drone thermal/RGB module/cell inspection.
-    # The crack/hotspot dataset is close-up 640px imagery, so generated layouts should use fewer,
-    # larger modules instead of full-farm miniatures.
-    "scenario_1": {"rows": 3, "modules": 5, "module_height": 112},
-    "agri_rows": {"rows": 3, "modules": 5, "module_height": 112},
-    "desert_farm": {"rows": 3, "modules": 5, "module_height": 108},
-    "farm_lake": {"rows": 3, "modules": 4, "module_height": 96},
-    # Rooftop needs shorter modules so 3 generated rows fit without merging.
-    "rooftop": {"rows": 3, "modules": 5, "module_height": 64},
+    "grass_open": {"rows": 4, "modules": 6, "module_height": 112},
+    "agri_field_new": {"rows": 4, "modules": 6, "module_height": 112},
+    "desert_track": {"rows": 4, "modules": 6, "module_height": 108},
+    "rooftop_warehouse": {"rows": 4, "modules": 6, "module_height": 98},
+    "floating_water": {"rows": 4, "modules": 6, "module_height": 104},
 }
 
 CAP_JUSTIFICATIONS = {
-    "scenario_1": (
-        "Cap: 3 rows x 5 modules. The default stays close-up, but extra modules are available "
-        "when you need a denser row without making the cells unusably small."
-    ),
-    "agri_rows": (
-        "Cap: 3 rows x 5 modules. Agrivoltaic rows keep visible alleys while allowing a longer "
-        "module row when needed."
-    ),
-    "desert_farm": (
-        "Cap: 3 rows x 5 modules. Desert imagery is kept at inspection scale while still allowing "
-        "more modules per row."
-    ),
-    "farm_lake": (
-        "Cap: 3 rows x 4 modules. The offshore platform has a smaller usable inner water square, so "
-        "the module count is lower than the land scenes."
-    ),
-    "rooftop": (
-        "Cap: 3 rows x 5 modules. Rooftop arrays stay close-up by default, with extra modules "
-        "available when you want a denser row."
-    ),
+    "grass_open": "Cap: 4 rows x 6 panels for open grass-field placement.",
+    "agri_field_new": "Cap: 4 rows x 6 panels to retain visible agricultural alleys.",
+    "desert_track": "Cap: 4 rows x 6 panels for the desert utility-site layout.",
+    "rooftop_warehouse": "Cap: 4 rows x 6 panels for the warehouse rooftop layout.",
+    "floating_water": "Cap: 4 rows x 6 panels for the floating-water platform layout.",
 }
 
 CUSTOM_LAYOUT_X_LIMITS = {
     # Keep max custom layouts inside the usable physical area of each source.
-    "farm_lake": (226, 539),  # inner water square, away from the concrete frame
-    "rooftop": (199, 609),    # user-marked black-box roof target zone
+    "floating_water": (226, 539),  # inner floating-water target area, away from the outer raft frame
+    "rooftop_warehouse": (199, 609),    # clear rooftop target zone
 }
 
 CUSTOM_LAYOUT_Y_LIMITS = {
     # Spread generated rows through a realistic usable zone instead of copying thin OG row strips.
-    "farm_lake": (90, 310),
-    "rooftop": (80, 310),
+    "floating_water": (90, 310),
+    "rooftop_warehouse": (80, 310),
 }
 
 LOCATION_PANEL_DEFS = {
-    "desert_farm": DESERT_USER_ROW_DEFS,
-    "agri_rows": AGRI_GREEN_ROW_DEFS,
-    "farm_lake": [
+    "desert_track": DESERT_USER_ROW_DEFS,
+    "agri_field_new": AGRI_GREEN_ROW_DEFS,
+    "floating_water": [
         {"row": 1, "x1": 234, "y1": 100, "x2": 506, "y2": 128, "cols": 1},
         {"row": 2, "x1": 234, "y1": 158, "x2": 506, "y2": 186, "cols": 1},
         {"row": 3, "x1": 234, "y1": 216, "x2": 506, "y2": 244, "cols": 1},
         {"row": 4, "x1": 234, "y1": 274, "x2": 506, "y2": 302, "cols": 1},
     ],
-    "rooftop": ROOFTOP_ROW_DEFS,
+    "rooftop_warehouse": ROOFTOP_ROW_DEFS,
 }
 
 
@@ -179,7 +177,7 @@ def custom_layout_enabled():
 
 
 def row_prefix(location_id):
-    return "RT" if location_id == "rooftop" else "R"
+    return "RT" if location_id == "rooftop_warehouse" else "R"
 
 
 def layout_query_values(location_id=None):
@@ -199,6 +197,9 @@ def navigation_params(location_id, view, selected_pv, selected_cell, **overrides
         "selected_pv": selected_pv,
         "selected_cell": selected_cell,
     }
+    current_inspect = qp_get("inspect", None)
+    if current_inspect in ("far", "close"):
+        params["inspect"] = current_inspect
     params.update(layout_query_values(location_id))
     params.update(overrides)
     return params
@@ -425,15 +426,15 @@ def custom_row_count(location_id=None):
 
 
 def default_panels_per_row(location_id=None):
-    if location_id == "scenario_1":
+    if location_id == "grass_open":
         return 2
-    if location_id == "agri_rows":
+    if location_id == "agri_field_new":
         return 2
-    if location_id == "desert_farm":
+    if location_id == "desert_track":
         return 2
-    if location_id == "rooftop":
+    if location_id == "rooftop_warehouse":
         return 2
-    if location_id == "farm_lake":
+    if location_id == "floating_water":
         return 2
     base_rows = base_row_defs_for_location(location_id)
     avg_width = sum(row["x2"] - row["x1"] for row in base_rows) / max(1, len(base_rows))
@@ -515,6 +516,59 @@ def module_layouts_for_row(row, module_count):
     return shifted
 
 
+def panel_module_layouts_for_row(row, panel_count):
+    """Return module boxes arranged as 2x2 module groups inside each solar panel."""
+    width = max(1, row["x2"] - row["x1"])
+    height = max(1, row["y2"] - row["y1"])
+    panel_count = max(1, int(panel_count))
+    module_gap = max(1, int(round(height * CUSTOM_MODULE_GAP_RATIO)))
+    panel_gap = max(1, int(round(height * CUSTOM_MODULE_GAP_RATIO * 1.35)))
+    module_h = max(
+        4,
+        int((height - module_gap) / max(1, SOLAR_PANEL_MODULE_ROWS)),
+    )
+    module_w = max(4, int(round(module_h * CUSTOM_MODULE_ASPECT_RATIO)))
+    panel_w = module_w * SOLAR_PANEL_MODULE_COLS + module_gap
+    actual_row_w = panel_count * panel_w + max(0, panel_count - 1) * panel_gap
+    if actual_row_w > width:
+        scale = width / max(1, actual_row_w)
+        module_w = max(4, int(module_w * scale))
+        module_h = max(4, int(module_h * scale))
+        module_gap = max(1, int(module_gap * scale))
+        panel_gap = max(1, int(panel_gap * scale))
+        panel_w = module_w * SOLAR_PANEL_MODULE_COLS + module_gap
+        actual_row_w = panel_count * panel_w + max(0, panel_count - 1) * panel_gap
+
+    start_x = row["x1"] + max(0, int(round((width - actual_row_w) / 2)))
+    start_y = row["y1"] + max(0, int(round((height - (module_h * SOLAR_PANEL_MODULE_ROWS + module_gap)) / 2)))
+    frame = max(1, int(round(min(module_w, module_h) * 0.055)))
+    layouts = []
+    for panel_idx in range(panel_count):
+        panel_x = start_x + panel_idx * (panel_w + panel_gap)
+        for module_row in range(SOLAR_PANEL_MODULE_ROWS):
+            for module_col in range(SOLAR_PANEL_MODULE_COLS):
+                module_number = panel_idx * SOLAR_PANEL_MODULES + module_row * SOLAR_PANEL_MODULE_COLS + module_col + 1
+                ox1 = panel_x + module_col * (module_w + module_gap)
+                oy1 = start_y + module_row * (module_h + module_gap)
+                ox2 = min(row["x2"], ox1 + module_w)
+                oy2 = min(row["y2"], oy1 + module_h)
+                if ox2 - ox1 < 4 or oy2 - oy1 < 4:
+                    continue
+                layouts.append(
+                    {
+                        "module_number": module_number,
+                        "outer": (int(ox1), int(oy1), int(ox2), int(oy2)),
+                        "inner": (
+                            int(ox1 + frame),
+                            int(oy1 + frame),
+                            int(ox2 - frame),
+                            int(oy2 - frame),
+                        ),
+                    }
+                )
+    return layouts
+
+
 def dynamic_custom_row_bounds(row_x1, row_x2, center_y, step, module_count, location_id=None):
     source_center_x = (row_x1 + row_x2) / 2
     preferred_height = preferred_custom_module_height(location_id)
@@ -582,7 +636,7 @@ def custom_row_defs_for_location(location_id=None):
         y1, y2 = CUSTOM_LAYOUT_Y_LIMITS[location_id]
     total_height = max(1, y2 - y1)
     step = total_height / row_count
-    og_style_locations = {"scenario_1", "agri_rows"}
+    og_style_locations = {"grass_open", "agri_field_new"}
     guide_rows = sorted(base_rows, key=lambda item: (item["y1"] + item["y2"]) / 2)
 
     def interpolated_edge(edge_name, normalized_y):
@@ -673,13 +727,15 @@ def cells_for_row(location_id, row_id):
     if annotated_cells:
         return annotated_cells
     if custom_layout_enabled():
-        modules = custom_panels_per_row(location_id)
+        panel_count = custom_panels_per_row(location_id)
         module_cell_cols = CUSTOM_MODULE_CELL_COLS
         module_cell_rows = CUSTOM_MODULE_CELL_ROWS
-        layouts = module_layouts_for_row(row, modules)
+        layouts = panel_module_layouts_for_row(row, panel_count)
         items = []
         for layout in layouts:
             module_number = layout["module_number"]
+            panel_number = (module_number - 1) // SOLAR_PANEL_MODULES + 1
+            module_number_in_panel = (module_number - 1) % SOLAR_PANEL_MODULES + 1
             ix1, iy1, ix2, iy2 = layout["inner"]
             module_w = max(1, ix2 - ix1)
             module_h = max(1, iy2 - iy1)
@@ -688,7 +744,10 @@ def cells_for_row(location_id, row_id):
                     pv_cell_number = len(items) + 1
                     module_cell_number = (module_cell_row - 1) * module_cell_cols + module_cell_col
                     cell_id = f"{row['id']}-C{pv_cell_number:03d}"
-                    label = f"{row['label']} PV cell {pv_cell_number} (module {module_number}, cell {module_cell_number})"
+                    label = (
+                        f"{row['label']} PV cell {pv_cell_number} "
+                        f"(panel {panel_number}, module {module_number_in_panel}, cell {module_cell_number})"
+                    )
                     x1 = int(ix1 + (module_cell_col - 1) * module_w / module_cell_cols)
                     x2 = int(ix1 + module_cell_col * module_w / module_cell_cols)
                     y1 = int(iy1 + (module_cell_row - 1) * module_h / module_cell_rows)
@@ -704,9 +763,10 @@ def cells_for_row(location_id, row_id):
                             "row": row["row"],
                             "cell_row": module_cell_row,
                             "cell_col": (module_number - 1) * module_cell_cols + module_cell_col,
-                            "panel_number": module_number,
-                            "panels_in_row": modules,
+                            "panel_number": panel_number,
+                            "panels_in_row": panel_count,
                             "module_number": module_number,
+                            "module_number_in_panel": module_number_in_panel,
                             "module_cell_row": module_cell_row,
                             "module_cell_col": module_cell_col,
                             "module_cell_number": module_cell_number,

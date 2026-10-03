@@ -5,7 +5,7 @@ def terrain_layer(location_id):
 
     if location.get("prebuilt"):
         terrain = base
-    elif location_id == "scenario_1":
+    elif location_id == "grass_open":
         original = load_rgb("scenario_1_og_pv.jpeg")
         blurred = original.filter(ImageFilter.GaussianBlur(location["blur"]))
         terrain = original.copy()
@@ -164,7 +164,7 @@ def draw_cell_string_dot_texture(surface, ix1, iy1, ix2, iy2, seed, thermal=Fals
 
     if thermal:
         dark_target = max(18, panel_min - 86)
-        dark_alpha = min(1.0, 1.05 * strength)
+        dark_alpha = min(0.42, 0.42 * strength)
     else:
         dark_target = (28, 42, 54)
         dark_alpha = 0.026 * strength
@@ -190,6 +190,45 @@ def draw_cell_string_dot_texture(surface, ix1, iy1, ix2, iy2, seed, thermal=Fals
     for px in xs:
         for py in ys:
             _blend_point(surface, px, py, dark_target, dark_alpha)
+
+
+def visual_square_lattice_counts(ix1, iy1, ix2, iy2):
+    """Choose square-ish visual tile counts without changing selectable cells."""
+    width = max(1, ix2 - ix1)
+    height = max(1, iy2 - iy1)
+    pitch = float(np.clip(min(width, height) / 3.15, 4.0, 9.0))
+    cols = int(np.clip(round(width / pitch), 5, 14))
+    rows = int(np.clip(round(height / pitch), 3, 9))
+    return cols, rows
+
+
+def draw_projected_square_lattice(surface, quad, ix1, iy1, ix2, iy2, seed, thermal=False, panel_min=150):
+    """Draw the visible cell-tile lattice seen in real UAV thermal module imagery."""
+    cols, rows = visual_square_lattice_counts(ix1, iy1, ix2, iy2)
+    if cols < 2 or rows < 2:
+        return
+
+    if thermal:
+        value = max(8, panel_min - 74)
+        width = 1
+        opacity = 0.72
+        blur = 0.38
+    else:
+        value = (36, 50, 60)
+        width = 1
+        opacity = 0.20
+        blur = 0.30
+
+    for idx in range(1, cols):
+        u = idx / cols
+        p1 = tuple(np.round(quad_point(quad, u, 0.02)).astype(int))
+        p2 = tuple(np.round(quad_point(quad, u, 0.98)).astype(int))
+        blend_wavy_line(surface, p1, p2, value, width, seed_for(seed, "visual-lattice-v", idx), 0.10, opacity, blur)
+    for idx in range(1, rows):
+        v = idx / rows
+        p1 = tuple(np.round(quad_point(quad, 0.02, v)).astype(int))
+        p2 = tuple(np.round(quad_point(quad, 0.98, v)).astype(int))
+        blend_wavy_line(surface, p1, p2, value, width, seed_for(seed, "visual-lattice-h", idx), 0.10, opacity, blur)
 
 
 def source_panel_crop(source, source_row, left_ratio, right_ratio):
@@ -312,9 +351,9 @@ def harmonize_patch_texture(rgb, terrain_crop, seed, edge_strength=0.11):
 def mute_bright_panel_lines(rgb):
     arr = np.array(rgb.convert("RGB"), dtype=np.float32)
     gray = cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32)
-    bright = gray > np.percentile(gray, 92)
+    bright = gray > np.percentile(gray, 98)
     target = np.array([36, 46, 58], dtype=np.float32)
-    arr[bright] = arr[bright] * 0.82 + target * 0.18
+    arr[bright] = arr[bright] * 0.92 + target * 0.08
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGB")
 
 
@@ -539,56 +578,96 @@ def blend_wavy_line(image, p1, p2, value, width, seed, amplitude=0.75, opacity=0
         image[:] = image.astype(np.float32) * (1.0 - mask[..., None]) + color * mask[..., None]
 
 
-def draw_thermal_module_cell_seams(temp, row, module_count, panel_min, include_string_grid=True):
-    """Dark thermal-camera seams for each controlled PV module cell."""
-    module_gap_temp = max(4, panel_min - 112)
-    cell_gap_temp = max(8, panel_min - 82)
-    subtle_rim_temp = max(10, panel_min - 64)
+THERMAL_SCENE_SETTINGS = {
+    "far": {
+        "sensor_scale": 0.52,
+        "sensor_blur": 1.20,
+        "detail_strength": 0.55,
+        "grid_strength": 0.55,
+        "grid_width": 1,
+        "seam_temp_offset": -13.0,
+    },
+    "close": {
+        "sensor_scale": 0.86,
+        "sensor_blur": 0.48,
+        "detail_strength": 1.00,
+        "grid_strength": 1.00,
+        "grid_width": 1,
+        "seam_temp_offset": -20.0,
+    },
+}
+
+
+def thermal_scene_settings(scene_distance):
+    value = "close" if scene_distance is None else str(scene_distance).strip().lower()
+    if value in {"far", "wide", "distant", "overview", "long"}:
+        return THERMAL_SCENE_SETTINGS["far"]
+    return THERMAL_SCENE_SETTINGS["close"]
+
+
+def draw_thermal_module_cell_seams(temp, row, module_count, panel_min, include_string_grid=True, scene_distance="close"):
+    """Thermal module/cell geometry aligned to the actual module quadrilateral."""
+    if temp is None:
+        return
+
+    settings = thermal_scene_settings(scene_distance)
+    grid_strength = float(settings["grid_strength"])
+    seam_width = max(1, int(settings["grid_width"]))
+    module_count = max(1, int(module_count))
+    cols = max(1, int(CUSTOM_MODULE_CELL_COLS))
+    rows = max(1, int(CUSTOM_MODULE_CELL_ROWS))
+    seam_value = float(panel_min + float(settings["seam_temp_offset"]) * grid_strength)
+    frame_value = float(panel_min - 44.0 * grid_strength)
+
+    if not include_string_grid:
+        cols = 1
+        rows = 1
+
+    def bilinear_point(corners, u, v):
+        tl, tr, br, bl = corners
+        top = tl * (1.0 - u) + tr * u
+        bottom = bl * (1.0 - u) + br * u
+        return top * (1.0 - v) + bottom * v
+
+    def draw_segment(p1, p2, value, width):
+        h, w = temp.shape[:2]
+        x1 = int(round(float(p1[0])))
+        y1 = int(round(float(p1[1])))
+        x2 = int(round(float(p2[0])))
+        y2 = int(round(float(p2[1])))
+        if max(x1, x2) < 0 or min(x1, x2) >= w or max(y1, y2) < 0 or min(y1, y2) >= h:
+            return
+        cv2.line(temp, (x1, y1), (x2, y2), float(value), max(1, width), cv2.LINE_AA)
 
     for layout in module_layouts_for_row(row, module_count):
-        ox1, oy1, ox2, oy2 = layout["outer"]
-        ix1, iy1, ix2, iy2 = layout["inner"]
-        cell_w = max(1, ix2 - ix1)
-        cell_h = max(1, iy2 - iy1)
-        seam_w = max(1, min(2, int(round(min(cell_w / CUSTOM_MODULE_CELL_COLS, cell_h / CUSTOM_MODULE_CELL_ROWS) * 0.16))))
-        frame_w = max(seam_w + 2, min(5, int(round(max(1, oy2 - oy1) * 0.13))))
+        outer = np.asarray(module_visual_polygon(row, layout, "outer"), dtype=np.float32)
+        if outer.shape[0] < 4:
+            continue
+        if outer.shape[0] > 4:
+            x_min = float(np.min(outer[:, 0]))
+            x_max = float(np.max(outer[:, 0]))
+            y_min = float(np.min(outer[:, 1]))
+            y_max = float(np.max(outer[:, 1]))
+            outer = np.array([[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]], dtype=np.float32)
+        else:
+            outer = outer[:4]
 
-        # Module frame/gap: colder than the cell separators, as seen in UAV IR
-        # crops where rows have dark purple physical gaps.
-        cv2.rectangle(temp, (ox1, oy1), (ox2, oy2), module_gap_temp, frame_w, cv2.LINE_AA)
-        cv2.rectangle(temp, (ix1, iy1), (ix2, iy2), subtle_rim_temp, 1, cv2.LINE_AA)
-        if include_string_grid:
-            draw_cell_string_dot_texture(
-                temp,
-                ix1,
-                iy1,
-                ix2,
-                iy2,
-                seed_for(row["id"], layout["module_number"], "thermal-string-dot-texture"),
-                thermal=True,
-                panel_min=panel_min,
-                strength=0.90,
-            )
-
-        for idx in range(1, CUSTOM_MODULE_CELL_COLS):
-            x = int(ix1 + idx * cell_w / CUSTOM_MODULE_CELL_COLS)
-            cv2.line(temp, (x, iy1), (x, iy2), cell_gap_temp, seam_w, cv2.LINE_AA)
-        for idx in range(1, CUSTOM_MODULE_CELL_ROWS):
-            y = int(iy1 + idx * cell_h / CUSTOM_MODULE_CELL_ROWS)
-            cv2.line(temp, (ix1, y), (ix2, y), cell_gap_temp, seam_w, cv2.LINE_AA)
+        cv2.polylines(temp, [np.round(outer).astype(np.int32)], True, frame_value, seam_width, cv2.LINE_AA)
         if not include_string_grid:
-            draw_cell_string_dot_texture(
-                temp,
-                ix1,
-                iy1,
-                ix2,
-                iy2,
-                seed_for(row["id"], layout["module_number"], "thermal-string-node-overlay"),
-                thermal=True,
-                panel_min=panel_min,
-                strength=0.95,
-                nodes_only=True,
-            )
+            continue
+
+        for col in range(1, cols):
+            u = col / float(cols)
+            draw_segment(bilinear_point(outer, u, 0.0), bilinear_point(outer, u, 1.0), seam_value, seam_width)
+
+        for row_idx in range(1, rows):
+            v = row_idx / float(rows)
+            draw_segment(bilinear_point(outer, 0.0, v), bilinear_point(outer, 1.0, v), seam_value, seam_width)
+
+        string_count = max(1, min(cols, 6))
+        for string_idx in range(1, string_count):
+            u = string_idx / float(string_count)
+            draw_segment(bilinear_point(outer, u, 0.0), bilinear_point(outer, u, 1.0), seam_value - 3.0, seam_width)
 
 
 def jittered_module_polygon(box, seed, max_jitter=1.2):
@@ -604,6 +683,76 @@ def jittered_module_polygon(box, seed, max_jitter=1.2):
         ],
         dtype=np.int32,
     )
+
+
+def module_visual_polygon(row, layout, variant="outer"):
+    """Use only slight perspective because the background is a near-nadir UAV view."""
+    ox1, oy1, ox2, oy2 = layout[variant]
+    w = max(1, ox2 - ox1)
+    h = max(1, oy2 - oy1)
+    rng = np.random.default_rng(seed_for(row["id"], layout["module_number"], "visual-module-polygon", variant))
+
+    # Keep the plan-view footprint essentially rectangular; only a faint foreshortening
+    # is appropriate for a near-vertical camera looking at slightly tilted modules.
+    tilt_deg = float(rng.uniform(6.0, 12.0))
+    projected_depth_loss = h * (1.0 - np.cos(np.radians(tilt_deg)))
+    top_lift = float(np.clip(projected_depth_loss * 0.70, 0.0, max(0.25, h * 0.035)))
+    bottom_drop = float(np.clip(projected_depth_loss * 0.08, 0.0, max(0.15, h * 0.008)))
+    inset = float(rng.uniform(0.0, max(0.12, w * 0.0015)))
+    perspective_inset = float(np.clip(w * 0.008, 0.25, 1.5))
+
+    pts = np.array(
+        [
+            [ox1 + inset + perspective_inset, oy1 + top_lift],
+            [ox2 - inset - perspective_inset, oy1 + top_lift],
+            [ox2 - inset, oy2 + bottom_drop],
+            [ox1 + inset, oy2 + bottom_drop],
+        ],
+        dtype=np.float32,
+    )
+    pts[:, 0] = np.clip(pts[:, 0], 0, BASE_SIZE[0] - 1)
+    pts[:, 1] = np.clip(pts[:, 1], 0, BASE_SIZE[1] - 1)
+    return pts
+
+def module_visual_polygon_local(row, layout, variant="outer"):
+    pts = module_visual_polygon(row, layout, variant)
+    ox1, oy1, _, _ = layout[variant]
+    local = pts.copy()
+    local[:, 0] -= ox1
+    local[:, 1] -= oy1
+    return local
+
+
+def quad_point(quad, u, v):
+    top = quad[0] * (1 - u) + quad[1] * u
+    bottom = quad[3] * (1 - u) + quad[2] * u
+    return top * (1 - v) + bottom * v
+
+
+def warp_rgba_to_polygon(patch, polygon, canvas_size=BASE_SIZE):
+    src = np.array(patch.convert("RGBA"))
+    ph, pw = src.shape[:2]
+    if pw < 2 or ph < 2:
+        return np.zeros((canvas_size[1], canvas_size[0], 4), dtype=np.uint8)
+    src_quad = np.array([[0, 0], [pw - 1, 0], [pw - 1, ph - 1], [0, ph - 1]], dtype=np.float32)
+    transform = cv2.getPerspectiveTransform(src_quad, polygon.astype(np.float32))
+    return cv2.warpPerspective(
+        src,
+        transform,
+        canvas_size,
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0, 0),
+    )
+
+
+def alpha_composite_rgba_array(base_rgb, overlay_rgba):
+    alpha = overlay_rgba[:, :, 3:4].astype(np.float32) / 255.0
+    if not np.any(alpha > 0):
+        return base_rgb
+    base = base_rgb.astype(np.float32)
+    over = overlay_rgba[:, :, :3].astype(np.float32)
+    return np.clip(base * (1 - alpha) + over * alpha, 0, 255).astype(np.uint8)
 
 
 def procedural_panel_row(size, module_count, seed, location_id=None, source_textures=None):
@@ -920,7 +1069,7 @@ def redraw_visible_module_geometry(panel, module_count):
 
 def apply_mounting_hardware(output_rgb, row, module_count, seed, location_id=None):
     """Draw location-appropriate racking without turning the scene into a diagram."""
-    if location_id in {"farm_lake", "rooftop"}:
+    if location_id in {"floating_water", "rooftop_warehouse"}:
         return output_rgb
     layouts = module_layouts_for_row(row, module_count)
     if not layouts:
@@ -951,11 +1100,11 @@ def apply_mounting_hardware(output_rgb, row, module_count, seed, location_id=Non
     x_end = clamp(right + rail_pad, x_start + 1, w - 1)
 
     style = {
-        "scenario_1": "ground",
-        "agri_rows": "ground",
-        "desert_farm": "ground",
-        "farm_lake": "floating",
-        "rooftop": "roof",
+        "grass_open": "ground",
+        "agri_field_new": "ground",
+        "desert_track": "ground",
+        "floating_water": "floating",
+        "rooftop_warehouse": "roof",
     }.get(location_id, "ground")
 
     for y in rail_ys:
@@ -1013,7 +1162,6 @@ def composite_panel_row(output_rgb, row, module_count, seed, location_id=None, s
     x1, y1 = clamp(x1, 0, BASE_SIZE[0] - 1), clamp(y1, 0, BASE_SIZE[1] - 1)
     x2, y2 = clamp(x2, x1 + 1, BASE_SIZE[0]), clamp(y2, y1 + 1, BASE_SIZE[1])
     row_w, row_h = x2 - x1, y2 - y1
-    terrain_crop = output_rgb[y1:y2, x1:x2].copy()
     source_textures = []
     if source is not None and source_row is not None:
         for module_number in range(1, module_count + 1):
@@ -1023,40 +1171,85 @@ def composite_panel_row(output_rgb, row, module_count, seed, location_id=None, s
                 crop = None
             if crop is not None and crop.width >= 8 and crop.height >= 6:
                 source_textures.append(np.array(crop))
-    panel = procedural_panel_row((row_w, row_h), module_count, seed, location_id, source_textures=source_textures)
-    panel = color_match_array_to_background(panel, terrain_crop)
-    panel = cv2.convertScaleAbs(panel, alpha=1.08, beta=1)
-    if not actual_panel_model_enabled():
-        panel = redraw_visible_module_geometry(panel, module_count)
+    # Prefer actual photographed PV crops from the texture bank; use source-row crops only as fallback.
+    rgb_patch_bank = []
+    try:
+        rgb_patch_bank = real_panel_textures(texture_group_for_location(location_id))
+        if not rgb_patch_bank:
+            rgb_patch_bank = actual_panel_model_textures()
+    except Exception:
+        rgb_patch_bank = []
+
     layouts = module_layouts_for_row(row, module_count)
     output_rgb = apply_mounting_hardware(output_rgb, row, module_count, seed_for(seed, "mounting-hardware"), location_id)
+    terrain_image = Image.fromarray(output_rgb.copy()).convert("RGB")
+    row_cells = cells_for_row(location_id, row["id"]) if location_id else []
 
-    # Ground contact shadow: offset slightly down/right, blurred, and applied
-    # before compositing the glass surface.
+    # Ground contact shadow: mostly below the near edge, so modules read as
+    # tilted upward on racks instead of flat stickers.
     shadow = np.zeros(output_rgb.shape[:2], dtype=np.uint8)
-    offset = max(1, int(row_h * 0.13))
+    offset = max(1, int(row_h * 0.045))
     for layout in layouts:
-        ox1, oy1, ox2, oy2 = layout["outer"]
-        sx1 = clamp(ox1 + offset, 0, BASE_SIZE[0] - 1)
-        sy1 = clamp(oy1 + max(1, offset // 2), 0, BASE_SIZE[1] - 1)
-        sx2 = clamp(ox2 + offset, sx1 + 1, BASE_SIZE[0])
-        sy2 = clamp(oy2 + offset, sy1 + 1, BASE_SIZE[1])
-        cv2.rectangle(shadow, (sx1, sy1), (sx2, sy2), 180, -1)
-    shadow = cv2.GaussianBlur(shadow, (0, 0), max(1.6, row_h * 0.22)).astype(np.float32) / 255.0
-    output_rgb[:] = np.clip(output_rgb.astype(np.float32) * (1.0 - shadow[..., None] * 0.18), 0, 255).astype(np.uint8)
+        poly = module_visual_polygon(row, layout, "outer").copy()
+        poly[:, 1] += offset
+        poly[:, 0] = np.clip(poly[:, 0], 0, BASE_SIZE[0] - 1)
+        poly[:, 1] = np.clip(poly[:, 1], 0, BASE_SIZE[1] - 1)
+        cv2.fillPoly(shadow, [np.round(poly).astype(np.int32)], 180, cv2.LINE_AA)
+    shadow = cv2.GaussianBlur(shadow, (0, 0), max(0.8, row_h * 0.08)).astype(np.float32) / 255.0
+    output_rgb[:] = np.clip(output_rgb.astype(np.float32) * (1.0 - shadow[..., None] * 0.10), 0, 255).astype(np.uint8)
 
-    mask = np.zeros(output_rgb.shape[:2], dtype=np.uint8)
     for layout in layouts:
         ox1, oy1, ox2, oy2 = layout["outer"]
-        cv2.rectangle(mask, (ox1, oy1), (ox2, oy2), 255, -1)
-    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-    feather = max(2.0, row_h * 0.12)
-    alpha = np.clip(dist / feather, 0, 1).astype(np.float32)
-    edge_noise = cv2.GaussianBlur(np.random.default_rng(seed).normal(1.0, 0.025, alpha.shape).astype(np.float32), (0, 0), 0.7)
-    alpha = np.clip(alpha * edge_noise, 0, 1)
-    local_alpha = alpha[y1:y2, x1:x2][..., None]
-    blended = terrain_crop.astype(np.float32) * (1.0 - local_alpha) + panel.astype(np.float32) * local_alpha
-    output_rgb[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
+        module_cells = [
+            cell for cell in row_cells
+            if cell.get("module_number") == layout["module_number"]
+        ]
+        source_patch = None
+        if rgb_patch_bank:
+            texture_idx = seed_for(seed, layout["module_number"], "photo-patch-choice") % len(rgb_patch_bank)
+            source_patch = Image.fromarray(np.asarray(rgb_patch_bank[texture_idx]).astype(np.uint8)).convert("RGB")
+        elif source_textures:
+            source_patch = Image.fromarray(source_textures[(layout["module_number"] - 1) % len(source_textures)]).convert("RGB")
+        patch = draw_realistic_module_patch(
+            (max(4, ox2 - ox1), max(4, oy2 - oy1)),
+            seed_for(seed, layout["module_number"], "module-patch"),
+            terrain_image,
+            (ox1, oy1, ox2, oy2),
+            module_cells,
+            source_patch=source_patch,
+            location_id=location_id,
+        )
+        polygon = module_visual_polygon(row, layout, "outer")
+        warped = warp_rgba_to_polygon(patch, polygon)
+        output_rgb = alpha_composite_rgba_array(output_rgb, warped)
+        inner_polygon = module_visual_polygon(row, layout, "inner")
+        if source_patch is None:
+            draw_projected_square_lattice(
+                output_rgb,
+                inner_polygon,
+                ox1,
+                oy1,
+                ox2,
+                oy2,
+                seed_for(seed, layout["module_number"], "rgb-square-lattice"),
+                thermal=False,
+            )
+
+        near_left = tuple(np.round(polygon[3]).astype(int))
+        near_right = tuple(np.round(polygon[2]).astype(int))
+        far_left = tuple(np.round(polygon[0]).astype(int))
+        far_right = tuple(np.round(polygon[1]).astype(int))
+        if source_patch is None:
+            # Procedural fallback only: photo patches already contain their physical module frame.
+            edge_w = 1
+            drop = max(1, int(round((oy2 - oy1) * 0.012)))
+            side_left = (near_left[0], min(BASE_SIZE[1] - 1, near_left[1] + drop))
+            side_right = (near_right[0], min(BASE_SIZE[1] - 1, near_right[1] + drop))
+            side_face = np.array([near_left, near_right, side_right, side_left], dtype=np.int32)
+            cv2.fillPoly(output_rgb, [side_face], (30, 39, 48), cv2.LINE_AA)
+            cv2.line(output_rgb, side_left, side_right, (18, 26, 34), 1, cv2.LINE_AA)
+            cv2.line(output_rgb, near_left, near_right, (24, 34, 43), edge_w, cv2.LINE_AA)
+            cv2.line(output_rgb, far_left, far_right, (70, 86, 97), 1, cv2.LINE_AA)
     return output_rgb
 
 
@@ -1135,20 +1328,20 @@ def draw_site_railings(image_rgb, rows, location_id, seed):
     # Site integration should come from row beds, service tracks, and contact
     # shadows, not an outlined rectangle around the array.
     return image_rgb
-    if not rows or location_id in {"farm_lake", "rooftop"}:
+    if not rows or location_id in {"floating_water", "rooftop_warehouse"}:
         return image_rgb
     h, w = image_rgb.shape[:2]
     rng = np.random.default_rng(seed)
     out = image_rgb.copy()
-    x1 = max(6, min(row["x1"] for row in rows) - (32 if location_id in {"scenario_1", "agri_rows"} else 22))
-    x2 = min(w - 7, max(row["x2"] for row in rows) + (32 if location_id in {"scenario_1", "agri_rows"} else 22))
-    y1 = max(6, min(row["y1"] for row in rows) - (24 if location_id in {"scenario_1", "agri_rows"} else 18))
-    y2 = min(h - 7, max(row["y2"] for row in rows) + (24 if location_id in {"scenario_1", "agri_rows"} else 18))
+    x1 = max(6, min(row["x1"] for row in rows) - (32 if location_id in {"grass_open", "agri_field_new"} else 22))
+    x2 = min(w - 7, max(row["x2"] for row in rows) + (32 if location_id in {"grass_open", "agri_field_new"} else 22))
+    y1 = max(6, min(row["y1"] for row in rows) - (24 if location_id in {"grass_open", "agri_field_new"} else 18))
+    y2 = min(h - 7, max(row["y2"] for row in rows) + (24 if location_id in {"grass_open", "agri_field_new"} else 18))
 
     rail_mask = np.zeros((h, w), dtype=np.uint8)
     post_mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.rectangle(rail_mask, (x1, y1), (x2, y2), 165, 2 if location_id in {"scenario_1", "desert_farm"} else 1)
-    post_step = 26 if location_id in {"scenario_1", "agri_rows"} else 34
+    cv2.rectangle(rail_mask, (x1, y1), (x2, y2), 165, 2 if location_id in {"grass_open", "desert_track"} else 1)
+    post_step = 26 if location_id in {"grass_open", "agri_field_new"} else 34
     for x in range(x1, x2 + 1, post_step):
         jitter = int(rng.integers(-1, 2))
         cv2.rectangle(post_mask, (clamp(x + jitter - 1, 0, w - 1), y1 - 1), (clamp(x + jitter + 1, 0, w - 1), y1 + 2), 160, -1)
@@ -1160,7 +1353,7 @@ def draw_site_railings(image_rgb, rows, location_id, seed):
 
     shadow = cv2.GaussianBlur(np.maximum(rail_mask, post_mask), (0, 0), 0.7).astype(np.float32) / 255.0
     out = np.clip(out.astype(np.float32) * (1.0 - shadow[..., None] * 0.12), 0, 255).astype(np.uint8)
-    rail_color = np.array([58, 68, 56] if location_id != "desert_farm" else [68, 62, 50], dtype=np.float32)
+    rail_color = np.array([58, 68, 56] if location_id != "desert_track" else [68, 62, 50], dtype=np.float32)
     metal_alpha = ((rail_mask.astype(np.float32) / 255.0) * 0.50 + (post_mask.astype(np.float32) / 255.0) * 0.62)[..., None]
     out = np.clip(out.astype(np.float32) * (1 - metal_alpha) + rail_color * metal_alpha, 0, 255).astype(np.uint8)
     return out
@@ -1175,7 +1368,7 @@ def draw_mounting_rails(image_rgb, rows, location_id, seed):
     rail_mask = np.zeros((h, w), dtype=np.float32)
     post_mask = np.zeros((h, w), dtype=np.float32)
     shadow_mask = np.zeros((h, w), dtype=np.float32)
-    heavy_mounts = location_id in {"farm_lake", "rooftop"}
+    heavy_mounts = location_id in {"floating_water", "rooftop_warehouse"}
 
     for row in rows:
         row_h = max(1, row["y2"] - row["y1"])
@@ -1205,13 +1398,13 @@ def draw_mounting_rails(image_rgb, rows, location_id, seed):
     shadow = cv2.GaussianBlur(shadow_mask, (0, 0), 1.0 if heavy_mounts else 1.35)[..., None]
     rail = cv2.GaussianBlur(rail_mask, (0, 0), 0.45 if heavy_mounts else 0.55)[..., None]
     posts = cv2.GaussianBlur(post_mask, (0, 0), 0.55 if heavy_mounts else 0.70)[..., None]
-    if location_id == "desert_farm":
+    if location_id == "desert_track":
         rail_color = np.array([116, 103, 78], dtype=np.float32)
         post_color = np.array([100, 92, 72], dtype=np.float32)
-    elif location_id == "farm_lake":
+    elif location_id == "floating_water":
         rail_color = np.array([94, 124, 130], dtype=np.float32)
         post_color = np.array([70, 94, 100], dtype=np.float32)
-    elif location_id == "rooftop":
+    elif location_id == "rooftop_warehouse":
         rail_color = np.array([116, 122, 122], dtype=np.float32)
         post_color = np.array([98, 102, 102], dtype=np.float32)
     else:
@@ -1241,11 +1434,11 @@ def prepare_installation_environment(output_rgb, rows, location_id, seed):
     """Add site context behind custom PV rows: beds, service roads, and a small control pad."""
     if not rows:
         return output_rgb
-    if location_id == "farm_lake":
+    if location_id == "floating_water":
         return prepare_floating_installation_environment(output_rgb, rows, seed)
-    if location_id == "rooftop":
+    if location_id == "rooftop_warehouse":
         return prepare_rooftop_installation_environment(output_rgb, rows, seed)
-    if location_id == "agri_rows":
+    if location_id == "agri_field_new":
         prepared = prepare_agri_installation_ground(output_rgb, rows, seed)
         prepared = draw_mounting_rails(prepared, rows, location_id, seed_for(seed, "mounts"))
         return draw_site_railings(prepared, rows, location_id, seed_for(seed, "railings"))
@@ -1286,25 +1479,25 @@ def prepare_installation_environment(output_rgb, rows, location_id, seed):
 
     # Service tracks between rows. Avoid full perimeter boxes; in nadir imagery
     # those read as drawn outlines unless they already exist in the source photo.
-    road_width = 7 if location_id == "scenario_1" else (6 if location_id == "desert_farm" else 5)
+    road_width = 7 if location_id == "grass_open" else (6 if location_id == "desert_track" else 5)
     for row in rows:
         row_h = max(1, row["y2"] - row["y1"])
         y = clamp(row["y2"] + max(4, int(row_h * 0.8)), 0, h - 1)
         cv2.line(road_mask, (x1_all, y), (x2_all, y), 1.0, max(2, road_width // 2), cv2.LINE_AA)
-        if location_id == "scenario_1":
+        if location_id == "grass_open":
             y_top = clamp(row["y1"] - max(4, int(row_h * 0.75)), 0, h - 1)
             cv2.line(road_mask, (x1_all, y_top), (x2_all, y_top), 0.72, max(2, road_width // 3), cv2.LINE_AA)
-    if location_id in {"scenario_1", "desert_farm"}:
+    if location_id in {"grass_open", "desert_track"}:
         access_x = clamp(x1_all - 18, 0, w - 1)
         cv2.line(road_mask, (access_x, y1_all), (access_x, y2_all), 0.55, max(2, road_width // 2), cv2.LINE_AA)
         mid_y = clamp((y1_all + y2_all) // 2, 0, h - 1)
         cv2.line(road_mask, (access_x, mid_y), (x1_all, mid_y), 0.45, max(1, road_width // 3), cv2.LINE_AA)
-    if location_id == "scenario_1":
+    if location_id == "grass_open":
         for gy1, gy2 in row_gaps:
             lane_y = clamp((gy1 + gy2) // 2, 0, h - 1)
             lane_w = max(7, min(15, int((gy2 - gy1) * 0.36)))
             cv2.line(gravel_mask, (x1_all, lane_y), (x2_all, lane_y), 1.0, lane_w, cv2.LINE_AA)
-    if location_id == "desert_farm":
+    if location_id == "desert_track":
         for gy1, gy2 in row_gaps:
             lane_y = clamp((gy1 + gy2) // 2, 0, h - 1)
             lane_w = max(8, min(16, int((gy2 - gy1) * 0.34)))
@@ -1313,14 +1506,14 @@ def prepare_installation_environment(output_rgb, rows, location_id, seed):
     asphalt_mask = cv2.GaussianBlur(asphalt_mask, (0, 0), 1.2)
     gravel_mask = cv2.GaussianBlur(gravel_mask, (0, 0), 1.4)
 
-    if location_id == "scenario_1":
+    if location_id == "grass_open":
         bed_tint = np.array([112, 116, 80], dtype=np.float32)
         road_tint = np.array([136, 124, 88], dtype=np.float32)
         control_tint = np.array([160, 164, 150], dtype=np.float32)
         bed_alpha = 0.62
         road_alpha = 0.62
         bed_source = 0.56
-    elif location_id == "desert_farm":
+    elif location_id == "desert_track":
         bed_tint = np.array([184, 163, 116], dtype=np.float32)
         road_tint = np.array([154, 132, 88], dtype=np.float32)
         control_tint = np.array([178, 170, 148], dtype=np.float32)
@@ -1340,11 +1533,11 @@ def prepare_installation_environment(output_rgb, rows, location_id, seed):
     mixed = mixed * (1 - bed_mask[..., None] * bed_alpha) + beds * (bed_mask[..., None] * bed_alpha)
     roads = source * 0.38 + road_tint * 0.62 + noise * np.array([5, 5, 4], dtype=np.float32)
     mixed = mixed * (1 - road_mask[..., None] * road_alpha) + roads * (road_mask[..., None] * road_alpha)
-    if location_id == "scenario_1":
+    if location_id == "grass_open":
         gravel_noise = cv2.GaussianBlur(rng.normal(0, 1, (h, w)).astype(np.float32), (0, 0), 0.45)[..., None]
         gravel = source * 0.28 + np.array([158, 150, 126], dtype=np.float32) * 0.72 + gravel_noise * np.array([18, 17, 14], dtype=np.float32)
         mixed = mixed * (1 - gravel_mask[..., None] * 0.78) + gravel * (gravel_mask[..., None] * 0.78)
-    if location_id == "desert_farm":
+    if location_id == "desert_track":
         asphalt_noise = cv2.GaussianBlur(rng.normal(0, 1, (h, w)).astype(np.float32), (0, 0), 0.65)[..., None]
         asphalt = source * 0.22 + np.array([76, 74, 68], dtype=np.float32) * 0.78 + asphalt_noise * np.array([10, 10, 9], dtype=np.float32)
         mixed = mixed * (1 - asphalt_mask[..., None] * 0.82) + asphalt * (asphalt_mask[..., None] * 0.82)
@@ -1367,7 +1560,7 @@ def prepare_installation_environment(output_rgb, rows, location_id, seed):
     mixed = mixed * (1 - pad_mask[..., None] * 0.82) + pad * (pad_mask[..., None] * 0.82)
 
     # Simple roof/ac unit marks on the control pad.
-    rect_color = (72, 78, 78) if location_id == "desert_farm" else (64, 76, 66)
+    rect_color = (72, 78, 78) if location_id == "desert_track" else (64, 76, 66)
     mixed_u8 = np.clip(mixed, 0, 255).astype(np.uint8)
     cv2.rectangle(mixed_u8, (px1 + 5, py1 + 5), (px2 - 5, py2 - 5), rect_color, 1)
     cv2.rectangle(mixed_u8, (px1 + 9, py1 + 8), (px1 + 17, py1 + 15), rect_color, -1)
@@ -1389,13 +1582,37 @@ def textured_alpha_mask(size, seed, feather=1.0):
     return mask.filter(ImageFilter.GaussianBlur(0.25))
 
 
-def draw_realistic_module_patch(size, seed, terrain, box, module_cells, source_patch=None):
+def draw_realistic_module_patch(size, seed, terrain, box, module_cells, source_patch=None, location_id=None):
     width, height = size
     rng = random.Random(seed)
     width = max(4, int(width))
     height = max(4, int(height))
     terrain_crop = terrain.crop(box).convert("RGB").resize((width, height), Image.Resampling.BICUBIC)
     terrain_level = mean_luma(terrain_crop)
+
+    if source_patch is not None:
+        # Preserve the photographed PV surface. Do not redraw a perfect grid or double-frame it.
+        photo = source_patch.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
+        photo = match_patch_lighting(photo, terrain, box).convert("RGB")
+        photo = ImageEnhance.Brightness(photo).enhance(rng.uniform(0.985, 1.025))
+        photo = ImageEnhance.Contrast(photo).enhance(rng.uniform(0.985, 1.025))
+        photo = harmonize_patch_texture(
+            photo,
+            terrain_crop,
+            seed_for(seed, "photo-harmonize"),
+            edge_strength=0.012,
+        )
+        arr = np.asarray(photo, dtype=np.float32)
+        if location_id == "floating_water":
+            # Subtle, broad water-color reflection; keep the captured cell texture dominant.
+            env = np.asarray(terrain_crop, dtype=np.float32)
+            env = cv2.GaussianBlur(env, (0, 0), max(2.0, min(width, height) * 0.16))
+            arr = arr * 0.975 + env * 0.025
+        grain = np.random.default_rng(seed_for(seed, "photo-sensor-grain")).normal(0, 0.45, arr.shape).astype(np.float32)
+        photo = Image.fromarray(np.clip(arr + grain, 0, 255).astype(np.uint8), "RGB")
+        result = photo.convert("RGBA")
+        result.putalpha(local_rect_mask((width, height), radius=0, feather=0.28))
+        return result
 
     base_r = rng.randint(18, 34)
     base_g = rng.randint(42, 62)
@@ -1404,11 +1621,11 @@ def draw_realistic_module_patch(size, seed, terrain, box, module_cells, source_p
         real_rgb = procedural_panel_module((width, height), seed)
         if source_patch.size[0] >= 12 and source_patch.size[1] >= 6:
             source_texture = source_patch.resize((width, height), Image.Resampling.LANCZOS).convert("RGB")
-            source_texture = ImageEnhance.Contrast(mute_bright_panel_lines(source_texture)).enhance(1.08)
-            real_rgb = Image.blend(real_rgb, source_texture, 0.18)
+            source_texture = ImageEnhance.Contrast(mute_bright_panel_lines(source_texture)).enhance(1.02)
+            real_rgb = Image.blend(source_texture, real_rgb, 0.12)
         real_rgb = match_patch_lighting(real_rgb.convert("RGBA"), terrain, box).convert("RGB")
         tint = Image.new("RGB", (width, height), (base_r, base_g, base_b))
-        real_rgb = Image.blend(real_rgb, tint, 0.08)
+        real_rgb = Image.blend(real_rgb, tint, 0.025 if source_patch is not None else 0.08)
         module = real_rgb.convert("RGBA")
     else:
         module = Image.new("RGBA", (width, height), (base_r, base_g, base_b, 255))
@@ -1462,15 +1679,16 @@ def draw_realistic_module_patch(size, seed, terrain, box, module_cells, source_p
             draw.line((bx, y1 + 1, bx, y2 - 1), fill=(118, 132, 145, 5), width=1)
 
     # Real module seam/frame lines, stronger than cell busbars but not UI-white.
-    seam = (185, 198, 202, 44 if source_patch is not None else 80)
-    frame_seam = (205, 214, 216, 72 if source_patch is not None else 120)
+    seam = (185, 198, 202, 10 if source_patch is not None else 80)
+    frame_seam = (205, 214, 216, 48 if source_patch is not None else 120)
     draw.rectangle((1, 1, width - 2, height - 2), outline=frame_seam, width=1)
-    for idx in range(1, cols):
-        x = int(inner[0] + idx * inner_w / cols)
-        draw.line((x, inner[1], x, inner[3]), fill=seam, width=1)
-    for idx in range(1, rows):
-        y = int(inner[1] + idx * inner_h / rows)
-        draw.line((inner[0], y, inner[2], y), fill=seam, width=1)
+    if source_patch is None:
+        for idx in range(1, cols):
+            x = int(inner[0] + idx * inner_w / cols)
+            draw.line((x, inner[1], x, inner[3]), fill=seam, width=1)
+        for idx in range(1, rows):
+            y = int(inner[1] + idx * inner_h / rows)
+            draw.line((inner[0], y, inner[2], y), fill=seam, width=1)
 
     # Glass glare and real imaging grain.
     glare = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -1491,12 +1709,13 @@ def draw_realistic_module_patch(size, seed, terrain, box, module_cells, source_p
     noise = noise.point(lambda value: int(128 + (value - 128) * (0.018 if source_patch is not None else 0.025)))
     rgb = ImageChops.multiply(module.convert("RGB"), noise.convert("RGB"))
     if source_patch is not None:
-        rgb = ImageEnhance.Brightness(rgb).enhance(1.12)
-        rgb = ImageEnhance.Contrast(rgb).enhance(1.08)
-        rgb = ImageEnhance.Color(rgb).enhance(1.02)
-    brightness = clamp((terrain_level / 150) * 0.22 + 1.00, 0.96, 1.26)
+        rgb = ImageEnhance.Brightness(rgb).enhance(1.02)
+        rgb = ImageEnhance.Contrast(rgb).enhance(1.02)
+        rgb = ImageEnhance.Color(rgb).enhance(1.00)
+    # Small local exposure match only; large global boosts make glass look painted.
+    brightness = clamp(0.94 + (terrain_level / 255.0) * 0.14, 0.96, 1.08)
     rgb = ImageEnhance.Brightness(rgb).enhance(brightness)
-    rgb = ImageEnhance.Contrast(rgb).enhance(0.98 if source_patch is not None else 1.04)
+    rgb = ImageEnhance.Contrast(rgb).enhance(1.02 if source_patch is not None else 1.04)
     if source_patch is not None:
         rgb = harmonize_patch_texture(
             rgb,
@@ -1504,7 +1723,18 @@ def draw_realistic_module_patch(size, seed, terrain, box, module_cells, source_p
             seed_for(seed, "terrain-harmonize"),
             edge_strength=0.04,
         )
-        rgb = ImageEnhance.Sharpness(rgb).enhance(1.35)
+        rgb = ImageEnhance.Sharpness(rgb).enhance(1.06)
+
+    arr = np.array(rgb).astype(np.float32)
+    yy = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None]
+    xx = np.linspace(-1.0, 1.0, width, dtype=np.float32)[None, :]
+    tilt_light = 0.985 + yy * 0.030
+    center_warmth = np.exp(-(xx ** 2 * 1.7 + (yy - 0.62) ** 2 * 4.2)) * (1.8 if source_patch is not None else 5.0)
+    arr *= tilt_light[..., None]
+    arr[:, :, 0] += center_warmth
+    arr[:, :, 1] += center_warmth * 0.62
+    arr[:, :, 2] -= center_warmth * 0.20
+    rgb = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGB")
 
     alpha = (
         local_rect_mask((width, height), radius=0, feather=0.35)
@@ -1549,13 +1779,14 @@ def custom_panel_scene(location_id):
     """Build real visible PV rows/cells for the current custom layout."""
     location = location_by_id(location_id)
     terrain = terrain_layer(location_id).convert("RGBA")
-    if location_id == "desert_farm":
+    if location_id == "desert_track":
         source = load_rgb("desert_user_reference_with_pvs.png").convert("RGB")
         source_rows = DESERT_USER_ROW_DEFS
-    elif location.get("pv_source"):
+    elif location.get("pv_source") and location.get("pv_source") != location.get("source"):
         source = load_rgb(location["pv_source"]).convert("RGB")
-        source_rows = base_row_defs_for_location(location_id)
+        source_rows = ROW_DEFS if location["pv_source"] == "scenario_1_og_pv.jpeg" else base_row_defs_for_location(location_id)
     else:
+        # A panel-free background is not a panel texture: use the real existing PV reference instead.
         source = load_rgb("scenario_1_og_pv.jpeg").convert("RGB")
         source_rows = ROW_DEFS
     output_rgb = np.array(terrain.convert("RGB"), dtype=np.uint8)
@@ -1657,7 +1888,15 @@ def draw_realistic_fault(image, cell, fault_type, scale, view):
     bx1, by1, bx2, by2 = x1 + pad_x, y1 + pad_y, x2 - pad_x, y2 - pad_y
     if bx2 <= bx1 or by2 <= by1:
         bx1, by1, bx2, by2 = x1, y1, x2, y2
-    bw, bh = max(4, bx2 - bx1), max(4, by2 - by1)
+    if bx2 - bx1 < 4:
+        cx = (bx1 + bx2) // 2
+        bx1 = clamp(cx - 2, 0, BASE_SIZE[0] - 4)
+        bx2 = bx1 + 4
+    if by2 - by1 < 4:
+        cy = (by1 + by2) // 2
+        by1 = clamp(cy - 2, 0, BASE_SIZE[1] - 4)
+        by2 = by1 + 4
+    bw, bh = bx2 - bx1, by2 - by1
     rng = random.Random(seed_for(cell["id"], fault_type, scale, view))
     severity = scale / 10
     overlay = Image.new("RGBA", BASE_SIZE, (0, 0, 0, 0))

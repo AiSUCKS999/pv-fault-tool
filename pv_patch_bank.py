@@ -1,15 +1,15 @@
 # Real patch-bank loading, patch selection, and crop status helpers.
 def texture_group_for_location(location_id):
-    if location_id == "rooftop":
+    location_id = normalize_location_id(location_id)
+    if location_id == "rooftop_warehouse":
         return "rooftop"
-    if location_id == "farm_lake":
+    if location_id == "floating_water":
         return "floating"
-    if location_id in {"agri_rows", "scenario_1"}:
+    if location_id in {"agri_field_new", "grass_open"}:
         return "ground"
-    if location_id == "desert_farm":
+    if location_id == "desert_track":
         return "field"
     return "ground"
-
 
 @st.cache_data(show_spinner=False)
 def real_panel_textures(group):

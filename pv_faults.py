@@ -26,9 +26,13 @@ ACTUAL_PANEL_MODEL_TEXTURE = ASSET_DIR / "__disabled_actual_panel_model.png"
 BASE_SIZE = (763, 402)
 MAX_LAYOUT_ROWS = 30
 MAX_PANELS_PER_ROW = 16
-CUSTOM_MODULE_CELL_COLS = 6
-CUSTOM_MODULE_CELL_ROWS = 2
+CUSTOM_MODULE_CELL_COLS = 5
+CUSTOM_MODULE_CELL_ROWS = 8
+SOLAR_PANEL_MODULE_COLS = 2
+SOLAR_PANEL_MODULE_ROWS = 2
+SOLAR_PANEL_MODULES = SOLAR_PANEL_MODULE_COLS * SOLAR_PANEL_MODULE_ROWS
 PV_MODULE_MODEL_NAME = "PV module"
+PV_PANEL_MODEL_NAME = "PV panel"
 PV_MODULE_WIDTH_MM = 676
 PV_MODULE_HEIGHT_MM = 780
 CUSTOM_MODULE_ASPECT_RATIO = 1.62
@@ -62,7 +66,7 @@ FAULT_DISPLAY_NAMES = {
     "MultiDiode": "Multiple Diode Faults",
     "SingleByPassed": "Bypassed Substring / Section",
     "MultiByPassed": "Multiple Bypassed Sections",
-    "StringOpenCircuit": "String Open Circuit",
+    "StringOpenCircuit": "Open-Circuit / Offline Module Pattern",
     "StringReversedPolarity": "String Reversed Polarity",
     "DB": "Diode / Bypass Fault",
     "DL": "Disconnected / Damaged Line",
@@ -70,12 +74,17 @@ FAULT_DISPLAY_NAMES = {
 }
 
 HOTSPOT_FAULTS = {"SingleHotSpot", "MultiHotSpot"}
-HIDDEN_SYMPTOM_FAULTS = HOTSPOT_FAULTS
+HIDDEN_SYMPTOM_FAULTS = set()
 LOW_CONFIDENCE_LEGACY_FAULTS = {"DB", "DL", "TB"}
 HIDDEN_MULTICELL_FAULTS = {"MultiDiode", "MultiByPassed"}
-HIDDEN_TOOL_FAULTS = HIDDEN_SYMPTOM_FAULTS | LOW_CONFIDENCE_LEGACY_FAULTS | HIDDEN_MULTICELL_FAULTS
+HIDDEN_TOOL_FAULTS = HOTSPOT_FAULTS | LOW_CONFIDENCE_LEGACY_FAULTS | HIDDEN_MULTICELL_FAULTS | {"PartialShading"}
+FAR_SCOUT_FAULT_TYPES = ["SingleHotSpot", "MultiHotSpot", "StringOpenCircuit"]
+CLOSE_DIAGNOSTIC_FAULT_TYPES = [
+    fault_type for fault_type in FAULT_TYPES
+    if fault_type not in HOTSPOT_FAULTS | LOW_CONFIDENCE_LEGACY_FAULTS | HIDDEN_MULTICELL_FAULTS
+]
 SURFACE_OBSTRUCTION_FAULTS = {"PartialShading"}
-SURFACE_OBSTRUCTION_LOCATIONS = {"scenario_1", "agri_rows"}
+SURFACE_OBSTRUCTION_LOCATIONS = {"scenario_1", "agri_rows", "grass_open", "agri_field_new"}
 SOILING_FAULTS = {"SoilingDust"}
 CRACKING_FAULTS = {"CellCracking"}
 PREFERRED_CELL_CRACKING_PATCH_SUFFIXES = {
@@ -98,7 +107,7 @@ def fault_available_in_location(location_id, fault_type):
     fault_type = canonical_fault_type(fault_type)
     if fault_type in SURFACE_OBSTRUCTION_FAULTS:
         return location_id in SURFACE_OBSTRUCTION_LOCATIONS
-    return fault_type in USER_SELECTABLE_FAULT_TYPES
+    return fault_type in USER_SELECTABLE_FAULT_TYPES or fault_type in HOTSPOT_FAULTS
 
 
 def selectable_fault_types_for_location(location_id):

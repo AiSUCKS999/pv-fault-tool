@@ -16,15 +16,16 @@ def fault_record(location, view, row, cell, fault_type, fault_scale):
         "target_cell_id": cell["id"],
         "pv_cell_number_in_row": cell.get("pv_cell_number_in_row", cell.get("panel_number")),
         "pv_cells_in_selected_row": cell.get("pv_cells_in_row", cell.get("panels_in_row")),
+        "panel_number_in_row": cell.get("panel_number"),
+        "panels_in_selected_row": cell.get("panels_in_row"),
         "module_number_in_row": cell.get("module_number"),
+        "module_number_in_panel": cell.get("module_number_in_panel"),
         "module_cell_number": cell.get("module_cell_number"),
         "module_cell_row": cell.get("module_cell_row"),
         "module_cell_col": cell.get("module_cell_col"),
         "target_label": cell["label"],
         # Kept for old CSV/JSON consumers that expected panel_id.
         "panel_id": cell["id"],
-        "panel_number_in_row": cell.get("panel_number"),
-        "panels_in_selected_row": cell.get("panels_in_row"),
         "panel_label": cell["label"],
         "fault_type": fault_type,
         "fault_scale": fault_scale,
@@ -35,6 +36,8 @@ def fault_record(location, view, row, cell, fault_type, fault_scale):
             "custom": custom_layout_enabled(),
             "row_count": len(panels(location["id"])),
             "panels_per_row": custom_panels_per_row(location["id"]) if custom_layout_enabled() else len(cells_for_row(location["id"], row_id)),
+            "modules_per_panel": SOLAR_PANEL_MODULES if custom_layout_enabled() else None,
+            "modules_per_row": custom_panels_per_row(location["id"]) * SOLAR_PANEL_MODULES if custom_layout_enabled() else None,
             "pv_cells_per_row": len(cells_for_row(location["id"], row_id)),
             "cells_per_module": CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS if custom_layout_enabled() else None,
         },
@@ -67,7 +70,9 @@ def fault_record_csv(record):
         "affected_cell_count": record.get("affected_cell_count", len(affected_cell_ids)),
         "pv_cell_number_in_row": record["pv_cell_number_in_row"],
         "pv_cells_in_selected_row": record["pv_cells_in_selected_row"],
+        "panel_number_in_row": record.get("panel_number_in_row"),
         "module_number_in_row": record["module_number_in_row"],
+        "module_number_in_panel": record.get("module_number_in_panel"),
         "module_cell_number": record["module_cell_number"],
         "fault_type": record["fault_type"],
         "fault_label": fault_display_name(record["fault_type"]),
@@ -113,7 +118,9 @@ def fault_table_rows(records):
                 "affected_cells": ", ".join(affected_cell_ids),
                 "affected_count": record.get("affected_cell_count", len(affected_cell_ids)),
                 "cell_number": record["pv_cell_number_in_row"],
+                "panel": record.get("panel_number_in_row"),
                 "module": record["module_number_in_row"],
+                "module_in_panel": record.get("module_number_in_panel"),
                 "module_cell": record["module_cell_number"],
                 "fault_type": fault_display_name(record["fault_type"]),
                 "scope_note": record.get("scope_note", fault_scope_note(record["fault_type"])),
@@ -155,13 +162,19 @@ def cropped_row_image(image, location_id, selected_row_id, selected_cell_id):
 
 
 def scene_metadata(location, view, selected_row, selected_cell, records):
+    panels_per_row = custom_panels_per_row(location["id"]) if custom_layout_enabled() else default_panels_per_row(location["id"])
+    modules_per_row = panels_per_row * SOLAR_PANEL_MODULES if custom_layout_enabled() else panels_per_row
     return {
         "location_id": location["id"],
         "location_name": location["name"],
         "view": view.upper(),
         "custom_layout": custom_layout_enabled(),
         "row_count": len(panels(location["id"])),
-        "modules_per_row": custom_panels_per_row(location["id"]) if custom_layout_enabled() else default_panels_per_row(location["id"]),
+        "panels_per_row": panels_per_row,
+        "modules_per_panel": SOLAR_PANEL_MODULES if custom_layout_enabled() else None,
+        "modules_per_row": modules_per_row,
+        "cells_per_module": CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS if custom_layout_enabled() else None,
+        "cells_per_panel": CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS * SOLAR_PANEL_MODULES if custom_layout_enabled() else None,
         "selected_row": selected_row["id"],
         "selected_cell": selected_cell["id"],
         "fault_count": len(records),
@@ -353,4 +366,5 @@ def records_for_view(records, view):
 
 
 def location_by_id(location_id):
+    location_id = normalize_location_id(location_id)
     return next((item for item in LOCATIONS if item["id"] == location_id), LOCATIONS[0])
