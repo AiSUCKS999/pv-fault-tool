@@ -809,12 +809,43 @@ def close_module_diagnostic_image(location_id, view, selected_row_id, selected_c
 
 
 def render_module_zoom_map(image, location_id, view, selected_row_id, selected_cell_id, fault_records=None, show_grid=False):
-    cropped = close_module_diagnostic_image(location_id, view, selected_row_id, selected_cell_id, fault_records)
-    crop_w, crop_h = cropped.size
-    draw = ImageDraw.Draw(cropped, "RGBA")
+    module_image = close_module_diagnostic_image(location_id, view, selected_row_id, selected_cell_id, fault_records)
+    crop_w, crop_h = module_image.size
     module_cells = module_cells_for_target(location_id, selected_row_id, selected_cell_id)
     selected_module = cell_by_id(location_id, selected_row_id, selected_cell_id).get("module_number")
-    rects = close_module_cell_rects(module_cells, cropped.size)
+    base_rects = close_module_cell_rects(module_cells, module_image.size)
+
+    if image is not None:
+        background = ImageOps.fit(image.convert("RGB"), module_image.size, method=Image.Resampling.BICUBIC)
+        background = background.filter(ImageFilter.GaussianBlur(4.0))
+        background = ImageEnhance.Brightness(background).enhance(0.62)
+        background = ImageEnhance.Contrast(background).enhance(0.88).convert("RGBA")
+        scale = 0.9
+        panel_w = int(crop_w * scale)
+        panel_h = int(crop_h * scale)
+        panel_x = (crop_w - panel_w) // 2
+        panel_y = (crop_h - panel_h) // 2
+        shadow = Image.new("RGBA", (panel_w + 42, panel_h + 42), (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow, "RGBA")
+        shadow_draw.rounded_rectangle((21, 21, panel_w + 21, panel_h + 21), radius=6, fill=(0, 0, 0, 118))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(9.0))
+        background.alpha_composite(shadow, (panel_x - 21, panel_y - 14))
+        background.paste(module_image.resize((panel_w, panel_h), Image.Resampling.BICUBIC), (panel_x, panel_y))
+        cropped = background.convert("RGB")
+        rects = {
+            cell_id: (
+                int(panel_x + rect[0] * scale),
+                int(panel_y + rect[1] * scale),
+                int(panel_x + rect[2] * scale),
+                int(panel_y + rect[3] * scale),
+            )
+            for cell_id, rect in base_rects.items()
+        }
+    else:
+        cropped = module_image
+        rects = base_rects
+
+    draw = ImageDraw.Draw(cropped, "RGBA")
     fault_cell_ids = {record.get("target_cell_id") for record in (fault_records or [])}
     num_font = grid_font(12)
 
@@ -1259,93 +1290,19 @@ def main():
     fault_type = "CellCracking"
     manual_record = fault_record(location, view, selected_row, selected_cell, fault_type, fault_scale)
     lock_manual_target = True
+    current_custom_layout = custom_layout_enabled()
+    available_fault_types = selectable_fault_types_for_location(location["id"])
+    default_manual_fault = "CellCracking" if "CellCracking" in available_fault_types else available_fault_types[0]
+    layout_key = (
+        f"{location['id']}_{view}_{int(current_custom_layout)}_"
+        f"{custom_row_count(location['id'])}_{custom_panels_per_row(location['id'])}"
+    )
+    show_bounding_boxes = False
 
-    with main_tab:
-        layout_col, target_col = st.columns([1, 1])
-        with layout_col:
-            st.subheader("Rows and Panels")
-            current_custom_layout = custom_layout_enabled()
-            custom_choice = st.checkbox("Realistic generated PV layout", value=current_custom_layout)
-            if custom_choice != current_custom_layout:
-                first_row = f"{row_prefix(location['id'])}1"
-                qp_set(
-                    location=location["id"],
-                    view=view,
-                    inspect=inspection_mode,
-                    custom_layout=1 if custom_choice else 0,
-                    row_count=custom_row_count(location["id"]) if custom_choice else len(base_row_defs_for_location(location["id"])),
-                    panels_per_row=custom_panels_per_row(location["id"]) if custom_choice else default_panels_per_row(location["id"]),
-                    selected_pv=first_row,
-                    selected_cell=f"{first_row}-C001" if custom_choice else f"{first_row}-P001",
-                )
-                st.rerun()
-
-            row_control_value = (
-                custom_row_count(location["id"])
-                if current_custom_layout
-                else min(len(base_row_defs_for_location(location["id"])), max_custom_rows(location["id"]))
-            )
-            panel_control_value = min(
-                custom_panels_per_row(location["id"]) if current_custom_layout else default_panels_per_row(location["id"]),
-                max_custom_panels_per_row(location["id"]),
-            )
-            desired_rows = st.number_input(
-                "Rows",
-                min_value=1,
-                max_value=max_custom_rows(location["id"]),
-                value=row_control_value,
-                step=1,
-                disabled=not current_custom_layout,
-            )
-            desired_panels = st.number_input(
-                "Panels per row",
-                min_value=1,
-                max_value=max_custom_panels_per_row(location["id"]),
-                value=panel_control_value,
-                step=1,
-                disabled=not current_custom_layout,
-            )
-            if current_custom_layout and (
-                int(desired_rows) != custom_row_count(location["id"])
-                or int(desired_panels) != custom_panels_per_row(location["id"])
-            ):
-                first_row = f"{row_prefix(location['id'])}1"
-                qp_set(
-                    location=location["id"],
-                    view=view,
-                    inspect=inspection_mode,
-                    custom_layout=1,
-                    row_count=int(desired_rows),
-                    panels_per_row=int(desired_panels),
-                    selected_pv=first_row,
-                    selected_cell=f"{first_row}-C001",
-                )
-                st.rerun()
-            cells_per_module = CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS
-            cells_per_panel = cells_per_module * SOLAR_PANEL_MODULES
-            st.caption(
-                f"{PV_PANEL_MODEL_NAME}: {int(desired_panels)} panels per row x "
-                f"{SOLAR_PANEL_MODULES} modules/panel x {cells_per_module} cells/module "
-                f"= {int(desired_panels) * cells_per_panel} selectable cells per row."
-            )
-            cap = LAYOUT_CAPS.get(location["id"])
-            if cap:
-                st.info(CAP_JUSTIFICATIONS[location["id"]])
-                if int(desired_rows) >= cap["rows"] or int(desired_panels) >= cap["modules"]:
-                    st.warning(
-                        "At cap: row/panel limits preserve solar-panel aspect ratio, readable cell labels, "
-                        "and prevent layouts from spilling into unusable image areas."
-                    )
-            show_bounding_boxes = st.checkbox("Show bounding boxes", value=False)
+    with output_tab:
+        target_col, panel_fault_col = st.columns([1, 1])
         with target_col:
             st.subheader("Fault Target")
-            current_custom_layout = custom_layout_enabled()
-            available_fault_types = selectable_fault_types_for_location(location["id"])
-            default_random_faults = ["CellCracking"] if "CellCracking" in available_fault_types else [available_fault_types[0]]
-            layout_key = (
-                f"{location['id']}_{view}_{int(current_custom_layout)}_"
-                f"{custom_row_count(location['id'])}_{custom_panels_per_row(location['id'])}"
-            )
             row_options = [row["id"] for row in all_rows]
             row_choice = st.selectbox(
                 "PV row",
@@ -1432,13 +1389,14 @@ def main():
             fault_type = st.selectbox(
                 "Diagnostic fault type",
                 available_fault_types,
+                index=available_fault_types.index(default_manual_fault),
                 format_func=fault_display_name,
+                key=f"manual_fault_type_{layout_key}",
             )
             manual_record = fault_record(location, view, selected_row, selected_cell, fault_type, fault_scale)
+            show_bounding_boxes = st.checkbox("Show bounding boxes", value=False, key=f"show_boxes_{layout_key}")
             st.write(FAULT_TYPES[fault_type])
             st.caption("Fault overlays are bounded to the chosen PV cell inside the selected module.")
-            st.metric("Selected row", selected_row["label"])
-            st.metric("Selected PV cell", selected_cell["id"])
             if selected_cell.get("module_number"):
                 st.caption(
                     f"{PV_PANEL_MODEL_NAME} {selected_cell.get('panel_number')} | "
@@ -1447,80 +1405,206 @@ def main():
                     f"({CUSTOM_MODULE_CELL_COLS}x{CUSTOM_MODULE_CELL_ROWS} module-cell grid)"
                 )
 
-        st.divider()
-        rng_col, status_col = st.columns([1, 1])
-        with rng_col:
-            st.subheader("Random Fault Generator")
+        with panel_fault_col:
+            st.subheader("Selected Panel Fault Map")
+            panel_fault_records = st.session_state.get("panel_cell_fault_records", [])
+            panel_cell_ids = {cell["id"] for cell in panel_cells_for_choice}
+            current_panel_faults = {
+                record.get("target_cell_id"): canonical_fault_type(record.get("fault_type"))
+                for record in panel_fault_records
+                if record.get("location_id") == location["id"]
+                and record.get("row_id") == selected_row_id
+                and record.get("target_cell_id") in panel_cell_ids
+            }
+            fault_name_to_type = {"None": ""}
+            for item in available_fault_types:
+                fault_name_to_type[fault_display_name(item)] = item
+            fault_options = list(fault_name_to_type.keys())
+            editor_rows = [
+                {
+                    "Cell": cell["id"],
+                    "Module": f"Module {cell.get('module_number_in_panel', cell.get('module_number'))}",
+                    "Cell in module": cell.get("module_cell_number"),
+                    "Fault": fault_display_name(current_panel_faults[cell["id"]]) if cell["id"] in current_panel_faults else "None",
+                }
+                for cell in panel_cells_for_choice
+            ]
+            edited_fault_rows = st.data_editor(
+                editor_rows,
+                hide_index=True,
+                use_container_width=True,
+                disabled=["Cell", "Module", "Cell in module"],
+                column_config={
+                    "Fault": st.column_config.SelectboxColumn(
+                        "Fault",
+                        options=fault_options,
+                        required=True,
+                    )
+                },
+                key=f"panel_fault_editor_{layout_key}_{selected_row_id}_{panel_choice}",
+                height=360,
+            )
+            if hasattr(edited_fault_rows, "to_dict"):
+                edited_fault_rows = edited_fault_rows.to_dict("records")
+            if st.button("Apply selected panel faults", use_container_width=True):
+                remaining_records = [
+                    record for record in panel_fault_records
+                    if not (
+                        record.get("location_id") == location["id"]
+                        and record.get("row_id") == selected_row_id
+                        and record.get("target_cell_id") in panel_cell_ids
+                    )
+                ]
+                new_panel_records = []
+                cells_by_id_for_panel = {cell["id"]: cell for cell in panel_cells_for_choice}
+                for row in edited_fault_rows:
+                    mapped_fault = fault_name_to_type.get(row.get("Fault"), "")
+                    if not mapped_fault:
+                        continue
+                    cell = cells_by_id_for_panel.get(row.get("Cell"))
+                    if cell is None:
+                        continue
+                    new_panel_records.append(fault_record(location, view, selected_row, cell, mapped_fault, fault_scale))
+                st.session_state["panel_cell_fault_records"] = remaining_records + new_panel_records
+                st.rerun()
+            if st.button("Clear selected panel faults", use_container_width=True):
+                st.session_state["panel_cell_fault_records"] = [
+                    record for record in panel_fault_records
+                    if not (
+                        record.get("location_id") == location["id"]
+                        and record.get("row_id") == selected_row_id
+                        and record.get("target_cell_id") in panel_cell_ids
+                    )
+                ]
+                st.rerun()
+
+    with main_tab:
+        layout_col, hotspot_col = st.columns([1, 1])
+        with layout_col:
+            st.subheader("Rows and Panels")
+            custom_choice = st.checkbox("Realistic generated PV layout", value=current_custom_layout)
+            if custom_choice != current_custom_layout:
+                first_row = f"{row_prefix(location['id'])}1"
+                qp_set(
+                    location=location["id"],
+                    view=view,
+                    inspect=inspection_mode,
+                    custom_layout=1 if custom_choice else 0,
+                    row_count=custom_row_count(location["id"]) if custom_choice else len(base_row_defs_for_location(location["id"])),
+                    panels_per_row=custom_panels_per_row(location["id"]) if custom_choice else default_panels_per_row(location["id"]),
+                    selected_pv=first_row,
+                    selected_cell=f"{first_row}-C001" if custom_choice else f"{first_row}-P001",
+                )
+                st.rerun()
+
+            row_control_value = (
+                custom_row_count(location["id"])
+                if current_custom_layout
+                else min(len(base_row_defs_for_location(location["id"])), max_custom_rows(location["id"]))
+            )
+            panel_control_value = min(
+                custom_panels_per_row(location["id"]) if current_custom_layout else default_panels_per_row(location["id"]),
+                max_custom_panels_per_row(location["id"]),
+            )
+            desired_rows = st.number_input(
+                "Rows",
+                min_value=1,
+                max_value=max_custom_rows(location["id"]),
+                value=row_control_value,
+                step=1,
+                disabled=not current_custom_layout,
+            )
+            desired_panels = st.number_input(
+                "Panels per row",
+                min_value=1,
+                max_value=max_custom_panels_per_row(location["id"]),
+                value=panel_control_value,
+                step=1,
+                disabled=not current_custom_layout,
+            )
+            if current_custom_layout and (
+                int(desired_rows) != custom_row_count(location["id"])
+                or int(desired_panels) != custom_panels_per_row(location["id"])
+            ):
+                first_row = f"{row_prefix(location['id'])}1"
+                qp_set(
+                    location=location["id"],
+                    view=view,
+                    inspect=inspection_mode,
+                    custom_layout=1,
+                    row_count=int(desired_rows),
+                    panels_per_row=int(desired_panels),
+                    selected_pv=first_row,
+                    selected_cell=f"{first_row}-C001",
+                )
+                st.rerun()
+            cells_per_module = CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS
+            cells_per_panel = cells_per_module * SOLAR_PANEL_MODULES
+            st.caption(
+                f"{PV_PANEL_MODEL_NAME}: {int(desired_panels)} panels per row x "
+                f"{SOLAR_PANEL_MODULES} modules/panel x {cells_per_module} cells/module "
+                f"= {int(desired_panels) * cells_per_panel} selectable cells per row."
+            )
+            cap = LAYOUT_CAPS.get(location["id"])
+            if cap:
+                st.info(CAP_JUSTIFICATIONS[location["id"]])
+                if int(desired_rows) >= cap["rows"] or int(desired_panels) >= cap["modules"]:
+                    st.warning(
+                        "At cap: row/panel limits preserve solar-panel aspect ratio, readable cell labels, "
+                        "and prevent layouts from spilling into unusable image areas."
+                    )
+        with hotspot_col:
+            st.subheader("Random Hotspot Generator")
+            hotspot_fault_types = ["SingleHotSpot", "MultiHotSpot"]
             if "random_fault_types" in st.session_state:
                 st.session_state["random_fault_types"] = [
                     canonical_fault_type(item)
                     for item in st.session_state["random_fault_types"]
-                    if canonical_fault_type(item) in available_fault_types
-                ] or default_random_faults
+                    if canonical_fault_type(item) in hotspot_fault_types
+                ] or ["SingleHotSpot"]
             random_types = st.multiselect(
-                "Random diagnostic faults",
-                available_fault_types,
-                default=default_random_faults,
+                "Hotspot type",
+                hotspot_fault_types,
+                default=["SingleHotSpot"],
                 format_func=fault_display_name,
                 key="random_fault_types",
             )
             max_faults = max(1, min(50, target_counts(location["id"])["pv_cells"]))
-            random_count = st.number_input("Number of random faults", min_value=1, max_value=max_faults, value=min(3, max_faults), step=1)
+            random_count = st.number_input("Number of random hotspots", min_value=1, max_value=max_faults, value=min(3, max_faults), step=1)
             random_seed = st.number_input("Random seed", min_value=0, max_value=999999, value=42, step=1)
-            random_locations = st.checkbox("Random cells inside selected module", value=True)
-            if st.button("Generate random faults", use_container_width=True):
+            if st.button("Generate random hotspots", use_container_width=True):
                 if not random_types:
-                    st.warning("Choose at least one random fault type.")
-                elif random_locations:
-                    rng = random.Random(
-                        seed_for(
-                            location["id"],
-                            view,
-                            selected_row_id,
-                            module_choice,
-                            "|".join(random_types),
-                            int(random_count),
-                            int(random_seed),
-                        )
-                    )
-                    choices = module_cells_for_choice or [selected_cell]
+                    st.warning("Choose at least one hotspot type.")
+                else:
+                    rng = random.Random(seed_for(location["id"], view, "|".join(random_types), int(random_count), int(random_seed), "main-hotspots"))
+                    choices = [
+                        (row, cell)
+                        for row in panels(location["id"])
+                        for cell in cells_for_row(location["id"], row["id"])
+                    ]
                     st.session_state["random_fault_records"] = [
-                        fault_record(location, view, selected_row, rng.choice(choices), rng.choice(random_types), fault_scale)
-                        for _ in range(int(random_count))
+                        fault_record(location, view, row, cell, rng.choice(random_types), fault_scale)
+                        for row, cell in (rng.choice(choices) for _ in range(int(random_count)))
                     ]
                     st.rerun()
-                else:
-                    st.session_state["random_fault_records"] = [
-                        fault_record(location, view, selected_row, selected_cell, random_type, fault_scale)
-                        for random_type in random_types
-                    ][: int(random_count)]
-                    st.rerun()
-            if st.button("Clear generated faults", use_container_width=True):
+            if st.button("Clear generated hotspots", use_container_width=True):
                 st.session_state["random_fault_records"] = []
                 st.rerun()
-        with status_col:
-            counts = target_counts(location["id"])
-            active_random = [
-                record for record in stored_fault_records()
-                if record["location_id"] == location["id"]
-            ]
-            st.subheader("Current Setting")
-            st.metric("Selectable PV cells", counts["pv_cells"])
-            st.caption(f"{location['name']} | {view.upper()} | {selected_row['id']} | {selected_cell['id']}")
-            st.caption(
-                f"Manual target bbox px ({manual_record['bbox_px']['x1']}, {manual_record['bbox_px']['y1']})-"
-                f"({manual_record['bbox_px']['x2']}, {manual_record['bbox_px']['y2']})"
-            )
-            st.metric("Generated faults", len(active_random))
 
-    active_fault_records = [
+    generated_fault_records = [
         record for record in stored_fault_records()
         if record["location_id"] == location["id"]
     ]
+    panel_fault_records_for_location = [
+        record for record in st.session_state.get("panel_cell_fault_records", [])
+        if record.get("location_id") == location["id"]
+    ]
+    output_fault_records = generated_fault_records + panel_fault_records_for_location
+    main_display_records = records_for_view(generated_fault_records, view)
     display_records = (
-        display_fault_records(manual_record, active_fault_records)
+        display_fault_records(manual_record, output_fault_records)
         if lock_manual_target
-        else active_fault_records or [manual_record]
+        else output_fault_records or [manual_record]
     )
     display_records = records_for_view(display_records, view)
 
@@ -1530,6 +1614,14 @@ def main():
         module_field_static_canvas_size(location["id"], view),
         selected_row_id,
     )
+    main_pv_scene = module_field_image(
+        location["id"],
+        view,
+        selected_row_id,
+        selected_cell_id,
+        main_display_records,
+        show_grid=False,
+    ).convert("RGB")
     pv_scene = module_field_image(
         location["id"],
         view,
@@ -1543,14 +1635,14 @@ def main():
         big_screen_thermal = pv_scene
     else:
         big_screen_thermal = None
+    main_metadata = scene_metadata(location, view, selected_row, selected_cell, main_display_records)
     metadata = scene_metadata(location, view, selected_row, selected_cell, display_records)
 
     with main_tab:
         st.caption(
-            f"{metadata['location_name']} | {metadata['view']} | rows: {metadata['row_count']} | "
-            f"panels/row: {metadata['panels_per_row']} | modules/row: {metadata['modules_per_row']} | "
-            f"faults: {metadata['fault_count']} | "
-            f"target: {metadata['selected_row']} / {metadata['selected_cell']}"
+            f"{main_metadata['location_name']} | {main_metadata['view']} | rows: {main_metadata['row_count']} | "
+            f"panels/row: {main_metadata['panels_per_row']} | modules/row: {main_metadata['modules_per_row']} | "
+            f"hotspots: {main_metadata['fault_count']}"
         )
         st.subheader("Solar array")
         render_module_field_map(
@@ -1558,9 +1650,9 @@ def main():
             view,
             selected_row_id,
             selected_cell_id,
-            display_records,
-            show_grid=show_bounding_boxes,
-            image=pv_scene,
+            main_display_records,
+            show_grid=False,
+            image=main_pv_scene,
         )
         selected_module_number = selected_cell.get("module_number")
         module_cell_count = len(module_cells_for_target(location["id"], selected_row_id, selected_cell_id))
