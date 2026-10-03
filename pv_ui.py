@@ -228,6 +228,40 @@ def draw_corner_marks(draw, box, color, width=2, ratio=0.28, grow=2):
         draw.line((p1, p2), fill=color, width=width)
 
 
+def short_fault_label(fault_type):
+    name = fault_display_name(fault_type)
+    return {
+        "Surface Obstruction / Partial Shading": "Partial Shading",
+        "Thermal Hotspot Symptom": "Hotspot",
+        "Bypass Diode Fault": "Diode Fault",
+        "Open Circuit String": "Open String",
+        "Reversed Polarity String": "Reversed String",
+    }.get(name, name)
+
+
+def draw_fault_label(draw, box, label, font, canvas_size, fill=(56, 189, 248, 230)):
+    x1, y1, x2, y2 = box
+    canvas_w, canvas_h = canvas_size
+    text_bbox = draw.textbbox((0, 0), label, font=font)
+    text_w = text_bbox[2] - text_bbox[0]
+    text_h = text_bbox[3] - text_bbox[1]
+    pad_x, pad_y = 5, 3
+    label_w = text_w + pad_x * 2
+    label_h = text_h + pad_y * 2
+    label_x = max(2, min(x1, canvas_w - label_w - 2))
+    label_y = y1 - label_h - 4
+    if label_y < 2:
+        label_y = min(y2 + 4, canvas_h - label_h - 2)
+    draw.rounded_rectangle(
+        (label_x, label_y, label_x + label_w, label_y + label_h),
+        radius=2,
+        fill=(8, 13, 24, 190),
+        outline=fill,
+        width=1,
+    )
+    draw.text((label_x + pad_x, label_y + pad_y), label, fill=(255, 255, 255, 245), font=font)
+
+
 # FIX: row-crop overlay is subtle by default. Full grid/numbers only when show_grid=True.
 def draw_visible_cell_grid_on_crop(cropped, location_id, selected_row_id, selected_cell_id, crop, scale=1, show_grid=False):
     image = cropped.convert("RGBA")
@@ -846,8 +880,11 @@ def render_module_zoom_map(image, location_id, view, selected_row_id, selected_c
         rects = base_rects
 
     draw = ImageDraw.Draw(cropped, "RGBA")
-    fault_cell_ids = {record.get("target_cell_id") for record in (fault_records or [])}
-    num_font = grid_font(12)
+    faults_by_cell = {}
+    for record in fault_records or []:
+        faults_by_cell.setdefault(record.get("target_cell_id"), []).append(record)
+    fault_cell_ids = set(faults_by_cell)
+    label_font = grid_font(12)
 
     # FIX: no thick boxes on every cell. Corner brackets mark selection / faults; grid is opt-in.
     for cell in module_cells:
@@ -855,14 +892,22 @@ def render_module_zoom_map(image, location_id, view, selected_row_id, selected_c
         selected = cell["id"] == selected_cell_id
         faulted = cell["id"] in fault_cell_ids
         if show_grid:
-            draw.rectangle(rect, outline=(224, 242, 254, 70), width=1)
-            label = str(cell.get("pv_cell_number_in_row", ""))
-            if label:
-                draw.text((rect[0] + 4, rect[1] + 3), label, fill=(255, 255, 255, 190), font=num_font)
+            outline = (56, 189, 248, 225) if faulted else (224, 242, 254, 45)
+            draw.rectangle(rect, outline=outline, width=2 if faulted else 1)
         if faulted and not selected:
             draw_corner_marks(draw, rect, (56, 189, 248, 235), width=2)
         if selected:
             draw_corner_marks(draw, rect, (250, 204, 21, 255), width=3)
+        if show_grid and faulted:
+            names = []
+            for record in faults_by_cell[cell["id"]]:
+                name = short_fault_label(record.get("fault_type"))
+                if name not in names:
+                    names.append(name)
+            label = ", ".join(names[:2])
+            if len(names) > 2:
+                label += f" +{len(names) - 2}"
+            draw_fault_label(draw, rect, label, label_font, cropped.size)
 
     uri = data_uri(cropped)
     svg_parts = [
@@ -1146,6 +1191,7 @@ def module_field_image(location_id, view, selected_row_id, selected_cell_id, fau
     field_w, field_h = static_field_w, static_field_h
     field = module_field_background(location_id, view, (field_w, field_h), selected_row_id).convert("RGBA")
     draw = ImageDraw.Draw(field, "RGBA")
+    label_font = grid_font(12 if max_visible_panels < 6 else 10)
 
     selected_rect = None
     for row_idx, row in enumerate(visible_rows):
@@ -1197,6 +1243,16 @@ def module_field_image(location_id, view, selected_row_id, selected_cell_id, fau
             if show_grid:
                 outline = (56, 189, 248, 180) if records else (224, 242, 254, 80)
                 draw.rectangle((x, y, x + tile_w, y + tile_h), outline=outline, width=2)
+                if records:
+                    names = []
+                    for record in records:
+                        name = short_fault_label(record.get("fault_type"))
+                        if name not in names:
+                            names.append(name)
+                    label = ", ".join(names[:2])
+                    if len(names) > 2:
+                        label += f" +{len(names) - 2}"
+                    draw_fault_label(draw, (x, y, x + tile_w, y + tile_h), label, label_font, field.size)
             if is_selected:
                 selected_rect = (x, y, x + tile_w, y + tile_h)
 
