@@ -335,7 +335,7 @@ def render_photo_map(image, location_id, view, selected_row_id, selected_cell_id
     uri = data_uri(image)
     svg_parts = [
         f'<svg width="{BASE_SIZE[0]}" height="{BASE_SIZE[1]}" viewBox="0 0 {BASE_SIZE[0]} {BASE_SIZE[1]}" xmlns="http://www.w3.org/2000/svg">',
-        f'<image href="{uri}" width="{BASE_SIZE[0]}" height="{BASE_SIZE[1]}" preserveAspectRatio="xMidYMid slice"/>',
+        f'<image href="{uri}" width="{BASE_SIZE[0]}" height="{BASE_SIZE[1]}" preserveAspectRatio="xMidYMid meet"/>',
     ]
     if include_links:
         for panel in panels(location_id):
@@ -368,14 +368,14 @@ def render_photo_map(image, location_id, view, selected_row_id, selected_cell_id
         f"""
         <div class="frame">{''.join(svg_parts)}</div>
         <style>
-          .frame {{ width:100%; overflow:hidden; border:1px solid #263244; border-radius:10px; background:#050816; }}
+          .frame {{ width:100%; overflow:auto; border:1px solid #263244; border-radius:10px; background:#050816; }}
           svg {{ width:100%; height:auto; display:block; }}
           a {{ cursor:pointer; }}
           a:hover rect {{ opacity:.55; stroke:#38bdf8; stroke-width:2; }}
         </style>
         """,
         height=430,
-        scrolling=False,
+        scrolling=True,
     )
 
 
@@ -474,8 +474,8 @@ def _noise_field(shape, seed, sigma, octaves=2):
 def close_module_geometry(size):
     """Square cells on a real pitch. Frame and backsheet border are sized to hug the cell grid."""
     width, height = size
-    cols = CUSTOM_MODULE_CELL_ROWS   # display columns (8 for a 40-cell module laid landscape)
-    rows = CUSTOM_MODULE_CELL_COLS   # display rows (5)
+    cols = CUSTOM_MODULE_CELL_ROWS   # display columns (10 for a 40-cell module laid landscape)
+    rows = CUSTOM_MODULE_CELL_COLS   # display rows (4)
     outer_margin = max(16, int(min(width, height) * 0.03))
     frame_t = max(12, int(min(width, height) * 0.026))
     pad = max(6, int(frame_t * 0.55))
@@ -807,13 +807,24 @@ def draw_close_thermal_module(module_cells, selected_cell_id, fault_records, siz
         else:
             rnd = random.Random(_fault_seed(record, "close-hot"))
             spots = 2 + rnd.randint(0, 1) if ft == "MultiHotSpot" else 1
-            for _ in range(spots):
+            for spot_idx in range(spots):
                 cx = x1 + cw * rnd.uniform(0.34, 0.66)
                 cy = y1 + ch * rnd.uniform(0.34, 0.66)
-                s = 0.17 if spots == 1 else 0.11
-                _add_gaussian(temp, cx, cy, cw * s, ch * s, 60 + 50 * sev)
-            temp[y1:y2, x1:x2] += 6 + 8 * sev
-            _add_gaussian(temp, (x1 + x2) / 2, (y1 + y2) / 2, pitch * 0.6, pitch * 0.6, 8 + 10 * sev)
+                sx = cw * (0.18 if spots == 1 else 0.12) * rnd.uniform(0.78, 1.18)
+                sy = ch * (0.22 if spots == 1 else 0.15) * rnd.uniform(0.78, 1.18)
+                local_h, local_w = max(1, y2 - y1), max(1, x2 - x1)
+                yy_l, xx_l = np.mgrid[0:local_h, 0:local_w].astype(np.float32)
+                dx = xx_l + x1 - cx
+                dy = yy_l + y1 - cy
+                angle = rnd.uniform(-0.8, 0.8)
+                xr = math.cos(angle) * dx + math.sin(angle) * dy
+                yr = -math.sin(angle) * dx + math.cos(angle) * dy
+                core = np.exp(-((xr / max(1.0, sx)) ** 2 + (yr / max(1.0, sy)) ** 2) * 2.2)
+                halo = np.exp(-((xr / max(1.0, sx * 1.9)) ** 2 + (yr / max(1.0, sy * 1.7)) ** 2) * 1.1)
+                rough = _noise_field((local_h, local_w), _fault_seed(record, f"close-hot-rough-{spot_idx}"), max(4.0, min(cw, ch) * 0.22), 3)
+                anomaly = np.clip(halo * (0.62 + rough * 0.48) + core * 0.62, 0, 1)
+                temp[y1:y2, x1:x2] += anomaly * (34 + 46 * sev) + core * (28 + 34 * sev)
+            temp[y1:y2, x1:x2] += 5 + 7 * sev
 
     # Camera model: optics blur, sensor noise, banding, vignette, dithering
     temp = cv2.GaussianBlur(temp, (0, 0), 1.3)
@@ -942,6 +953,416 @@ def render_module_zoom_map(image, location_id, view, selected_row_id, selected_c
     return selected_module, len(module_cells)
 
 
+def render_diagnostic_module_map(location, view, selected_row_id, selected_cell_id, selected_region, selected_module, fault_records=None, show_boxes=True, show_cell_map=False):
+    module_image = close_module_diagnostic_image(location["id"], view, selected_row_id, selected_cell_id, fault_records)
+    crop_w, crop_h = module_image.size
+    module_cells = module_cells_for_target(location["id"], selected_row_id, selected_cell_id)
+    rects = close_module_cell_rects(module_cells, module_image.size)
+    draw = ImageDraw.Draw(module_image, "RGBA")
+    faults_by_cell = {}
+    for record in fault_records or []:
+        if record.get("location_id") != location["id"]:
+            continue
+        faults_by_cell.setdefault(record.get("target_cell_id"), []).append(record)
+    label_font = grid_font(12)
+
+    for cell in module_cells:
+        rect = rects[cell["id"]]
+        selected = cell["id"] == selected_cell_id
+        faulted = cell["id"] in faults_by_cell
+        if show_cell_map:
+            draw.rectangle(rect, outline=(186, 230, 253, 38), width=1)
+        if show_boxes and faulted:
+            draw_corner_marks(draw, rect, (251, 146, 60, 245), width=2)
+            names = []
+            for record in faults_by_cell[cell["id"]]:
+                name = short_fault_label(record.get("fault_type"))
+                if name not in names:
+                    names.append(name)
+            label = ", ".join(names[:2])
+            if len(names) > 2:
+                label += f" +{len(names) - 2}"
+            draw_fault_label(draw, rect, label, label_font, module_image.size)
+        if selected:
+            draw_corner_marks(draw, rect, (56, 189, 248, 255), width=3)
+
+    uri = data_uri(module_image)
+    svg_parts = [
+        f'<svg width="{crop_w}" height="{crop_h}" viewBox="0 0 {crop_w} {crop_h}" xmlns="http://www.w3.org/2000/svg">',
+        f'<image href="{uri}" width="{crop_w}" height="{crop_h}" preserveAspectRatio="xMidYMid meet"/>',
+    ]
+    row_number = selected_region["row"] if selected_region else row_number_from_id(location["id"], selected_row_id)
+    array_col = selected_region["col"] if selected_region else int(cell_by_id(location["id"], selected_row_id, selected_cell_id).get("panel_number") or 1)
+    array_key = selected_region["key"] if selected_region else f"R{row_number}-A{array_col:02d}"
+    for cell in module_cells:
+        rel_x1, rel_y1, rel_x2, rel_y2 = rects[cell["id"]]
+        params = navigation_params(
+            location["id"],
+            view,
+            selected_row_id,
+            cell["id"],
+            section="Faults",
+            selected_array=array_key,
+            selected_module=selected_module,
+            cell_active=1,
+        )
+        target = f"?{urlencode(params)}"
+        svg_parts.append(
+            f'<a href="{esc(target)}" target="_parent">'
+            f'<title>{esc(cell["label"])}</title>'
+            f'<rect x="{rel_x1}" y="{rel_y1}" width="{rel_x2 - rel_x1}" height="{rel_y2 - rel_y1}" '
+            f'fill="#000000" fill-opacity="0.001" stroke="#38bdf8" stroke-width="1" opacity="0" pointer-events="all"/></a>'
+        )
+    svg_parts.append("</svg>")
+    components.html(
+        f"""
+        <div class="diagnostic-module-frame">{''.join(svg_parts)}</div>
+        <style>
+          .diagnostic-module-frame {{
+            width:100%;
+            overflow:hidden;
+            border:1px solid #20324a;
+            border-radius:14px;
+            background:#020617;
+          }}
+          .diagnostic-module-frame svg {{
+            width:100%;
+            max-width:1100px;
+            height:auto;
+            display:block;
+            margin:auto;
+          }}
+          .diagnostic-module-frame a {{ cursor:pointer; }}
+          .diagnostic-module-frame a:hover rect {{
+            opacity:1;
+            stroke:#38bdf8;
+            stroke-width:2;
+            filter:drop-shadow(0 0 7px rgba(56,189,248,.72));
+          }}
+        </style>
+        """,
+        height=690,
+        scrolling=False,
+    )
+    return module_image
+
+
+def show_diagnostic_compare(location, selected_row_id, selected_cell_id, fault_records=None, show_boxes=True, show_cell_map=False):
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.caption("RGB diagnostic")
+        image = close_module_diagnostic_image(location["id"], "rgb", selected_row_id, selected_cell_id, fault_records)
+        image = draw_module_fault_boxes(image, location["id"], selected_row_id, selected_cell_id, fault_records, show_boxes, show_cell_map)
+        st.image(image, use_container_width=True)
+    with col_b:
+        st.caption("Thermal diagnostic")
+        image = close_module_diagnostic_image(location["id"], "thermal", selected_row_id, selected_cell_id, fault_records)
+        image = draw_module_fault_boxes(image, location["id"], selected_row_id, selected_cell_id, fault_records, show_boxes, show_cell_map)
+        st.image(image, use_container_width=True)
+
+
+def draw_module_fault_boxes(image, location_id, selected_row_id, selected_cell_id, fault_records=None, show_boxes=True, show_cell_map=False):
+    module_cells = module_cells_for_target(location_id, selected_row_id, selected_cell_id)
+    rects = close_module_cell_rects(module_cells, image.size)
+    output = image.convert("RGBA")
+    draw = ImageDraw.Draw(output, "RGBA")
+    label_font = grid_font(12)
+    if show_cell_map:
+        for rect in rects.values():
+            draw.rectangle(rect, outline=(186, 230, 253, 38), width=1)
+    if show_boxes:
+        for record in fault_records or []:
+            cell_id = record.get("target_cell_id")
+            if cell_id not in rects:
+                continue
+            rect = rects[cell_id]
+            draw_corner_marks(draw, rect, (251, 146, 60, 245), width=2)
+            draw_fault_label(draw, rect, short_fault_label(record.get("fault_type")), label_font, output.size)
+    selected_rect = rects.get(selected_cell_id)
+    if selected_rect:
+        draw_corner_marks(draw, selected_rect, (56, 189, 248, 255), width=3)
+    return output.convert("RGB")
+
+
+def selected_cell_detail_image(module_image, location_id, selected_row_id, selected_cell_id, fault_records=None, show_boxes=True, show_cell_map=False):
+    module_cells = module_cells_for_target(location_id, selected_row_id, selected_cell_id)
+    selected_cell = cell_by_id(location_id, selected_row_id, selected_cell_id)
+    rects = close_module_cell_rects(module_cells, module_image.size)
+    row = int(selected_cell.get("module_cell_row") or 1)
+    col = int(selected_cell.get("module_cell_col") or 1)
+    neighbor_ids = [
+        cell["id"]
+        for cell in module_cells
+        if abs(int(cell.get("module_cell_row") or 1) - row) <= 1
+        and abs(int(cell.get("module_cell_col") or 1) - col) <= 1
+    ]
+    boxes = [rects[cell_id] for cell_id in neighbor_ids if cell_id in rects] or [rects[selected_cell_id]]
+    x1 = min(box[0] for box in boxes)
+    y1 = min(box[1] for box in boxes)
+    x2 = max(box[2] for box in boxes)
+    y2 = max(box[3] for box in boxes)
+    pad_x = max(12, int((x2 - x1) * 0.10))
+    pad_y = max(12, int((y2 - y1) * 0.10))
+    crop = (
+        max(0, x1 - pad_x),
+        max(0, y1 - pad_y),
+        min(module_image.width, x2 + pad_x),
+        min(module_image.height, y2 + pad_y),
+    )
+    detail = module_image.crop(crop).convert("RGBA")
+    draw = ImageDraw.Draw(detail, "RGBA")
+    label_font = grid_font(11)
+    for cell in module_cells:
+        rect = rects[cell["id"]]
+        if rect[2] < crop[0] or rect[0] > crop[2] or rect[3] < crop[1] or rect[1] > crop[3]:
+            continue
+        local = (rect[0] - crop[0], rect[1] - crop[1], rect[2] - crop[0], rect[3] - crop[1])
+        if show_cell_map:
+            draw.rectangle(local, outline=(186, 230, 253, 70), width=1)
+        if cell["id"] == selected_cell_id:
+            draw_corner_marks(draw, local, (56, 189, 248, 255), width=3)
+    if show_boxes:
+        for record in fault_records or []:
+            cell_id = record.get("target_cell_id")
+            if cell_id not in rects:
+                continue
+            rect = rects[cell_id]
+            if rect[2] < crop[0] or rect[0] > crop[2] or rect[3] < crop[1] or rect[1] > crop[3]:
+                continue
+            local = (rect[0] - crop[0], rect[1] - crop[1], rect[2] - crop[0], rect[3] - crop[1])
+            draw_corner_marks(draw, local, (251, 146, 60, 245), width=2)
+            draw_fault_label(draw, local, short_fault_label(record.get("fault_type")), label_font, detail.size)
+    if detail.width < 460:
+        scale = min(3, max(1, int(math.ceil(460 / max(1, detail.width)))))
+        detail = detail.resize((detail.width * scale, detail.height * scale), Image.Resampling.LANCZOS)
+    return detail.convert("RGB")
+
+
+def array_context_thumbnail(scene_image, region, selected_module):
+    crop, origin, modules, _ = crop_array_from_module_union(scene_image, region, 0.12)
+    thumb = crop.convert("RGBA")
+    draw = ImageDraw.Draw(thumb, "RGBA")
+    scale = 1
+    for module_number, module in modules.items():
+        display_polygon = polygon_to_crop(module_outer_polygon(module), origin, scale)
+        color = (56, 189, 248, 235) if module_number == selected_module else (226, 232, 240, 92)
+        width = 3 if module_number == selected_module else 1
+        draw.line([tuple(point) for point in display_polygon] + [tuple(display_polygon[0])], fill=color, width=width)
+    return thumb.convert("RGB")
+
+
+def scale_polygon(points, scale_x, scale_y):
+    return [(float(x) * scale_x, float(y) * scale_y) for x, y in points]
+
+
+def scale_box(box, scale_x, scale_y):
+    x1, y1, x2, y2 = box
+    return (
+        int(round(x1 * scale_x)),
+        int(round(y1 * scale_y)),
+        int(round(x2 * scale_x)),
+        int(round(y2 * scale_y)),
+    )
+
+
+def scale_region_to_image(region, from_size, to_size):
+    scale_x = to_size[0] / max(1, from_size[0])
+    scale_y = to_size[1] / max(1, from_size[1])
+    scaled = dict(region)
+    scaled["box"] = scale_box(region["box"], scale_x, scale_y)
+    scaled["polygon"] = scale_polygon(region.get("polygon") or box_polygon(region["box"]), scale_x, scale_y)
+    modules = {}
+    for module_number, module in (region.get("modules") or array_module_polygons(region)).items():
+        module_polygon = scale_polygon(module["polygon"], scale_x, scale_y)
+        modules[int(module_number)] = {
+            "module_number": int(module_number),
+            "polygon": module_polygon,
+            "box": polygon_bounds(module_polygon),
+        }
+    scaled["modules"] = modules
+    return scaled
+
+
+def close_source_scene(location_id, view, selected_row_id, selected_cell_id, fault_records=None, fallback=None):
+    source = cached_close_source_scene(
+        location_id,
+        view,
+        source_fault_key(fault_records),
+        solar_render_cache_signature(location_id),
+    )
+    if source is not None:
+        return source.convert("RGB")
+    return fallback.convert("RGB") if fallback is not None else None
+
+
+def crop_natural_module_image(source_image, preview_size, region, selected_module, pad_ratio=0.62):
+    source_region = scale_region_to_image(region, preview_size, source_image.size)
+    module_geometry = (source_region.get("modules") or array_module_polygons(source_region))[int(selected_module)]
+    crop, origin = crop_from_polygon(source_image, module_geometry["polygon"], pad_ratio, min_pad=32, max_pad_ratio=0.92)
+    return crop, origin, source_region, module_geometry
+
+
+def cell_no_for_selected(location_id, selected_row_id, selected_cell_id):
+    try:
+        selected_cell = cell_by_id(location_id, selected_row_id, selected_cell_id)
+        return int(selected_cell.get("module_cell_number") or 1)
+    except Exception:
+        return 1
+
+
+def fault_cell_numbers_for_module(location_id, region, selected_module, fault_records):
+    row_id = f"{row_prefix(location_id)}{region['row']}"
+    faulted = {}
+    for record in fault_records or []:
+        if record.get("location_id") != location_id or record.get("row_id") != row_id:
+            continue
+        try:
+            cell = cell_by_id(location_id, row_id, record.get("target_cell_id"))
+        except Exception:
+            continue
+        if int(cell.get("panel_number") or 1) != int(region["col"]):
+            continue
+        if int(cell.get("module_number_in_panel") or 1) != int(selected_module):
+            continue
+        faulted.setdefault(int(cell.get("module_cell_number") or 1), []).append(record)
+    return faulted
+
+
+def render_natural_module_map(source_image, preview_size, location, view, region, selected_module, selected_row_id, selected_cell_id, fault_records=None, show_boxes=True, show_cell_map=False):
+    crop, origin, source_region, module_geometry = crop_natural_module_image(source_image, preview_size, region, selected_module, 0.62)
+    crop_w, crop_h = crop.size
+    module_polygon = module_geometry["polygon"]
+    display_module_polygon = polygon_to_crop(module_polygon, origin, 1)
+    cells = module_cell_polygons(module_polygon)
+    selected_cell_no = cell_no_for_selected(location["id"], selected_row_id, selected_cell_id)
+    faulted = fault_cell_numbers_for_module(location["id"], region, selected_module, fault_records)
+    image = crop.convert("RGBA")
+    draw = ImageDraw.Draw(image, "RGBA")
+    label_font = grid_font(12)
+
+    if show_cell_map:
+        for cell_geometry in cells.values():
+            draw.line(
+                [tuple(point) for point in polygon_to_crop(cell_geometry["polygon"], origin, 1)] + [tuple(polygon_to_crop(cell_geometry["polygon"], origin, 1)[0])],
+                fill=(186, 230, 253, 46),
+                width=1,
+            )
+    for cell_no, records in faulted.items():
+        if not show_boxes:
+            continue
+        fault_polygon = polygon_to_crop(cells[cell_no]["polygon"], origin, 1)
+        draw.line([tuple(point) for point in fault_polygon] + [tuple(fault_polygon[0])], fill=(251, 146, 60, 245), width=2)
+    selected_polygon = polygon_to_crop(cells[selected_cell_no]["polygon"], origin, 1)
+    draw.line([tuple(point) for point in selected_polygon] + [tuple(selected_polygon[0])], fill=(56, 189, 248, 170), width=2)
+
+    uri = data_uri(image.convert("RGB"))
+    row_number = region["row"]
+    array_col = region["col"]
+    array_key = region["key"]
+    svg_parts = [
+        f'<svg width="{crop_w}" height="{crop_h}" viewBox="0 0 {crop_w} {crop_h}" xmlns="http://www.w3.org/2000/svg">',
+        f'<image href="{uri}" width="{crop_w}" height="{crop_h}" preserveAspectRatio="xMidYMid meet"/>',
+    ]
+    for cell_no, cell_geometry in cells.items():
+        display_cell_polygon = polygon_to_crop(cell_geometry["polygon"], origin, 1)
+        row_id, target_cell = default_cell_for_array(location["id"], row_number, array_col, selected_module, cell_no)
+        params = navigation_params(
+            location["id"],
+            view,
+            row_id,
+            target_cell["id"],
+            section="Faults",
+            selected_array=array_key,
+            selected_module=selected_module,
+            cell_active=1,
+        )
+        target = f"?{urlencode(params)}"
+        svg_parts.append(
+            f'<a href="{esc(target)}" target="_parent"><title>{esc(target_cell["label"])}</title>'
+            f'<polygon points="{svg_points(display_cell_polygon)}" fill="#38bdf8" fill-opacity=".001" '
+            f'stroke="#38bdf8" stroke-width="1" stroke-opacity="0" pointer-events="all"/></a>'
+        )
+    svg_parts.append("</svg>")
+    components.html(
+        f"""
+        <div class="natural-module-frame">{''.join(svg_parts)}</div>
+        <style>
+          .natural-module-frame {{
+            width:100%;
+            overflow:hidden;
+            border:1px solid #20324a;
+            border-radius:14px;
+            background:#020617;
+          }}
+          .natural-module-frame svg {{
+            width:100%;
+            max-height:72vh;
+            height:auto;
+            display:block;
+            margin:auto;
+          }}
+          .natural-module-frame a {{ cursor:pointer; }}
+          .natural-module-frame a:hover polygon {{
+            stroke-opacity:1;
+            stroke-width:2;
+            filter:drop-shadow(0 0 7px rgba(56,189,248,.72));
+          }}
+        </style>
+        """,
+        height=640,
+        scrolling=False,
+    )
+    return image.convert("RGB"), origin, source_region, module_geometry, cells
+
+
+def natural_cell_detail_image(source_image, preview_size, location, region, selected_module, selected_row_id, selected_cell_id, fault_records=None, show_boxes=True, show_cell_map=False):
+    source_region = scale_region_to_image(region, preview_size, source_image.size)
+    module_geometry = (source_region.get("modules") or array_module_polygons(source_region))[int(selected_module)]
+    cells = module_cell_polygons(module_geometry["polygon"])
+    selected_no = cell_no_for_selected(location["id"], selected_row_id, selected_cell_id)
+    selected_cell = cell_by_id(location["id"], selected_row_id, selected_cell_id)
+    selected_row = int(selected_cell.get("module_cell_row") or 1)
+    selected_col = int(selected_cell.get("module_cell_col") or 1)
+    module_cells = module_cells_for_target(location["id"], selected_row_id, selected_cell_id)
+    neighbor_numbers = [
+        int(cell.get("module_cell_number") or 1)
+        for cell in module_cells
+        if abs(int(cell.get("module_cell_row") or 1) - selected_row) <= 1
+        and abs(int(cell.get("module_cell_col") or 1) - selected_col) <= 1
+    ]
+    points = [point for no in neighbor_numbers for point in cells.get(no, cells[selected_no])["polygon"]]
+    crop, origin = crop_from_polygon(source_image, points, 0.14, min_pad=14, max_pad_ratio=0.24)
+    image = crop.convert("RGBA")
+    draw = ImageDraw.Draw(image, "RGBA")
+    faulted = fault_cell_numbers_for_module(location["id"], region, selected_module, fault_records)
+    for no in neighbor_numbers:
+        polygon = polygon_to_crop(cells[no]["polygon"], origin, 1)
+        if show_cell_map:
+            draw.line([tuple(point) for point in polygon] + [tuple(polygon[0])], fill=(186, 230, 253, 70), width=1)
+        if no == selected_no:
+            draw.line([tuple(point) for point in polygon] + [tuple(polygon[0])], fill=(56, 189, 248, 255), width=3)
+        if show_boxes and no in faulted:
+            draw.line([tuple(point) for point in polygon] + [tuple(polygon[0])], fill=(251, 146, 60, 245), width=2)
+    if image.width < 460:
+        scale = min(3, max(1, int(math.ceil(460 / max(1, image.width)))))
+        image = image.resize((image.width * scale, image.height * scale), Image.Resampling.LANCZOS)
+    return image.convert("RGB")
+
+
+def show_natural_compare(location, selected_row_id, selected_cell_id, preview_size, region, selected_module, fault_records=None, show_boxes=True, show_cell_map=False, rgb_fallback=None, thermal_fallback=None):
+    rgb_source = rgb_fallback.convert("RGB") if rgb_fallback is not None else close_source_scene(location["id"], "rgb", selected_row_id, selected_cell_id, [], rgb_fallback)
+    thermal_source = thermal_fallback.convert("RGB") if thermal_fallback is not None else close_source_scene(location["id"], "thermal", selected_row_id, selected_cell_id, fault_records, rgb_fallback)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.caption("RGB natural crop")
+        crop, origin, source_region, module_geometry = crop_natural_module_image(rgb_source, preview_size, region, selected_module, 0.62)
+        st.image(crop, use_container_width=True)
+    with col_b:
+        st.caption("Thermal natural crop")
+        crop, origin, source_region, module_geometry = crop_natural_module_image(thermal_source, preview_size, region, selected_module, 0.62)
+        st.image(crop, use_container_width=True)
+
+
 def module_cells_by_number(location_id, selected_row_id):
     grouped = {}
     for cell in cells_for_row(location_id, selected_row_id):
@@ -989,6 +1410,75 @@ def compact_fault_key(fault_records):
             for record in (fault_records or [])
         )
     )
+
+
+def source_fault_key(fault_records):
+    return tuple(
+        sorted(
+            (
+                str(record.get("row_id", "")),
+                str(record.get("target_cell_id", "")),
+                str(canonical_fault_type(record.get("fault_type", ""))),
+                int(record.get("fault_scale", DEFAULT_FAULT_SCALE)),
+            )
+            for record in (fault_records or [])
+        )
+    )
+
+
+def solar_render_cache_signature(location_id, size=None):
+    signature = []
+    for path in (solar_render_asset_path(location_id), solar_render_metadata_path(location_id)):
+        if not path:
+            signature.append(("", 0, 0))
+            continue
+        try:
+            stat = path.stat()
+            signature.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+        except OSError:
+            signature.append((str(path), 0, 0))
+    return (tuple(signature), tuple(size or ()))
+
+
+def records_from_source_fault_key(fault_key):
+    return [
+        {
+            "row_id": row_id,
+            "target_cell_id": target_cell_id,
+            "fault_type": fault_type,
+            "fault_scale": fault_scale,
+        }
+        for row_id, target_cell_id, fault_type, fault_scale in (fault_key or ())
+    ]
+
+
+def stable_fault_render_target(location_id, fault_key):
+    for row_id, target_cell_id, _fault_type, _fault_scale in (fault_key or ()):
+        try:
+            row_by_id(location_id, row_id)
+            cell_by_id(location_id, row_id, target_cell_id)
+            return row_id, target_cell_id
+        except Exception:
+            continue
+    try:
+        row_id = panels(location_id)[0]["id"]
+        cell_id = cells_for_row(location_id, row_id)[0]["id"]
+        return row_id, cell_id
+    except Exception:
+        return "", ""
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def cached_close_source_scene(location_id, view, fault_key, render_signature):
+    master = solar_render_image(location_id, None)
+    if master is None:
+        return None
+    master = master.convert("RGB")
+    if view != "thermal":
+        return master
+    records = records_from_source_fault_key(fault_key)
+    render_row_id, render_cell_id = stable_fault_render_target(location_id, fault_key)
+    return solar_render_thermal_image(location_id, master, render_row_id, render_cell_id, records).convert("RGB")
 
 
 @st.cache_data(show_spinner=False, max_entries=512)
@@ -1103,7 +1593,625 @@ def module_field_static_canvas_size(location_id, view):
     return (1280, 720)
 
 
+def solar_render_panel_mask(rendered):
+    rgb = np.asarray(rendered.convert("RGB")).astype(np.float32)
+    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    gray = rgb.mean(axis=2)
+    vegetation_green = (2.0 * g) - r - b
+    dark_hardware = (gray < 118) & (vegetation_green < 38) & (b > r * 0.88) & (g < 126)
+    mask = dark_hardware.astype(np.uint8) * 255
+    kernel_small = np.ones((3, 3), np.uint8)
+    kernel_mid = np.ones((7, 7), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_small)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_mid)
+    return cv2.GaussianBlur(mask, (0, 0), 1.2)
+
+
+def solar_render_array_boxes(panel_mask, rows, cols):
+    expected = max(1, rows * cols)
+    binary = (panel_mask > 72).astype(np.uint8)
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, 8)
+    min_area = max(60, int(binary.size * 0.00035))
+    boxes = []
+    for label in range(1, count):
+        x, y, w, h, area = stats[label]
+        if area >= min_area:
+            boxes.append((int(x), int(y), int(x + w), int(y + h), int(area), centroids[label]))
+
+    if len(boxes) >= expected:
+        boxes = sorted(boxes, key=lambda item: item[4], reverse=True)[:expected]
+        boxes = sorted(boxes, key=lambda item: item[5][1])
+        grouped = []
+        for row_idx in range(rows):
+            group = boxes[row_idx * cols:(row_idx + 1) * cols]
+            grouped.extend(sorted(group, key=lambda item: item[5][0]))
+        return {
+            (idx // cols + 1, idx % cols + 1): box[:4]
+            for idx, box in enumerate(grouped)
+        }
+
+    ys, xs = np.where(binary > 0)
+    if xs.size == 0 or ys.size == 0:
+        return {}
+    left, right = int(xs.min()), int(xs.max())
+    top, bottom = int(ys.min()), int(ys.max())
+    box_w = max(1, (right - left) / max(1, cols))
+    box_h = max(1, (bottom - top) / max(1, rows))
+    fallback = {}
+    for row_idx in range(rows):
+        for col_idx in range(cols):
+            x1 = int(left + col_idx * box_w)
+            x2 = int(left + (col_idx + 1) * box_w)
+            y1 = int(top + row_idx * box_h)
+            y2 = int(top + (row_idx + 1) * box_h)
+            fallback[(row_idx + 1, col_idx + 1)] = (x1, y1, x2, y2)
+    return fallback
+
+
+def solar_render_metadata_array_boxes(panel_mask, metadata):
+    transforms = ((metadata or {}).get("topology") or {}).get("array_transforms") or []
+    row_strings = ((metadata or {}).get("topology") or {}).get("row_strings") or []
+    if not transforms or not row_strings:
+        return {}
+    binary = (panel_mask > 72).astype(np.uint8)
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, 8)
+    min_area = max(60, int(binary.size * 0.00035))
+    boxes = []
+    for label in range(1, count):
+        x, y, w, h, area = stats[label]
+        if area >= min_area:
+            boxes.append((int(x), int(y), int(x + w), int(y + h), int(area), centroids[label]))
+    if len(boxes) < len(transforms):
+        return {}
+    boxes = sorted(boxes, key=lambda item: item[4], reverse=True)[:len(transforms)]
+    boxes = sorted(boxes, key=lambda item: item[5][1])
+    result = {}
+    cursor = 0
+    for row in sorted(row_strings, key=lambda item: item.get("row_id", 0)):
+        row_id = int(row.get("row_id", 0))
+        row_count = int(row.get("count", 0))
+        group = sorted(boxes[cursor:cursor + row_count], key=lambda item: item[5][0])
+        cursor += row_count
+        row_transforms = sorted(
+            [item for item in transforms if int(item.get("row", 0)) == row_id],
+            key=lambda item: int(item.get("col", 0)),
+        )
+        for transform, box in zip(row_transforms, group):
+            result[(int(transform.get("row", 0)), int(transform.get("col", 0)))] = box[:4]
+    return result
+
+
+def polygon_bounds(points):
+    xs = [float(point[0]) for point in points]
+    ys = [float(point[1]) for point in points]
+    return (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
+
+
+def box_polygon(box):
+    x1, y1, x2, y2 = [float(v) for v in box]
+    return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+
+def order_quad_points(points):
+    pts = np.asarray(points, dtype=np.float32).reshape(4, 2)
+    sums = pts.sum(axis=1)
+    diffs = pts[:, 0] - pts[:, 1]
+    top_left = pts[np.argmin(sums)]
+    bottom_right = pts[np.argmax(sums)]
+    top_right = pts[np.argmax(diffs)]
+    bottom_left = pts[np.argmin(diffs)]
+    return [
+        (float(top_left[0]), float(top_left[1])),
+        (float(top_right[0]), float(top_right[1])),
+        (float(bottom_right[0]), float(bottom_right[1])),
+        (float(bottom_left[0]), float(bottom_left[1])),
+    ]
+
+
+def quad_point(quad, u, v):
+    tl, tr, br, bl = [np.asarray(point, dtype=np.float32) for point in quad]
+    point = (1 - u) * (1 - v) * tl + u * (1 - v) * tr + u * v * br + (1 - u) * v * bl
+    return (float(point[0]), float(point[1]))
+
+
+def quad_subpolygon(quad, u1, v1, u2, v2):
+    return [
+        quad_point(quad, u1, v1),
+        quad_point(quad, u2, v1),
+        quad_point(quad, u2, v2),
+        quad_point(quad, u1, v2),
+    ]
+
+
+MODULE_ACTIVE_INSET_U = 0.060
+MODULE_ACTIVE_INSET_V = 0.085
+CELL_SAFE_INSET_U = 0.16
+CELL_SAFE_INSET_V = 0.18
+
+
+def polygon_centroid(points):
+    pts = list(points or [])
+    if not pts:
+        return (0.0, 0.0)
+    return (
+        float(sum(float(point[0]) for point in pts) / len(pts)),
+        float(sum(float(point[1]) for point in pts) / len(pts)),
+    )
+
+
+def point_in_polygon(point, polygon):
+    x, y = float(point[0]), float(point[1])
+    inside = False
+    pts = list(polygon or [])
+    if len(pts) < 3:
+        return False
+    j = len(pts) - 1
+    for i, pi in enumerate(pts):
+        xi, yi = float(pi[0]), float(pi[1])
+        xj, yj = float(pts[j][0]), float(pts[j][1])
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / ((yj - yi) or 1e-9) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def active_module_polygon(module_polygon):
+    return quad_subpolygon(
+        module_polygon,
+        MODULE_ACTIVE_INSET_U,
+        MODULE_ACTIVE_INSET_V,
+        1.0 - MODULE_ACTIVE_INSET_U,
+        1.0 - MODULE_ACTIVE_INSET_V,
+    )
+
+
+def module_outer_polygon(module):
+    return module.get("outer_polygon") or module.get("polygon") or box_polygon(module["box"])
+
+
+def module_active_polygon(module):
+    return module.get("active_polygon") or active_module_polygon(module_outer_polygon(module))
+
+
+def region_modules(region):
+    return region.get("modules") or array_module_polygons(region)
+
+
+def array_module_union_points(region):
+    points = []
+    for module in region_modules(region).values():
+        points.extend(module_outer_polygon(module))
+    return points or list(region.get("polygon") or box_polygon(region["box"]))
+
+
+def crop_array_from_module_union(image, region, pad_ratio=0.12, target_width=None, max_scale=3):
+    union_points = array_module_union_points(region)
+    crop, origin = crop_from_polygon(image, union_points, pad_ratio, min_pad=10, max_pad_ratio=0.24)
+    scale = 1
+    if target_width:
+        scale = max(1, min(max_scale, math.ceil(target_width / max(1, crop.width))))
+        if scale > 1:
+            crop = crop.resize((crop.width * scale, crop.height * scale), Image.Resampling.BICUBIC)
+    return crop, origin, region_modules(region), scale
+
+
+def polygon_to_crop(points, crop_origin, scale=1):
+    ox, oy = crop_origin[0], crop_origin[1]
+    return [((float(x) - ox) * scale, (float(y) - oy) * scale) for x, y in points]
+
+
+def svg_points(points):
+    return " ".join(f"{float(x):.1f},{float(y):.1f}" for x, y in points)
+
+
+def component_geometries_from_mask(panel_mask):
+    binary = (panel_mask > 72).astype(np.uint8)
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, 8)
+    min_area = max(60, int(binary.size * 0.00035))
+    components = []
+    for label in range(1, count):
+        x, y, w, h, area = stats[label]
+        if area < min_area:
+            continue
+        component = ((labels == label).astype(np.uint8) * 255)
+        contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            contour = max(contours, key=cv2.contourArea)
+            rect = cv2.minAreaRect(contour)
+            polygon = order_quad_points(cv2.boxPoints(rect))
+        else:
+            polygon = box_polygon((x, y, x + w, y + h))
+        components.append(
+            {
+                "box": (int(x), int(y), int(x + w), int(y + h)),
+                "polygon": polygon,
+                "area": int(area),
+                "centroid": (float(centroids[label][0]), float(centroids[label][1])),
+            }
+        )
+    return components
+
+
+def solar_render_metadata_array_geometries(panel_mask, metadata):
+    transforms = ((metadata or {}).get("topology") or {}).get("array_transforms") or []
+    row_strings = ((metadata or {}).get("topology") or {}).get("row_strings") or []
+    components = component_geometries_from_mask(panel_mask)
+    if not transforms or not row_strings or len(components) < len(transforms):
+        return {}
+
+    components = sorted(components, key=lambda item: item["area"], reverse=True)[:len(transforms)]
+    components = sorted(components, key=lambda item: item["centroid"][1])
+    result = {}
+    cursor = 0
+    for row in sorted(row_strings, key=lambda item: item.get("row_id", 0)):
+        row_id = int(row.get("row_id", 0))
+        row_count = int(row.get("count", 0))
+        group = sorted(components[cursor:cursor + row_count], key=lambda item: item["centroid"][0])
+        cursor += row_count
+        row_transforms = sorted(
+            [item for item in transforms if int(item.get("row", 0)) == row_id],
+            key=lambda item: int(item.get("col", 0)),
+        )
+        for transform, component in zip(row_transforms, group):
+            key = (int(transform.get("row", 0)), int(transform.get("col", 0)))
+            result[key] = {
+                **component,
+                "orientation": transform.get("orientation", "landscape"),
+                "array_id": int(transform.get("array_id", 0)),
+                "string_id": transform.get("string_id"),
+                "transform": transform,
+            }
+    return result
+
+
+def array_module_polygons(region):
+    array_polygon = region.get("polygon") or box_polygon(region["box"])
+    inset = 0.065
+    module_gap = 0.014
+    modules = {}
+    for module_number, (u1, v1, u2, v2) in {
+        1: (inset, inset, 0.5 - module_gap, 0.5 - module_gap),
+        2: (0.5 + module_gap, inset, 1.0 - inset, 0.5 - module_gap),
+        3: (inset, 0.5 + module_gap, 0.5 - module_gap, 1.0 - inset),
+        4: (0.5 + module_gap, 0.5 + module_gap, 1.0 - inset, 1.0 - inset),
+    }.items():
+        polygon = quad_subpolygon(array_polygon, u1, v1, u2, v2)
+        active_polygon = active_module_polygon(polygon)
+        modules[module_number] = {
+            "module_number": module_number,
+            "orientation": region.get("orientation", "unknown"),
+            "outer_polygon": polygon,
+            "polygon": polygon,
+            "active_polygon": active_polygon,
+            "box": polygon_bounds(polygon),
+            "active_box": polygon_bounds(active_polygon),
+        }
+    return modules
+
+
+def module_cell_polygons(module_geometry):
+    cells = {}
+    cols = CUSTOM_MODULE_CELL_COLS
+    rows = CUSTOM_MODULE_CELL_ROWS
+    if isinstance(module_geometry, dict):
+        active_polygon = module_active_polygon(module_geometry)
+    else:
+        active_polygon = active_module_polygon(module_geometry)
+    for r in range(rows):
+        for c in range(cols):
+            cell_no = r * cols + c + 1
+            u1, u2 = c / cols, (c + 1) / cols
+            v1, v2 = r / rows, (r + 1) / rows
+            polygon = quad_subpolygon(active_polygon, u1, v1, u2, v2)
+            safe_polygon = quad_subpolygon(
+                active_polygon,
+                u1 + (u2 - u1) * CELL_SAFE_INSET_U,
+                v1 + (v2 - v1) * CELL_SAFE_INSET_V,
+                u2 - (u2 - u1) * CELL_SAFE_INSET_U,
+                v2 - (v2 - v1) * CELL_SAFE_INSET_V,
+            )
+            centroid = polygon_centroid(polygon)
+            safe_centroid = polygon_centroid(safe_polygon)
+            assert point_in_polygon(centroid, active_polygon)
+            assert point_in_polygon(safe_centroid, active_polygon)
+            cells[cell_no] = {
+                "cell_number": cell_no,
+                "polygon": polygon,
+                "safe_fault_polygon": safe_polygon,
+                "active_polygon": active_polygon,
+                "box": polygon_bounds(polygon),
+                "safe_box": polygon_bounds(safe_polygon),
+                "centroid": centroid,
+                "safe_centroid": safe_centroid,
+            }
+    return cells
+
+
+def crop_from_polygon(image, polygon, pad_ratio=0.08, min_pad=6, max_pad_ratio=0.18):
+    box = polygon_bounds(polygon)
+    crop, origin = crop_with_padding(image, box, pad_ratio, min_pad=min_pad, max_pad_ratio=max_pad_ratio)
+    ox1, oy1, ox2, oy2 = origin
+    assert all(ox1 <= x <= ox2 and oy1 <= y <= oy2 for x, y in polygon)
+    return crop, origin
+
+
+def row_number_from_id(location_id, row_id):
+    try:
+        return int(str(row_id).replace(row_prefix(location_id), ""))
+    except (TypeError, ValueError):
+        return 1
+
+
+def rendered_fault_cell_from_record(location_id, record, selected_row_id, selected_cell_id, array_geometries):
+    record_row_id = record.get("row_id", selected_row_id)
+    record_row = row_number_from_id(location_id, record_row_id)
+    record_cell = cell_by_id(location_id, record_row_id, record.get("target_cell_id", selected_cell_id))
+    record_col = int(record_cell.get("panel_number") or 1)
+    array_geometry = array_geometries.get((record_row, record_col))
+    if not array_geometry:
+        return None
+
+    module_number = int(record_cell.get("module_number_in_panel") or 1)
+    module_number = max(1, min(SOLAR_PANEL_MODULES, module_number))
+    region = {
+        "box": array_geometry["box"],
+        "polygon": array_geometry.get("polygon") or box_polygon(array_geometry["box"]),
+    }
+    module_geometry = array_module_polygons(region)[module_number]
+    cell_row = int(record_cell.get("module_cell_row") or 1)
+    cell_col = int(record_cell.get("module_cell_col") or 1)
+    cell_row = max(1, min(CUSTOM_MODULE_CELL_ROWS, cell_row))
+    cell_col = max(1, min(CUSTOM_MODULE_CELL_COLS, cell_col))
+    cell_no = (cell_row - 1) * CUSTOM_MODULE_CELL_COLS + cell_col
+    cell_geometry = module_cell_polygons(module_geometry)[cell_no]
+    cx1, cy1, cx2, cy2 = cell_geometry["safe_box"]
+    mx1, my1, mx2, my2 = module_geometry["box"]
+    ax1, ay1, ax2, ay2 = polygon_bounds(cell_geometry["active_polygon"])
+
+    return {
+        **record_cell,
+        "id": record.get("target_cell_id", record_cell["id"]),
+        "x1": cx1,
+        "y1": cy1,
+        "x2": cx2,
+        "y2": cy2,
+        "source_polygon": cell_geometry["polygon"],
+        "safe_fault_polygon": cell_geometry["safe_fault_polygon"],
+        "fault_origin_px": {
+            "x": float(cell_geometry["safe_centroid"][0]),
+            "y": float(cell_geometry["safe_centroid"][1]),
+        },
+        "active_module_bbox_px": {
+            "x1": int(ax1),
+            "y1": int(ay1),
+            "x2": int(ax2),
+            "y2": int(ay2),
+        },
+        "module_bbox_px": {
+            "x1": int(mx1),
+            "y1": int(my1),
+            "x2": int(mx2),
+            "y2": int(my2),
+        },
+        "fault_bbox_px": {
+            "x1": int(cx1),
+            "y1": int(cy1),
+            "x2": int(cx2),
+            "y2": int(cy2),
+        },
+    }
+
+
+def solar_render_thermal_base_field(location_id, rendered):
+    rgb = np.asarray(rendered.convert("RGB")).astype(np.float32)
+    gray = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32)
+    soft = cv2.GaussianBlur(gray, (0, 0), 1.8)
+    clahe = cv2.createCLAHE(clipLimit=1.25, tileGridSize=(8, 8)).apply(np.clip(soft, 0, 255).astype(np.uint8)).astype(np.float32)
+
+    terrain_low, terrain_high, detail_gain, edge_gain = {
+        "desert_farm": (34, 126, 0.10, 2.0),
+        "desert_track": (34, 126, 0.10, 2.0),
+        "rooftop": (42, 138, 0.18, 4.0),
+        "rooftop_warehouse": (42, 138, 0.18, 4.0),
+        "agri_rows": (22, 112, 0.13, 2.4),
+        "agri_field_new": (22, 112, 0.13, 2.4),
+        "farm_lake": (18, 94, 0.11, 1.3),
+        "floating_water": (18, 94, 0.11, 1.3),
+        "scenario_1": (22, 112, 0.13, 2.4),
+        "grass_open": (22, 112, 0.13, 2.4),
+    }.get(location_id, (22, 112, 0.13, 2.2))
+
+    low_p, high_p = np.percentile(clahe, [2.5, 97.5])
+    normalized = np.clip((clahe - low_p) / max(1.0, high_p - low_p), 0.0, 1.0)
+    temp = terrain_low + normalized * (terrain_high - terrain_low)
+    broad = cv2.GaussianBlur(gray, (0, 0), 12)
+    detail = gray - broad
+    temp += detail * detail_gain
+    edges = cv2.Laplacian(cv2.GaussianBlur(gray, (0, 0), 1.0), cv2.CV_32F)
+    temp += np.clip(np.abs(edges), 0, 18) * edge_gain * 0.08
+
+    rng = np.random.default_rng(seed_for(location_id, "opencv-thermal", True))
+    temp += thermal_noise(temp.shape, rng, 3.4, 0.70)
+    temp += thermal_noise(temp.shape, rng, 7.2, 4.8)
+    temp += thermal_noise(temp.shape, rng, 5.8, 14.0)
+    scene_env = pv_environment_multiplier(
+        temp.shape,
+        seed_for(location_id, "thermal-cloud-sun", True),
+        strength=0.070,
+    )
+    temp *= scene_env
+    temp = np.clip(temp, terrain_low - 10, terrain_high + 16)
+
+    panel_mask = solar_render_panel_mask(rendered).astype(np.float32) / 255.0
+    panel_mask = np.clip(panel_mask * 1.18, 0.0, 0.98)
+    metadata = load_solar_render_metadata(location_id)
+    array_geometries = solar_render_metadata_array_geometries((panel_mask * 255).astype(np.uint8), metadata)
+    if not array_geometries:
+        fallback_boxes = solar_render_array_boxes(
+            (panel_mask * 255).astype(np.uint8),
+            custom_row_count(location_id),
+            custom_panels_per_row(location_id),
+        )
+        array_geometries = {
+            key: {"box": box, "polygon": box_polygon(box)}
+            for key, box in fallback_boxes.items()
+        }
+    array_boxes = {key: geometry["box"] for key, geometry in array_geometries.items()}
+
+    shadow = cv2.GaussianBlur(panel_mask, (0, 0), 7.0)
+    shadow_strength = 5 if location_id in {"desert_farm", "desert_track"} else 14
+    temp -= shadow * shadow_strength * 0.55
+
+    panel_min, panel_max = {
+        "desert_farm": (168, 200),
+        "desert_track": (168, 200),
+        "rooftop": (162, 194),
+        "rooftop_warehouse": (162, 194),
+        "agri_rows": (164, 196),
+        "agri_field_new": (164, 196),
+        "farm_lake": (158, 190),
+        "floating_water": (158, 190),
+        "scenario_1": (164, 196),
+        "grass_open": (164, 196),
+    }.get(location_id, (164, 196))
+
+    for key, box in array_boxes.items():
+        x1, y1, x2, y2 = [int(value) for value in box]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(temp.shape[1], x2), min(temp.shape[0], y2)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        local_w, local_h = x2 - x1, y2 - y1
+        local_panel = procedural_thermal_panel_row(
+            (local_w, local_h),
+            SOLAR_PANEL_MODULES,
+            seed_for(location_id, key, "rendered-original-thermal-array"),
+            panel_min,
+            panel_max,
+        )
+        grad_x = np.linspace(-3.5, 3.5, local_w, dtype=np.float32)[None, :]
+        grad_y = np.linspace(2.0, -2.0, local_h, dtype=np.float32)[:, None]
+        local_panel = np.clip(local_panel + grad_x + grad_y, panel_min - 16, panel_max + 8)
+        local_mask = panel_mask[y1:y2, x1:x2]
+        temp[y1:y2, x1:x2] = temp[y1:y2, x1:x2] * (1.0 - local_mask) + local_panel * local_mask
+
+    return temp.astype(np.float32), array_geometries
+
+
+def finalize_solar_render_thermal_image(location_id, base_temp, array_geometries, selected_row_id, selected_cell_id, fault_records=None):
+    temp = np.array(base_temp, dtype=np.float32, copy=True)
+    records = fault_records or []
+    if records:
+        for record in records:
+            cell = rendered_fault_cell_from_record(location_id, record, selected_row_id, selected_cell_id, array_geometries)
+            if cell is None:
+                continue
+            temp = apply_thermal_fault(
+                temp,
+                cell,
+                record["fault_type"],
+                record.get("fault_scale", DEFAULT_FAULT_SCALE),
+            )
+
+    temp = apply_sensor_model(temp, location_id, "far")
+    dither = np.random.default_rng(seed_for(location_id, "thermal-dither")).uniform(
+        -0.5,
+        0.5,
+        temp.shape,
+    ).astype(np.float32)
+    temp_u8 = np.clip(temp + dither, 0, 255).astype(np.uint8)
+    lut = np.array(thermal_lut(), dtype=np.uint8)
+    return Image.fromarray(lut[temp_u8])
+
+
+def solar_render_thermal_image(location_id, rendered, selected_row_id, selected_cell_id, fault_records=None):
+    base_temp, array_geometries = solar_render_thermal_base_field(location_id, rendered)
+    return finalize_solar_render_thermal_image(
+        location_id,
+        base_temp,
+        array_geometries,
+        selected_row_id,
+        selected_cell_id,
+        fault_records,
+    )
+
+
+def draw_solar_render_overlays(image, location_id, selected_row_id, selected_cell_id, fault_records=None, show_grid=False):
+    if not show_grid:
+        return image
+    output = image.convert("RGBA")
+    draw = ImageDraw.Draw(output, "RGBA")
+    mask = solar_render_panel_mask(image)
+    metadata = load_solar_render_metadata(location_id)
+    geometries = solar_render_metadata_array_geometries(mask, metadata)
+    if not geometries:
+        fallback_boxes = solar_render_array_boxes(mask, custom_row_count(location_id), custom_panels_per_row(location_id))
+        geometries = {key: {"box": box, "polygon": box_polygon(box)} for key, box in fallback_boxes.items()}
+
+    if show_grid:
+        selected_row_num = row_number_from_id(location_id, selected_row_id)
+        selected_cell = cell_by_id(location_id, selected_row_id, selected_cell_id)
+        selected_panel = int(selected_cell.get("panel_number") or 1)
+        for key, geometry in geometries.items():
+            color = (70, 180, 255, 68)
+            width = 1
+            if key == (selected_row_num, selected_panel):
+                color = (250, 204, 21, 210)
+                width = 3
+            draw.line(
+                [tuple(point) for point in geometry["polygon"]] + [tuple(geometry["polygon"][0])],
+                fill=color,
+                width=width,
+            )
+
+    return output.convert("RGB")
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def cached_solar_render_thermal_base(location_id, render_size, render_signature):
+    rendered = solar_render_image(location_id, render_size)
+    if rendered is None:
+        return None
+    return solar_render_thermal_base_field(location_id, rendered)
+
+
+@st.cache_data(show_spinner=False, max_entries=48)
+def cached_module_field_thermal_scene(location_id, render_size, fault_key, render_signature):
+    cached_base = cached_solar_render_thermal_base(location_id, render_size, render_signature)
+    if cached_base is None:
+        return None
+    base_temp, array_geometries = cached_base
+    records = records_from_source_fault_key(fault_key)
+    render_row_id, render_cell_id = stable_fault_render_target(location_id, fault_key)
+    return finalize_solar_render_thermal_image(
+        location_id,
+        base_temp,
+        array_geometries,
+        render_row_id,
+        render_cell_id,
+        records,
+    ).convert("RGB")
+
+
 def module_field_image(location_id, view, selected_row_id, selected_cell_id, fault_records=None, show_grid=True):
+    render_size = module_field_static_canvas_size(location_id, view)
+    rendered = None if view == "thermal" else solar_render_image(location_id, render_size)
+    if rendered is not None and view == "rgb":
+        return draw_solar_render_overlays(rendered, location_id, selected_row_id, selected_cell_id, fault_records, show_grid)
+    if view == "thermal":
+        thermal = cached_module_field_thermal_scene(
+            location_id,
+            render_size,
+            source_fault_key(fault_records),
+            solar_render_cache_signature(location_id, render_size),
+        )
+        if thermal is not None:
+            return draw_solar_render_overlays(thermal, location_id, selected_row_id, selected_cell_id, fault_records, show_grid)
+        rendered = solar_render_image(location_id, render_size)
+    if rendered is not None and view == "thermal":
+        thermal = solar_render_thermal_image(location_id, rendered, selected_row_id, selected_cell_id, fault_records)
+        return draw_solar_render_overlays(thermal, location_id, selected_row_id, selected_cell_id, fault_records, show_grid)
+
     all_rows = panels(location_id)
     selected_cell = cell_by_id(location_id, selected_row_id, selected_cell_id)
     selected_module = selected_cell.get("module_number")
@@ -1284,10 +2392,9 @@ def selected_location():
     return location_by_id(qp_get("location", LOCATIONS[0]["id"]))
 
 
-def main():
-    st.set_page_config(page_title="PV Array Fault Tool", layout="wide")
+def legacy_main():
     st.title("PV Array Fault Tool")
-    st.caption("Select row, panel, module, and cell. The main view shows solar panels made from four 40-cell modules.")
+    st.caption("Select row, array, module, and cell. The main view shows solar arrays made from four 40-cell modules.")
 
     location = selected_location()
     view = qp_get("view", "thermal")
@@ -1386,10 +2493,10 @@ def main():
                 selected_panel_number = panel_numbers[0]
             if panel_numbers:
                 panel_choice = st.selectbox(
-                    "Panel in selected row",
+                    "Array in selected row",
                     panel_numbers,
                     index=panel_numbers.index(selected_panel_number),
-                    format_func=lambda panel_number: f"Panel {panel_number}",
+                    format_func=lambda panel_number: f"Array {panel_number}",
                     key=f"fault_panel_{layout_key}_{selected_row_id}",
                 )
                 panel_cells_for_choice = [
@@ -1415,7 +2522,7 @@ def main():
                 selected_module_number = module_numbers[0]
             if module_numbers:
                 module_choice = st.selectbox(
-                    "Module inside selected panel (1 of 4)",
+                    "Module inside selected array (1 of 4)",
                     module_numbers,
                     index=module_numbers.index(selected_module_number),
                     format_func=lambda module_number: f"Module {(module_number - 1) % SOLAR_PANEL_MODULES + 1} of {SOLAR_PANEL_MODULES}",
@@ -1551,7 +2658,7 @@ def main():
     with main_tab:
         layout_col, hotspot_col = st.columns([1, 1])
         with layout_col:
-            st.subheader("Rows and Panels")
+            st.subheader("Rows and Arrays")
             custom_choice = st.checkbox("Realistic generated PV layout", value=current_custom_layout)
             if custom_choice != current_custom_layout:
                 first_row = f"{row_prefix(location['id'])}1"
@@ -1585,7 +2692,7 @@ def main():
                 disabled=not current_custom_layout,
             )
             desired_panels = st.number_input(
-                "Panels per row",
+                "Arrays per Row",
                 min_value=1,
                 max_value=max_custom_panels_per_row(location["id"]),
                 value=panel_control_value,
@@ -1610,10 +2717,16 @@ def main():
                 st.rerun()
             cells_per_module = CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS
             cells_per_panel = cells_per_module * SOLAR_PANEL_MODULES
+            total_arrays = int(desired_rows) * int(desired_panels)
+            total_modules = total_arrays * SOLAR_PANEL_MODULES
+            total_cells = total_modules * cells_per_module
             st.caption(
-                f"{PV_PANEL_MODEL_NAME}: {int(desired_panels)} panels per row x "
-                f"{SOLAR_PANEL_MODULES} modules/panel x {cells_per_module} cells/module "
-                f"= {int(desired_panels) * cells_per_panel} selectable cells per row."
+                f"Total Arrays: {total_arrays:,} | Total Modules: {total_modules:,} | "
+                f"Total PV Cells: {total_cells:,}"
+            )
+            st.caption(
+                f"One array = {SOLAR_PANEL_MODULES} modules; one module = "
+                f"{CUSTOM_MODULE_CELL_COLS}x{CUSTOM_MODULE_CELL_ROWS} = {cells_per_module} cells."
             )
             cap = LAYOUT_CAPS.get(location["id"])
             if cap:
@@ -1711,7 +2824,7 @@ def main():
     with main_tab:
         st.caption(
             f"{main_metadata['location_name']} | {main_metadata['view']} | rows: {main_metadata['row_count']} | "
-            f"panels/row: {main_metadata['panels_per_row']} | modules/row: {main_metadata['modules_per_row']} | "
+            f"arrays/row: {main_metadata['panels_per_row']} | modules/row: {main_metadata['modules_per_row']} | "
             f"hotspots: {main_metadata['fault_count']}"
         )
         st.subheader("Solar array")
@@ -1727,9 +2840,9 @@ def main():
         selected_module_number = selected_cell.get("module_number")
         module_cell_count = len(module_cells_for_target(location["id"], selected_row_id, selected_cell_id))
         st.caption(
-            f"Row {selected_row['label']} | selected panel {selected_cell.get('panel_number')} | "
+            f"Row {selected_row['label']} | selected array {selected_cell.get('panel_number')} | "
             f"selected module {selected_cell.get('module_number_in_panel', selected_module_number)}. "
-            f"Each visible tile is one solar panel: {SOLAR_PANEL_MODULES} modules x "
+            f"Each visible tile is one solar array: {SOLAR_PANEL_MODULES} modules x "
             f"{CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS} cells/module."
         )
     with output_tab:
@@ -1793,10 +2906,1383 @@ def main():
     with big_screen_tab:
         st.caption(
             f"Thermal test view | {location['name']} | rows: {metadata['row_count']} | "
-            f"panels/row: {metadata['panels_per_row']} | modules/row: {metadata['modules_per_row']} | "
+            f"arrays/row: {metadata['panels_per_row']} | modules/row: {metadata['modules_per_row']} | "
             f"faults: {metadata['fault_count']}"
         )
         if big_screen_thermal is not None:
             st.image(big_screen_thermal, use_container_width=True)
         else:
             st.caption("Thermal preview is generated when Camera view is set to Thermal.")
+
+
+WORKFLOW_SECTIONS = ["Scene Setup", "Layout", "Faults", "Review", "Export", "Settings", "Help"]
+
+
+def ui_css():
+    st.markdown(
+        """
+        <style>
+        :root {
+          --pv-bg: #07111f;
+          --pv-panel: #0d1828;
+          --pv-panel-2: #111f32;
+          --pv-border: #20324a;
+          --pv-text: #e5edf7;
+          --pv-muted: #8ba3bd;
+          --pv-blue: #38bdf8;
+          --pv-blue-2: #2563eb;
+          --pv-warn: #f59e0b;
+          --pv-danger: #ef4444;
+          --pv-good: #22c55e;
+          --pv-streamlit-header: 3.75rem;
+        }
+        html, body, [data-testid="stAppViewContainer"], .stApp {
+          min-height: 100%;
+          overflow-y: auto !important;
+          overflow-x: auto !important;
+        }
+        .stApp {
+          background: radial-gradient(circle at top left, #10233b 0, #07111f 34%, #050a12 100%);
+          color: var(--pv-text);
+        }
+        [data-testid="stHeader"] {
+          background: rgba(5, 10, 18, .96) !important;
+          z-index: 100 !important;
+        }
+        [data-testid="stAppViewContainer"] > .main,
+        [data-testid="stMain"],
+        main {
+          width: 100%;
+          min-height: 100vh;
+          overflow: visible !important;
+        }
+        [data-testid="stMainBlockContainer"],
+        [data-testid="stVerticalBlock"] {
+          overflow: visible !important;
+        }
+        [data-testid="stSidebar"] {
+          background: #060d18;
+          border-right: 1px solid #16253a;
+          min-width: 210px !important;
+          max-width: 260px !important;
+        }
+        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color: #e5edf7; }
+        .block-container {
+          padding: calc(var(--pv-streamlit-header) + .8rem) 1.1rem 2rem !important;
+          max-width: none !important;
+          width: 100% !important;
+          min-width: 0 !important;
+          overflow: visible !important;
+        }
+        [data-testid="stHorizontalBlock"] { gap: .8rem; min-width:0 !important; }
+        [data-testid="column"] { min-width:0 !important; }
+        .pv-shell-title { font-size: 1.35rem; font-weight: 800; letter-spacing: .02em; color: #f8fbff; margin: 0 0 .25rem; }
+        .pv-kicker { color: var(--pv-muted); font-size: .88rem; margin-bottom: .8rem; }
+        .pv-topbar, .pv-card, .pv-canvas-card {
+          background: linear-gradient(180deg, rgba(17,31,50,.94), rgba(9,18,31,.94));
+          border: 1px solid var(--pv-border);
+          border-radius: 10px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.26);
+          position: relative;
+          z-index: 1;
+        }
+        .pv-topbar { padding: .65rem .8rem; margin-bottom: .65rem; }
+        .pv-card { padding: .68rem; margin-bottom: .62rem; }
+        .pv-canvas-card { padding: .45rem; }
+        .pv-metric-grid { display:grid; grid-template-columns: repeat(6, minmax(92px,1fr)); gap:.55rem; }
+        .pv-metric { background:#07111f; border:1px solid #1b2b43; border-radius:12px; padding:.55rem .65rem; }
+        .pv-metric span { display:block; color:#8ba3bd; font-size:.7rem; text-transform:uppercase; letter-spacing:.08em; }
+        .pv-metric strong { display:block; color:#f8fbff; font-size:1.02rem; margin-top:.15rem; }
+        .pv-section-title { color:#f8fbff; font-weight:800; font-size:.88rem; margin:0 0 .38rem; }
+        .pv-muted { color: var(--pv-muted); }
+        .pv-chip-row { display:flex; flex-wrap:wrap; gap:.4rem; }
+        .pv-chip { border:1px solid #263a58; border-radius:999px; padding:.22rem .55rem; color:#cfe8ff; background:#081425; font-size:.78rem; }
+        .pv-chip-hot { border-color:#7f1d1d; background:#2b1118; color:#fecaca; }
+        .pv-status-ok { color:#86efac; }
+        .pv-status-warn { color:#fcd34d; }
+        .pv-table-wrap { max-height: 440px; overflow:auto; border:1px solid #1b2b43; border-radius:12px; }
+        .pv-focus-title { color:#8ba3bd; font-size:.82rem; margin:.05rem 0 .45rem; }
+        .pv-context-thumb img { max-height:150px; object-fit:contain; }
+        .pv-nav-compact button, .pv-card button, [data-testid="stButton"] button {
+          white-space: nowrap !important;
+          min-height: 2.05rem;
+        }
+        @media (max-width: 1400px) {
+          [data-testid="stSidebar"] { min-width:190px !important; max-width:220px !important; }
+          .block-container {
+            padding-left:.75rem !important;
+            padding-right:.75rem !important;
+            padding-top:calc(var(--pv-streamlit-header) + .65rem) !important;
+          }
+          .pv-card { padding:.58rem; }
+        }
+        button[kind="primary"] { background: linear-gradient(135deg, #2563eb, #38bdf8) !important; border:0 !important; }
+        div[data-testid="stRadio"] label, div[data-testid="stSelectbox"] label, div[data-testid="stNumberInput"] label, div[data-testid="stTextInput"] label {
+          color:#cbd5e1 !important; font-weight:700;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    if qp_get("focus", "0") == "1":
+        st.markdown(
+            """
+            <style>
+            [data-testid="stSidebar"] { display:none !important; }
+            .block-container { padding:.45rem .65rem !important; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def app_state_defaults():
+    st.session_state.setdefault("workflow_section", qp_get("section", "Faults"))
+    st.session_state.setdefault("filter_mode", qp_get("filter", "Show All"))
+    st.session_state.setdefault("selected_module_number", int(qp_get("selected_module", 1) or 1))
+    st.session_state.setdefault("recent_arrays", [])
+    st.session_state.setdefault("fault_undo_stack", [])
+    st.session_state.setdefault("fault_redo_stack", [])
+
+
+def fault_snapshot():
+    return {
+        "random_fault_records": [dict(item) for item in st.session_state.get("random_fault_records", [])],
+        "panel_cell_fault_records": [dict(item) for item in st.session_state.get("panel_cell_fault_records", [])],
+    }
+
+
+def restore_fault_snapshot(snapshot):
+    st.session_state["random_fault_records"] = [dict(item) for item in snapshot.get("random_fault_records", [])]
+    st.session_state["panel_cell_fault_records"] = [dict(item) for item in snapshot.get("panel_cell_fault_records", [])]
+
+
+def push_fault_history():
+    st.session_state.setdefault("fault_undo_stack", []).append(fault_snapshot())
+    st.session_state["fault_undo_stack"] = st.session_state["fault_undo_stack"][-30:]
+    st.session_state["fault_redo_stack"] = []
+
+
+def undo_fault_action():
+    stack = st.session_state.setdefault("fault_undo_stack", [])
+    if not stack:
+        return False
+    st.session_state.setdefault("fault_redo_stack", []).append(fault_snapshot())
+    restore_fault_snapshot(stack.pop())
+    return True
+
+
+def redo_fault_action():
+    stack = st.session_state.setdefault("fault_redo_stack", [])
+    if not stack:
+        return False
+    st.session_state.setdefault("fault_undo_stack", []).append(fault_snapshot())
+    restore_fault_snapshot(stack.pop())
+    return True
+
+
+def records_for_location(location_id, view):
+    generated = [record for record in stored_fault_records() if record.get("location_id") == location_id]
+    panel_records = [
+        record for record in st.session_state.get("panel_cell_fault_records", [])
+        if record.get("location_id") == location_id
+    ]
+    return records_for_view(generated + panel_records, view)
+
+
+def selected_array_from_cell(location_id, selected_row_id, selected_cell_id):
+    cell = cell_by_id(location_id, selected_row_id, selected_cell_id)
+    return {
+        "row": int(row_number_from_id(location_id, selected_row_id)),
+        "col": int(cell.get("panel_number") or 1),
+        "key": f"R{int(row_number_from_id(location_id, selected_row_id))}-A{int(cell.get('panel_number') or 1):02d}",
+    }
+
+
+def default_cell_for_array(location_id, row_number, array_col, module_number=1, module_cell_number=1):
+    row_id = f"{row_prefix(location_id)}{row_number}"
+    try:
+        row_cells = cells_for_row(location_id, row_id)
+    except Exception:
+        row_id = panels(location_id)[0]["id"]
+        row_cells = cells_for_row(location_id, row_id)
+    candidates = [
+        cell for cell in row_cells
+        if int(cell.get("panel_number") or 1) == int(array_col)
+        and int(cell.get("module_number_in_panel") or 1) == int(module_number)
+        and int(cell.get("module_cell_number") or 1) == int(module_cell_number)
+    ]
+    if not candidates:
+        candidates = [
+            cell for cell in row_cells
+            if int(cell.get("panel_number") or 1) == int(array_col)
+            and int(cell.get("module_number_in_panel") or 1) == int(module_number)
+        ]
+    if not candidates:
+        candidates = [cell for cell in row_cells if int(cell.get("panel_number") or 1) == int(array_col)]
+    return row_id, (candidates[0] if candidates else row_cells[0])
+
+
+def selected_array_key(location_id, selected_row_id, selected_cell_id):
+    query_key = qp_get("selected_array", "")
+    if query_key:
+        return str(query_key)
+    return selected_array_from_cell(location_id, selected_row_id, selected_cell_id)["key"]
+
+
+def array_regions(location_id, rgb_scene):
+    cached = cached_array_regions(
+        location_id,
+        tuple(rgb_scene.size),
+        solar_render_cache_signature(location_id, rgb_scene.size),
+    )
+    if cached:
+        return cached
+    return array_regions_from_image(location_id, rgb_scene)
+
+
+@st.cache_data(show_spinner=False, max_entries=48)
+def cached_array_regions(location_id, render_size, render_signature):
+    rgb_scene = solar_render_image(location_id, render_size)
+    if rgb_scene is None:
+        return []
+    return array_regions_from_image(location_id, rgb_scene)
+
+
+def array_regions_from_image(location_id, rgb_scene):
+    metadata = load_solar_render_metadata(location_id)
+    mask = solar_render_panel_mask(rgb_scene)
+    geometries = solar_render_metadata_array_geometries(mask, metadata)
+    transforms = ((metadata or {}).get("topology") or {}).get("array_transforms") or []
+    transforms = sorted(transforms, key=lambda item: (int(item.get("row", 0)), int(item.get("col", 0))))
+    regions = []
+    if transforms and geometries:
+        for transform in transforms:
+            row_num = int(transform.get("row", 0))
+            col_num = int(transform.get("col", 0))
+            geometry = geometries.get((row_num, col_num))
+            if not geometry:
+                continue
+            modules = array_module_polygons({"box": geometry["box"], "polygon": geometry["polygon"]})
+            regions.append(
+                {
+                    "key": f"R{row_num}-A{col_num:02d}",
+                    "row": row_num,
+                    "col": col_num,
+                    "array_id": int(transform.get("array_id", len(regions) + 1)),
+                    "orientation": transform.get("orientation", "landscape"),
+                    "string_id": transform.get("string_id"),
+                    "box": tuple(int(v) for v in geometry["box"]),
+                    "polygon": geometry["polygon"],
+                    "modules": modules,
+                }
+            )
+        return regions
+
+    fallback_boxes = solar_render_array_boxes(mask, custom_row_count(location_id), custom_panels_per_row(location_id))
+    for (row_num, col_num), box in fallback_boxes.items():
+        modules = array_module_polygons({"box": tuple(int(v) for v in box), "polygon": box_polygon(box)})
+        regions.append(
+            {
+                "key": f"R{row_num}-A{col_num:02d}",
+                "row": row_num,
+                "col": col_num,
+                "array_id": len(regions) + 1,
+                "orientation": "unknown",
+                "string_id": None,
+                "box": tuple(int(v) for v in box),
+                "polygon": box_polygon(box),
+                "modules": modules,
+            }
+        )
+    return regions
+
+
+def fault_count_for_region(records, region):
+    count = 0
+    for record in records:
+        if row_number_from_id(record.get("location_id"), record.get("row_id")) != region["row"]:
+            continue
+        try:
+            cell = cell_by_id(record.get("location_id"), record.get("row_id"), record.get("target_cell_id"))
+        except Exception:
+            continue
+        if int(cell.get("panel_number") or 1) == int(region["col"]):
+            count += 1
+    return count
+
+
+def crop_with_padding(image, box, pad_ratio=0.08, min_pad=6, max_pad_ratio=0.18):
+    x1, y1, x2, y2 = [int(v) for v in box]
+    w, h = max(1, x2 - x1), max(1, y2 - y1)
+    pad_ratio = min(float(max_pad_ratio), max(0, float(pad_ratio)))
+    pad_x = max(int(min_pad), int(w * pad_ratio))
+    pad_y = max(int(min_pad), int(h * pad_ratio))
+    crop = (
+        max(0, x1 - pad_x),
+        max(0, y1 - pad_y),
+        min(image.width, x2 + pad_x),
+        min(image.height, y2 + pad_y),
+    )
+    return image.crop(crop), crop
+
+
+def module_box_in_array(region_box, module_number):
+    x1, y1, x2, y2 = [int(v) for v in region_box]
+    mid_x = (x1 + x2) // 2
+    mid_y = (y1 + y2) // 2
+    boxes = {
+        1: (x1, y1, mid_x, mid_y),
+        2: (mid_x, y1, x2, mid_y),
+        3: (x1, mid_y, mid_x, y2),
+        4: (mid_x, mid_y, x2, y2),
+    }
+    return boxes.get(int(module_number), boxes[1])
+
+
+def module_cell_fault_numbers(location_id, region, module_number, fault_records):
+    row_id = f"{row_prefix(location_id)}{region['row']}"
+    faulted = set()
+    for record in fault_records or []:
+        if record.get("location_id") != location_id or record.get("row_id") != row_id:
+            continue
+        try:
+            cell = cell_by_id(location_id, row_id, record.get("target_cell_id"))
+        except Exception:
+            continue
+        if int(cell.get("panel_number") or 1) != int(region["col"]):
+            continue
+        if int(cell.get("module_number_in_panel") or 1) != int(module_number):
+            continue
+        faulted.add(int(cell.get("module_cell_number") or 1))
+    return faulted
+
+
+def scaled_crop(image, box, pad_ratio, target_width=680, max_scale=3):
+    crop, origin = crop_with_padding(image, box, pad_ratio)
+    scale = max(1, min(max_scale, math.ceil(target_width / max(1, crop.width))))
+    if scale == 1:
+        return crop, origin, scale
+    return crop.resize((crop.width * scale, crop.height * scale), Image.Resampling.BICUBIC), origin, scale
+
+
+def scaled_polygon_crop(image, polygon, pad_ratio, target_width=760, max_scale=3):
+    crop, origin = crop_from_polygon(image, polygon, pad_ratio)
+    scale = max(1, min(max_scale, math.ceil(target_width / max(1, crop.width))))
+    if scale == 1:
+        return crop, origin, scale
+    return crop.resize((crop.width * scale, crop.height * scale), Image.Resampling.BICUBIC), origin, scale
+
+
+def show_crop_pair(left_image, right_image, polygon, title_left, title_right, pad_ratio=0.08):
+    left_crop, _ = crop_from_polygon(left_image, polygon, pad_ratio)
+    right_crop, _ = crop_from_polygon(right_image, polygon, pad_ratio)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.caption(title_left)
+        st.image(left_crop, use_container_width=True)
+    with col_b:
+        st.caption(title_right)
+        st.image(right_crop, use_container_width=True)
+
+
+def scene_context_image(image, selected_region):
+    context = image.convert("RGBA")
+    if selected_region:
+        overlay = Image.new("RGBA", context.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay, "RGBA")
+        polygon = selected_region.get("polygon") or box_polygon(selected_region["box"])
+        draw.line([tuple(point) for point in polygon] + [tuple(polygon[0])], fill=(56, 189, 248, 235), width=4)
+        draw.polygon([tuple(point) for point in polygon], fill=(56, 189, 248, 35))
+        context = Image.alpha_composite(context, overlay)
+    return context.convert("RGB")
+
+
+def render_interactive_scene_canvas(image, location, view, regions, selected_key, records, filter_mode, compact=False):
+    uri = data_uri(image)
+    width, height = image.size
+    expected_total = ((load_solar_render_metadata(location["id"]) or {}).get("counts") or {}).get("arrays", len(regions))
+    selected_region = next((item for item in regions if item["key"] == selected_key), None)
+    debug_fit = qp_get("debug_viewport", "0") == "1"
+    debug_geometry = qp_get("debug_geometry", "0") == "1"
+    canvas_class = "pv-canvas pv-canvas-compact" if compact else "pv-canvas pv-canvas-fit"
+    svg = [
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">',
+        f'<image href="{uri}" width="{width}" height="{height}" preserveAspectRatio="xMidYMid meet"/>',
+    ]
+    for region in regions:
+        x1, y1, x2, y2 = region["box"]
+        polygon = region.get("polygon") or box_polygon(region["box"])
+        fault_count = fault_count_for_region(records, region)
+        dim = filter_mode == "Faulty Only" and fault_count == 0
+        if dim:
+            svg.append(f'<polygon points="{svg_points(polygon)}" fill="#020617" fill-opacity=".48"/>')
+        selected = region["key"] == selected_key
+        stroke = "#38bdf8" if selected else ("#ef4444" if fault_count else "#7dd3fc")
+        opacity = ".95" if selected else (".72" if fault_count else (".16" if debug_geometry else "0"))
+        stroke_width = "2.2" if selected else ("1.7" if fault_count else ("1" if debug_geometry else "0"))
+        row_id, cell = default_cell_for_array(location["id"], region["row"], region["col"])
+        params = navigation_params(
+            location["id"],
+            view,
+            row_id,
+            cell["id"],
+            section=qp_get("section", "Faults"),
+            selected_array=region["key"],
+            selected_module="",
+            cell_active=0,
+        )
+        target = f"?{urlencode(params)}"
+        title = f'{region["key"]} | {region.get("orientation", "unknown")} | {fault_count} fault(s)'
+        svg.append(
+            f'<a href="{esc(target)}" target="_parent"><title>{esc(title)}</title>'
+            f'<polygon points="{svg_points(polygon)}" '
+            f'fill="#38bdf8" fill-opacity=".001" stroke="{stroke}" stroke-width="{stroke_width}" '
+            f'stroke-opacity="{opacity}" pointer-events="all"/></a>'
+        )
+        if fault_count:
+            badge_x = max(0, x2 - 18)
+            badge_y = max(0, y1 + 10)
+            svg.append(
+                f'<circle cx="{badge_x}" cy="{badge_y}" r="10" fill="#ef4444" fill-opacity=".88"/>'
+                f'<text x="{badge_x}" y="{badge_y + 4}" text-anchor="middle" font-size="10" '
+                f'font-family="Inter, Arial" fill="white" font-weight="800">{fault_count}</text>'
+            )
+    if selected_region:
+        polygon = selected_region.get("polygon") or box_polygon(selected_region["box"])
+        svg.append(
+            f'<polygon points="{svg_points(polygon)}" '
+            f'fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-opacity=".9"/>'
+        )
+    if debug_geometry:
+        for region in regions:
+            svg.append(f'<polygon points="{svg_points(region.get("polygon") or box_polygon(region["box"]))}" fill="none" stroke="#2563eb" stroke-width="2" stroke-opacity=".9"/>')
+            for module in (region.get("modules") or {}).values():
+                svg.append(f'<polygon points="{svg_points(module["polygon"])}" fill="none" stroke="#22c55e" stroke-width="1.3" stroke-opacity=".9"/>')
+    svg.append("</svg>")
+    debug_html = ""
+    if debug_fit:
+        debug_html = (
+            f'<div class="pv-viewport-debug">Source: {width} x {height} | '
+            f'Fit Scene: contain | Visible arrays: {len(regions)} / {expected_total}</div>'
+        )
+    components.html(
+        f"""
+        <div class="{canvas_class}">
+          {''.join(svg)}
+          {debug_html}
+        </div>
+        <style>
+          html, body {{ margin:0; overflow:auto; background:transparent; }}
+          .pv-canvas {{
+            width:100%;
+            min-width:0;
+            border:1px solid #20324a;
+            border-radius:14px;
+            overflow:auto;
+            background:#020617;
+            box-sizing:border-box;
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            justify-content:flex-start;
+          }}
+          .pv-canvas svg {{
+            display:block;
+            width:auto;
+            height:auto;
+            max-width:100%;
+            max-height:calc(100vh - 170px);
+            flex:0 0 auto;
+          }}
+          .pv-canvas-compact svg {{ max-height:168px; }}
+          .pv-viewport-debug {{
+            align-self:stretch;
+            color:#bae6fd;
+            font:12px/1.4 Inter, Arial, sans-serif;
+            background:rgba(2,6,23,.88);
+            border-top:1px solid rgba(125,211,252,.28);
+            padding:6px 10px;
+          }}
+          .pv-canvas a:hover polygon {{ stroke:#7dd3fc; stroke-opacity:1; filter: drop-shadow(0 0 10px rgba(56,189,248,.85)); }}
+        </style>
+        """,
+        height=(230 if compact else min(980, max(660, int(height * 0.52)))),
+        scrolling=True,
+    )
+
+
+def render_module_crop_map(scene_image_obj, location, view, region, selected_module, selected_cell_id, fault_records=None):
+    module_geometry = (region.get("modules") or array_module_polygons(region)).get(int(selected_module))
+    if not module_geometry:
+        module_geometry = array_module_polygons(region)[1]
+    module_polygon = module_geometry["polygon"]
+    display, crop_origin, scale = scaled_polygon_crop(scene_image_obj, module_polygon, 0.065, target_width=880, max_scale=3)
+    uri = data_uri(display)
+    width, height = display.size
+    display_module_polygon = polygon_to_crop(module_polygon, crop_origin, scale)
+    svg = [
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">',
+        f'<image href="{uri}" width="{width}" height="{height}" preserveAspectRatio="xMidYMid meet"/>',
+        f'<defs><clipPath id="module-clip"><polygon points="{svg_points(display_module_polygon)}"/></clipPath></defs>',
+    ]
+    selected_cell = None
+    try:
+        selected_cell = cell_by_id(location["id"], f"{row_prefix(location['id'])}{region['row']}", selected_cell_id)
+    except Exception:
+        selected_cell = None
+    faulted_cells = module_cell_fault_numbers(location["id"], region, selected_module, fault_records)
+    svg.append('<g clip-path="url(#module-clip)">')
+    for cell_no, cell_geometry in module_cell_polygons(module_polygon).items():
+        display_cell_polygon = polygon_to_crop(cell_geometry["polygon"], crop_origin, scale)
+        row_id, target_cell = default_cell_for_array(location["id"], region["row"], region["col"], selected_module, cell_no)
+        active = (
+            selected_cell is not None
+            and int(selected_cell.get("panel_number") or 1) == int(region["col"])
+            and int(selected_cell.get("module_number_in_panel") or 1) == int(selected_module)
+            and int(selected_cell.get("module_cell_number") or 1) == cell_no
+        )
+        faulted = cell_no in faulted_cells
+        params = navigation_params(
+            location["id"],
+            view,
+            row_id,
+            target_cell["id"],
+            section="Faults",
+            selected_array=region["key"],
+            selected_module=selected_module,
+            cell_active=1,
+        )
+        target = f"?{urlencode(params)}"
+        stroke = "#38bdf8" if active else ("#ef4444" if faulted else "#e0f2fe")
+        opacity = ".92" if active else (".78" if faulted else ".18")
+        fill = "#38bdf8" if active else ("#ef4444" if faulted else "#38bdf8")
+        fill_opacity = ".11" if active else (".08" if faulted else ".001")
+        stroke_width = "1.6" if active else ("1.2" if faulted else ".75")
+        svg.append(
+            f'<a href="{esc(target)}" target="_parent"><title>Cell {cell_no}</title>'
+            f'<polygon points="{svg_points(display_cell_polygon)}" '
+            f'fill="{fill}" fill-opacity="{fill_opacity}" stroke="{stroke}" stroke-width="{stroke_width}" stroke-opacity="{opacity}" '
+            f'pointer-events="all"/></a>'
+        )
+    svg.append("</g>")
+    svg.append(f'<polygon points="{svg_points(display_module_polygon)}" fill="none" stroke="#bae6fd" stroke-width="1.2" stroke-opacity=".35"/>')
+    svg.append("</svg>")
+    components.html(
+        f"""
+        <div class="pv-module-crop">{''.join(svg)}</div>
+        <style>
+          .pv-module-crop {{ width:100%; overflow:auto; border:1px solid #20324a; border-radius:14px; background:#020617; }}
+          .pv-module-crop svg {{ width:{width}px; max-width:100%; height:auto; display:block; margin:auto; }}
+          .pv-module-crop a:hover polygon {{ stroke:#38bdf8; stroke-opacity:1; stroke-width:1.8; fill-opacity:.13; }}
+        </style>
+        """,
+        height=min(820, max(560, height + 42)),
+        scrolling=False,
+    )
+    return display
+
+
+def render_array_module_selector(
+    location,
+    view,
+    scene_image_obj,
+    region,
+    selected_module=0,
+    selected_cell_id=None,
+    fault_records=None,
+    show_boxes=True,
+    show_cell_map=False,
+):
+    display, origin, modules, scale = crop_array_from_module_union(
+        scene_image_obj,
+        region,
+        pad_ratio=0.14,
+        target_width=1280,
+        max_scale=16,
+    )
+    uri = data_uri(display)
+    width, height = display.size
+    row_id = f"{row_prefix(location['id'])}{region['row']}"
+    selected_cell = None
+    if selected_cell_id:
+        try:
+            selected_cell = cell_by_id(location["id"], row_id, selected_cell_id)
+        except Exception:
+            selected_cell = None
+    faults_by_module_cell = {}
+    for record in fault_records or []:
+        if record.get("location_id") != location["id"] or record.get("row_id") != row_id:
+            continue
+        try:
+            record_cell = cell_by_id(location["id"], row_id, record.get("target_cell_id"))
+        except Exception:
+            continue
+        if int(record_cell.get("panel_number") or 1) != int(region["col"]):
+            continue
+        key = (
+            int(record_cell.get("module_number_in_panel") or 1),
+            int(record_cell.get("module_cell_number") or 1),
+        )
+        faults_by_module_cell.setdefault(key, []).append(record)
+    svg = [
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">',
+        f'<image href="{uri}" width="{width}" height="{height}" preserveAspectRatio="xMidYMid meet"/>',
+    ]
+    debug_geometry = bool(st.session_state.get("debug_geometry_overlay", False))
+    for module_number, module in modules.items():
+        outer_polygon = module_outer_polygon(module)
+        active_polygon = module_active_polygon(module)
+        display_polygon = polygon_to_crop(outer_polygon, origin, scale)
+        display_active_polygon = polygon_to_crop(active_polygon, origin, scale)
+        bx1, by1, bx2, by2 = polygon_bounds(display_polygon)
+        active = module_number == selected_module
+        stroke = "#38bdf8" if active else "#bae6fd"
+        stroke_opacity = ".20" if active else ".07"
+        stroke_width = "1.05" if active else ".75"
+        badge_w, badge_h = 27, 18
+        badge_x = bx1 + 6
+        badge_y = by1 + 6
+        svg.append(
+            f'<polygon points="{svg_points(display_polygon)}" '
+            f'fill="none" stroke="{stroke}" stroke-width="{stroke_width}" stroke-opacity="{stroke_opacity}" pointer-events="none"/>'
+            + (
+                f'<polygon points="{svg_points(display_polygon)}" fill="none" stroke="#ef4444" stroke-width="1.1" stroke-opacity=".84" pointer-events="none"/>'
+                f'<polygon points="{svg_points(display_active_polygon)}" fill="none" stroke="#22c55e" stroke-width=".9" stroke-opacity=".72" pointer-events="none"/>'
+                if debug_geometry else ""
+            )
+            + f'<g pointer-events="none" opacity="{".92" if active else ".66"}">'
+            f'<rect x="{badge_x:.1f}" y="{badge_y:.1f}" width="{badge_w}" height="{badge_h}" rx="5" ry="5" '
+            f'fill="#020617" fill-opacity=".64" stroke="#bae6fd" stroke-opacity=".35"/>'
+            f'<text x="{badge_x + badge_w / 2:.1f}" y="{badge_y + 13:.1f}" text-anchor="middle" font-size="10.5" '
+            f'font-family="Inter, Arial" fill="#e0f2fe" font-weight="700">M{module_number}</text></g>'
+        )
+        for cell_no, cell_geometry in module_cell_polygons(module).items():
+            _, target_cell = default_cell_for_array(location["id"], region["row"], region["col"], module_number, cell_no)
+            target = f"?{urlencode(navigation_params(
+                location["id"],
+                view,
+                row_id,
+                target_cell["id"],
+                section="Faults",
+                selected_array=region["key"],
+                selected_module=module_number,
+                cell_active=1,
+            ))}"
+            display_cell_polygon = polygon_to_crop(cell_geometry["polygon"], origin, scale)
+            selected = bool(
+                selected_cell
+                and int(selected_cell.get("panel_number") or 1) == int(region["col"])
+                and int(selected_cell.get("module_number_in_panel") or 1) == int(module_number)
+                and int(selected_cell.get("module_cell_number") or 1) == int(cell_no)
+            )
+            cell_faults = faults_by_module_cell.get((int(module_number), int(cell_no)), [])
+            if show_cell_map or debug_geometry:
+                fill = "#38bdf8"
+                fill_opacity = ".006"
+                cell_stroke = "#67e8f9" if debug_geometry else "#bae6fd"
+                cell_stroke_opacity = ".52" if debug_geometry else ".12"
+                cell_stroke_width = ".65"
+            elif selected:
+                fill = "#38bdf8"
+                fill_opacity = ".045"
+                cell_stroke = "#38bdf8"
+                cell_stroke_opacity = ".72"
+                cell_stroke_width = "1.1"
+            else:
+                fill = "#38bdf8"
+                fill_opacity = ".001"
+                cell_stroke = "#38bdf8"
+                cell_stroke_opacity = "0"
+                cell_stroke_width = ".65"
+            title = f"Module {module_number}, Cell {cell_no}"
+            svg.append(
+                f'<a class="pv-cell-hit" href="{esc(target)}" target="_parent"><title>{esc(title)}</title>'
+                f'<polygon points="{svg_points(display_cell_polygon)}" fill="{fill}" fill-opacity="{fill_opacity}" '
+                f'stroke="{cell_stroke}" stroke-opacity="{cell_stroke_opacity}" stroke-width="{cell_stroke_width}" '
+                f'pointer-events="all"/></a>'
+            )
+            if show_boxes and cell_faults:
+                fault_stroke = "#fb923c"
+                if any(record.get("fault_type") in HOTSPOT_FAULTS for record in cell_faults):
+                    fault_stroke = "#facc15"
+                svg.append(
+                    f'<polygon points="{svg_points(display_cell_polygon)}" fill="none" '
+                    f'stroke="{fault_stroke}" stroke-width="1.4" stroke-opacity=".86" pointer-events="none"/>'
+                )
+    svg.append("</svg>")
+    components.html(
+        f"""
+        <div class="pv-array-crop">{''.join(svg)}</div>
+        <style>
+          .pv-array-crop {{ width:100%; overflow:hidden; border:1px solid #20324a; border-radius:14px; background:#020617; }}
+          .pv-array-crop svg {{ width:{width}px; max-width:100%; height:auto; display:block; margin:auto; }}
+          .pv-array-crop .pv-cell-hit:hover polygon {{
+            stroke:#7dd3fc;
+            stroke-opacity:.82;
+            stroke-width:1.15;
+            fill-opacity:.055;
+            filter: drop-shadow(0 0 3px rgba(56,189,248,.32));
+          }}
+        </style>
+        """,
+        height=max(540, height + 42),
+        scrolling=False,
+    )
+    return display
+
+
+def export_current_view_bytes(image):
+    return image_png_bytes(image.convert("RGB"))
+
+
+def parse_panel_search(text):
+    import re
+
+    raw = (text or "").strip().upper().replace(" ", "")
+    match = re.match(r"R(\d+)-?A(\d+)", raw)
+    if match:
+        return ("array", int(match.group(1)), int(match.group(2)))
+    match = re.match(r"R(\d+)-?C(\d+)", raw)
+    if match:
+        return ("cell", int(match.group(1)), int(match.group(2)))
+    return None
+
+
+def fault_target_cells(location_id):
+    targets = []
+    for row in panels(location_id):
+        for cell in cells_for_row(location_id, row["id"]):
+            targets.append((row, cell))
+    return targets
+
+
+def top_summary_bar(location, view, metadata, active_faults):
+    st.markdown(
+        f"""
+        <div class="pv-topbar">
+          <div class="pv-shell-title">{esc(location["name"])}</div>
+          <div class="pv-metric-grid">
+            <div class="pv-metric"><span>View</span><strong>{esc(view.upper())}</strong></div>
+            <div class="pv-metric"><span>Rows</span><strong>{metadata["row_count"]}</strong></div>
+            <div class="pv-metric"><span>Arrays / Row</span><strong>{metadata["arrays_per_row"]}</strong></div>
+            <div class="pv-metric"><span>Total Arrays</span><strong>{metadata["total_arrays"]:,}</strong></div>
+            <div class="pv-metric"><span>Total Cells</span><strong>{metadata.get("total_cells") or 0:,}</strong></div>
+            <div class="pv-metric"><span>Faults</span><strong>{active_faults}</strong></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def main():
+    st.set_page_config(page_title="PV Array Fault Tool", layout="wide")
+    if qp_get("section") == "legacy":
+        legacy_main()
+        return
+
+    ui_css()
+    app_state_defaults()
+
+    location = selected_location()
+    view = qp_get("view", "thermal")
+    if view not in ("rgb", "thermal"):
+        view = "rgb"
+
+    current_custom_layout = custom_layout_enabled()
+    all_rows = panels(location["id"])
+    selected_row_id = qp_get("selected_pv", all_rows[0]["id"])
+    if selected_row_id not in {row["id"] for row in all_rows}:
+        selected_row_id = all_rows[0]["id"]
+    row_cells = cells_for_row(location["id"], selected_row_id)
+    selected_cell_id = qp_get("selected_cell", row_cells[0]["id"])
+    if selected_cell_id not in {cell["id"] for cell in row_cells}:
+        selected_cell_id = row_cells[0]["id"]
+    selected_row = row_by_id(location["id"], selected_row_id)
+    selected_cell = cell_by_id(location["id"], selected_row_id, selected_cell_id)
+    selected_module_raw = qp_get("selected_module", "")
+    module_selected = str(selected_module_raw).isdigit() and int(selected_module_raw) > 0
+    selected_module = int(selected_module_raw) if module_selected else 1
+    selected_module = max(1, min(4, selected_module))
+    cell_active = module_selected and qp_get("cell_active", "0") == "1"
+    st.session_state["selected_module_number"] = selected_module
+    section = qp_get("section", st.session_state.get("workflow_section", "Faults"))
+    if section not in WORKFLOW_SECTIONS:
+        section = "Faults"
+
+    with st.sidebar:
+        st.markdown("### PV Inspection")
+        section_choice = st.radio("Workflow", WORKFLOW_SECTIONS, index=WORKFLOW_SECTIONS.index(section), label_visibility="collapsed")
+        if section_choice != section:
+            qp_set(**navigation_params(
+                location["id"],
+                view,
+                selected_row_id,
+                selected_cell_id,
+                section=section_choice,
+                selected_array=qp_get("selected_array", ""),
+                selected_module=qp_get("selected_module", ""),
+                cell_active=qp_get("cell_active", "0"),
+            ))
+            st.rerun()
+        st.divider()
+        st.caption("Settings")
+        chosen_view = st.radio("RGB / Thermal", ["RGB", "Thermal"], index=0 if view == "rgb" else 1, horizontal=True)
+        if chosen_view.lower() != view:
+            qp_set(**navigation_params(
+                location["id"],
+                chosen_view.lower(),
+                selected_row_id,
+                selected_cell_id,
+                section=section,
+                selected_array=qp_get("selected_array", ""),
+                selected_module=qp_get("selected_module", ""),
+                cell_active=qp_get("cell_active", "0"),
+            ))
+            st.rerun()
+        filter_choice = st.radio("Field Filter", ["Show All", "Faulty Only"], index=0 if qp_get("filter", "Show All") == "Show All" else 1)
+        if filter_choice != qp_get("filter", "Show All"):
+            qp_set(**navigation_params(location["id"], view, selected_row_id, selected_cell_id, section=section, filter=filter_choice))
+            st.rerun()
+        if st.button("Clear all faults", use_container_width=True):
+            push_fault_history()
+            st.session_state["random_fault_records"] = []
+            st.session_state["panel_cell_fault_records"] = []
+            st.toast("All faults cleared")
+            st.rerun()
+        undo_col, redo_col = st.columns(2)
+        with undo_col:
+            if st.button("Undo", use_container_width=True, disabled=not st.session_state.get("fault_undo_stack")):
+                if undo_fault_action():
+                    st.rerun()
+        with redo_col:
+            if st.button("Redo", use_container_width=True, disabled=not st.session_state.get("fault_redo_stack")):
+                if redo_fault_action():
+                    st.rerun()
+
+    fault_scale = DEFAULT_FAULT_SCALE
+    records = records_for_location(location["id"], view)
+    metadata = scene_metadata(location, view, selected_row, selected_cell, records)
+    inspection_mode = st.session_state.get("inspection_crop_mode", "Current")
+    inspection_geometry = st.session_state.get("inspection_geometry", "Natural")
+    if inspection_geometry not in ("Natural", "Rectified"):
+        inspection_geometry = "Natural"
+    current_array_key = selected_array_key(location["id"], selected_row_id, selected_cell_id)
+    array_selected = bool(qp_get("selected_array", ""))
+    inspection_state = "scene" if not array_selected else ("module" if module_selected else "array")
+    focus_mode = qp_get("focus", "0") == "1"
+
+    rgb_scene = None
+    thermal_scene = None
+    scene = None
+    regions = None
+    selected_region = None
+
+    def get_rgb_scene():
+        nonlocal rgb_scene
+        if rgb_scene is None:
+            rgb_scene = module_field_image(location["id"], "rgb", selected_row_id, selected_cell_id, [], show_grid=False).convert("RGB")
+        return rgb_scene
+
+    def get_thermal_scene():
+        nonlocal thermal_scene
+        if thermal_scene is None:
+            thermal_scene = module_field_image(location["id"], "thermal", selected_row_id, selected_cell_id, records, show_grid=False).convert("RGB")
+        return thermal_scene
+
+    def get_scene():
+        nonlocal scene
+        if scene is None:
+            scene = get_thermal_scene() if view == "thermal" else get_rgb_scene()
+        return scene
+
+    def get_regions():
+        nonlocal regions
+        if regions is None:
+            regions = array_regions(location["id"], get_rgb_scene())
+        return regions
+
+    def get_selected_region():
+        nonlocal selected_region, current_array_key
+        if selected_region is None:
+            available_regions = get_regions()
+            selected_region = next((item for item in available_regions if item["key"] == current_array_key), None)
+            if selected_region is None and available_regions:
+                selected_region = available_regions[0]
+                current_array_key = selected_region["key"]
+            if selected_region:
+                recent = [item for item in st.session_state.get("recent_arrays", []) if item != current_array_key]
+                st.session_state["recent_arrays"] = [current_array_key] + recent[:7]
+        return selected_region
+
+    top_summary_bar(location, view, metadata, len(records))
+
+    if section == "Scene Setup":
+        scene = get_scene()
+        regions = get_regions()
+        selected_region = get_selected_region()
+        left, right = st.columns([.44, .56])
+        with left:
+            st.markdown('<div class="pv-card"><div class="pv-section-title">Scene Setup</div>', unsafe_allow_html=True)
+            names = [item["name"] for item in LOCATIONS]
+            current_index = [item["id"] for item in LOCATIONS].index(location["id"])
+            chosen = st.selectbox("Terrain / location", names, index=current_index)
+            chosen_location = LOCATIONS[names.index(chosen)]
+            if chosen_location["id"] != location["id"]:
+                new_row = panels(chosen_location["id"])[0]["id"]
+                qp_set(**navigation_params(chosen_location["id"], view, new_row, cells_for_row(chosen_location["id"], new_row)[0]["id"], section="Scene Setup"))
+                st.rerun()
+            row_value = custom_row_count(location["id"]) if current_custom_layout else min(len(base_row_defs_for_location(location["id"])), max_custom_rows(location["id"]))
+            panel_value = custom_panels_per_row(location["id"]) if current_custom_layout else default_panels_per_row(location["id"])
+            desired_rows = st.number_input("Rows", min_value=1, max_value=max_custom_rows(location["id"]), value=int(row_value), step=1)
+            desired_arrays = st.number_input("Arrays per Row", min_value=1, max_value=max_custom_panels_per_row(location["id"]), value=int(panel_value), step=1)
+            if int(desired_rows) != custom_row_count(location["id"]) or int(desired_arrays) != custom_panels_per_row(location["id"]) or not current_custom_layout:
+                if st.button("Apply Layout", type="primary", use_container_width=True):
+                    first_row = f"{row_prefix(location['id'])}1"
+                    qp_set(
+                        location=location["id"],
+                        view=view,
+                        section="Layout",
+                        custom_layout=1,
+                        row_count=int(desired_rows),
+                        panels_per_row=int(desired_arrays),
+                        selected_pv=first_row,
+                        selected_cell=f"{first_row}-C001",
+                    )
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+        with right:
+            st.markdown('<div class="pv-canvas-card">', unsafe_allow_html=True)
+            render_interactive_scene_canvas(scene, location, view, regions, current_array_key, records, qp_get("filter", "Show All"))
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    elif section == "Layout":
+        scene = get_scene()
+        regions = get_regions()
+        selected_region = get_selected_region()
+        main_col, info_col = st.columns([.72, .28])
+        with main_col:
+            st.markdown('<div class="pv-canvas-card">', unsafe_allow_html=True)
+            render_interactive_scene_canvas(scene, location, view, regions, current_array_key, records, qp_get("filter", "Show All"))
+            st.markdown("</div>", unsafe_allow_html=True)
+        with info_col:
+            st.markdown('<div class="pv-card"><div class="pv-section-title">Topology</div>', unsafe_allow_html=True)
+            meta = load_solar_render_metadata(location["id"]) or {}
+            topology = meta.get("topology") or {}
+            st.write(f"Topology: `{topology.get('topology_type', 'generated')}`")
+            st.write(f"Rows: `{topology.get('requested_rows', metadata['row_count'])}`")
+            st.write(f"Row counts: `{topology.get('row_lengths', [])}`")
+            st.write(f"Orientation: `{topology.get('orientation_strategy', 'mixed')}`")
+            st.write(f"Strings: `{topology.get('string_count', 'n/a')}`")
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown('<div class="pv-card"><div class="pv-section-title">Recently Viewed</div><div class="pv-chip-row">', unsafe_allow_html=True)
+            for key in st.session_state.get("recent_arrays", [])[:8]:
+                st.markdown(f'<span class="pv-chip">{esc(key)}</span>', unsafe_allow_html=True)
+            st.markdown("</div></div>", unsafe_allow_html=True)
+
+    elif section == "Faults":
+        rgb_scene = get_rgb_scene()
+        scene = get_scene()
+        regions = get_regions()
+        selected_region = get_selected_region()
+        show_fault_boxes = bool(st.session_state.get("show_fault_boxes", True))
+        show_cell_map = bool(st.session_state.get("show_cell_map", False))
+        if focus_mode:
+            if st.button("Exit Full Screen", use_container_width=False):
+                qp_set(**navigation_params(
+                    location["id"],
+                    view,
+                    selected_row_id,
+                    selected_cell_id,
+                    section="Faults",
+                    selected_array=qp_get("selected_array", ""),
+                    selected_module=qp_get("selected_module", ""),
+                    cell_active=qp_get("cell_active", "0"),
+                    focus=0,
+                ))
+                st.rerun()
+            canvas_col = st.container()
+            inspector_col = None
+        else:
+            canvas_col, inspector_col = st.columns([.82, .18])
+        with canvas_col:
+            if selected_region:
+                crop_scene = scene
+                if inspection_mode == "RGB":
+                    crop_scene = rgb_scene
+                elif inspection_mode == "Thermal":
+                    if thermal_scene is None:
+                        thermal_scene = get_thermal_scene()
+                    crop_scene = thermal_scene
+                if inspection_state in ("array", "module"):
+                    st.markdown('<div class="pv-card"><div class="pv-section-title">Array Inspection</div>', unsafe_allow_html=True)
+                    crumb = f'{esc(location["name"])} &gt; {esc(current_array_key)}'
+                    if module_selected:
+                        crumb += f' &gt; Module {selected_module}'
+                    if cell_active:
+                        crumb += f' &gt; {esc(selected_cell_id)}'
+                    st.markdown(f'<div class="pv-focus-title">{crumb}</div>', unsafe_allow_html=True)
+                    if inspection_mode == "Compare":
+                        if thermal_scene is None:
+                            thermal_scene = get_thermal_scene()
+                        show_crop_pair(rgb_scene, thermal_scene, selected_region.get("polygon") or box_polygon(selected_region["box"]), "RGB", "Thermal", 0.075)
+                    else:
+                        render_array_module_selector(
+                            location,
+                            view,
+                            crop_scene,
+                            selected_region,
+                            selected_module if module_selected else 0,
+                            selected_cell_id if cell_active else None,
+                            records,
+                            show_fault_boxes,
+                            show_cell_map,
+                        )
+                    st.caption("Click the suspicious cell directly inside the real four-module array. The main image stays at full-array context.")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="pv-canvas-card">', unsafe_allow_html=True)
+                    render_interactive_scene_canvas(scene, location, view, regions, "", records, qp_get("filter", "Show All"))
+                    st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="pv-canvas-card">', unsafe_allow_html=True)
+                render_interactive_scene_canvas(scene, location, view, regions, "", records, qp_get("filter", "Show All"))
+                st.markdown("</div>", unsafe_allow_html=True)
+        if inspector_col is None:
+            pass
+        else:
+            with inspector_col:
+                far_observation_types = set(globals().get("FAR_SCOUT_FAULT_TYPES", [])) | set(HOTSPOT_FAULTS)
+                st.markdown('<div class="pv-card"><div class="pv-section-title">Inspector</div>', unsafe_allow_html=True)
+                if inspection_state in ("array", "module") and selected_region:
+                    st.markdown('<div class="pv-context-thumb">', unsafe_allow_html=True)
+                    st.image(scene_context_image(scene, selected_region), use_container_width=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+                    if st.button("Back to Field", use_container_width=True):
+                        qp_set(**navigation_params(
+                            location["id"],
+                            view,
+                            selected_row_id,
+                            selected_cell_id,
+                            section="Faults",
+                            selected_array="",
+                            selected_module="",
+                            cell_active=0,
+                        ))
+                        st.rerun()
+                if inspection_state == "module" and selected_region:
+                    st.caption("Selected Array")
+                    st.image(array_context_thumbnail(scene, selected_region, selected_module), use_container_width=True)
+                    if st.button("Back to Array", use_container_width=True):
+                        qp_set(**navigation_params(
+                            location["id"],
+                            view,
+                            selected_row_id,
+                            selected_cell_id,
+                            section="Faults",
+                            selected_array=current_array_key,
+                            selected_module="",
+                            cell_active=0,
+                        ))
+                        st.rerun()
+                if inspection_state == "scene":
+                    st.write("**Scene Selection**")
+                    st.caption("Click an array in the main scene to open the large array inspection view.")
+                elif selected_region:
+                    st.write(f"**{current_array_key}**")
+                    st.caption(f"Row {selected_region['row']} | Array {selected_region['col']} | {selected_region.get('orientation', 'unknown')} | String {selected_region.get('string_id') or 'n/a'}")
+                    array_fault_count = fault_count_for_region(records, selected_region)
+                    st.caption(f"4 modules | {array_fault_count} fault(s)")
+                if inspection_state != "scene" and module_selected:
+                    st.write(f"**Module:** {selected_module}")
+                elif inspection_state != "scene":
+                    st.caption("Select a suspicious cell from the real array crop.")
+                if cell_active:
+                    st.write(f"**Cell:** `{selected_cell_id}`")
+                    selected_faults = [record for record in records if record.get("target_cell_id") == selected_cell_id]
+                    far_observations = [record for record in selected_faults if record.get("fault_type") in far_observation_types]
+                    diagnostic_faults = [record for record in selected_faults if record.get("fault_type") not in far_observation_types]
+                    if far_observations:
+                        st.caption("Observed thermal phenomenon")
+                        for record in far_observations:
+                            st.markdown(f'<span class="pv-chip">{esc(fault_display_name(record["fault_type"]))}</span>', unsafe_allow_html=True)
+                    if diagnostic_faults:
+                        st.caption("Assigned diagnostic fault(s)")
+                        for record in diagnostic_faults:
+                            st.markdown(f'<span class="pv-chip pv-chip-hot">{esc(fault_display_name(record["fault_type"]))}</span>', unsafe_allow_html=True)
+                    else:
+                        st.caption("No diagnostic fault assigned to selected cell.")
+                elif module_selected:
+                    st.caption("Select a cell from the four-module array crop to edit diagnostic faults.")
+                inspection_choice = st.radio(
+                    "Crop View",
+                    ["Current", "RGB", "Thermal", "Compare"],
+                    index=["Current", "RGB", "Thermal", "Compare"].index(inspection_mode if inspection_mode in ["Current", "RGB", "Thermal", "Compare"] else "Current"),
+                    horizontal=True,
+                    key="inspection_crop_mode",
+                )
+                if inspection_choice != inspection_mode:
+                    st.rerun()
+                if st.button("Full Screen", use_container_width=True):
+                    qp_set(**navigation_params(
+                        location["id"],
+                        view,
+                        selected_row_id,
+                        selected_cell_id,
+                        section="Faults",
+                        selected_array=qp_get("selected_array", ""),
+                        selected_module=qp_get("selected_module", ""),
+                        cell_active=qp_get("cell_active", "0"),
+                        focus=1,
+                    ))
+                    st.rerun()
+                st.checkbox("Show fault bounding boxes", value=show_fault_boxes, key="show_fault_boxes")
+                st.checkbox("Show cell map", value=show_cell_map, key="show_cell_map")
+                st.checkbox("Debug geometry overlay", value=bool(st.session_state.get("debug_geometry_overlay", False)), key="debug_geometry_overlay")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                st.markdown('<div class="pv-card"><div class="pv-section-title">Far View Thermal Observations</div>', unsafe_allow_html=True)
+                st.caption("Generate scene-level thermal phenomena without changing close diagnostic fault classes.")
+                far_fault_types = [
+                    fault_type for fault_type in globals().get(
+                        "FAR_SCOUT_FAULT_TYPES",
+                        ["SingleHotSpot", "MultiHotSpot", "PartialShading", "StringOpenCircuit"],
+                    )
+                    if fault_available_in_location(location["id"], fault_type)
+                ]
+                if not far_fault_types:
+                    far_fault_types = ["SingleHotSpot", "MultiHotSpot"]
+                if "modern_random_fault_types" in st.session_state:
+                    st.session_state["modern_random_fault_types"] = [
+                        canonical_fault_type(item)
+                        for item in st.session_state["modern_random_fault_types"]
+                        if canonical_fault_type(item) in far_fault_types
+                    ] or [far_fault_types[0]]
+                scout_types = st.multiselect(
+                    "Observation Type",
+                    far_fault_types,
+                    default=st.session_state.get("modern_random_fault_types", [far_fault_types[0]]),
+                    format_func=fault_display_name,
+                    key="modern_random_fault_types",
+                )
+                scout_max = max(1, min(50, int(metadata.get("total_cells") or 1)))
+                scout_count = st.number_input("Count", min_value=1, max_value=scout_max, value=min(3, scout_max), step=1, key="modern_random_fault_count")
+                scout_seed = st.number_input("Seed", min_value=0, max_value=999999, value=42, step=1, key="modern_random_fault_seed")
+                scout_col_a, scout_col_b = st.columns(2)
+                with scout_col_a:
+                    if st.button("Generate Observations", use_container_width=True, disabled=not scout_types):
+                        available_cells = fault_target_cells(location["id"])
+                        if not available_cells:
+                            st.warning("No available cells for this scene.")
+                            st.stop()
+                        push_fault_history()
+                        rng = random.Random(seed_for(location["id"], view, "|".join(scout_types), int(scout_count), int(scout_seed), "modern-main-hotspots"))
+                        chosen = rng.sample(available_cells, min(int(scout_count), len(available_cells)))
+                        st.session_state["random_fault_records"] = [
+                            fault_record(location, view, row, cell, rng.choice(scout_types), fault_scale)
+                            for row, cell in chosen
+                        ]
+                        st.rerun()
+                with scout_col_b:
+                    if st.button("Clear Observations", use_container_width=True, disabled=not st.session_state.get("random_fault_records")):
+                        push_fault_history()
+                        st.session_state["random_fault_records"] = []
+                        st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                if cell_active:
+                    st.markdown('<div class="pv-card"><div class="pv-section-title">Fault Editor</div>', unsafe_allow_html=True)
+                    available_fault_types = [
+                        fault_type for fault_type in globals().get("CLOSE_DIAGNOSTIC_FAULT_TYPES", selectable_fault_types_for_location(location["id"]))
+                        if fault_available_in_location(location["id"], fault_type)
+                        and fault_type not in far_observation_types
+                    ] or [
+                        fault_type for fault_type in selectable_fault_types_for_location(location["id"])
+                        if fault_type not in far_observation_types
+                    ]
+                    fault_type = st.selectbox("Diagnostic Fault Type", available_fault_types, format_func=fault_display_name, key="new_fault_type")
+                    severity = st.slider("Severity", 1, 10, DEFAULT_FAULT_SCALE)
+                    add_col, clear_col = st.columns(2)
+                    with add_col:
+                        if st.button("Apply Fault", type="primary", use_container_width=True):
+                            push_fault_history()
+                            existing = [
+                                record for record in st.session_state.get("panel_cell_fault_records", [])
+                                if not (
+                                    record.get("location_id") == location["id"]
+                                    and record.get("row_id") == selected_row_id
+                                    and record.get("target_cell_id") == selected_cell_id
+                                )
+                            ]
+                            existing.append(fault_record(location, view, selected_row, selected_cell, fault_type, severity))
+                            st.session_state["panel_cell_fault_records"] = existing
+                            st.toast(f"Fault applied to {selected_cell_id}")
+                            st.rerun()
+                    with clear_col:
+                        if st.button("Clear Cell", use_container_width=True):
+                            push_fault_history()
+                            st.session_state["panel_cell_fault_records"] = [
+                                record for record in st.session_state.get("panel_cell_fault_records", [])
+                                if not (
+                                    record.get("location_id") == location["id"]
+                                    and record.get("row_id") == selected_row_id
+                                    and record.get("target_cell_id") == selected_cell_id
+                                )
+                            ]
+                            st.rerun()
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                st.markdown('<div class="pv-card"><div class="pv-section-title">Fault Navigation</div>', unsafe_allow_html=True)
+                faulty_records = [record for record in records if record.get("location_id") == location["id"]]
+                idx = next((i for i, record in enumerate(faulty_records) if record.get("target_cell_id") == selected_cell_id), -1)
+                array_idx = next((i for i, region in enumerate(regions) if region["key"] == current_array_key), -1)
+                def jump_to_fault(record):
+                    row_id = record["row_id"]
+                    cell = cell_by_id(location["id"], row_id, record["target_cell_id"])
+                    array_col = int(cell.get("panel_number") or 1)
+                    qp_set(**navigation_params(location["id"], view, row_id, cell["id"], section="Faults", selected_array=f"R{row_number_from_id(location['id'], row_id)}-A{array_col:02d}", selected_module=cell.get("module_number_in_panel", 1), cell_active=1))
+                def jump_to_region(region):
+                    row_id, cell = default_cell_for_array(location["id"], region["row"], region["col"], 1, 1)
+                    qp_set(**navigation_params(location["id"], view, row_id, cell["id"], section="Faults", selected_array=region["key"], selected_module="", cell_active=0))
+                array_prev_col, array_next_col = st.columns(2)
+                with array_prev_col:
+                    if st.button("Previous Array", use_container_width=True, disabled=not regions):
+                        jump_to_region(regions[(array_idx - 1) % len(regions)])
+                        st.rerun()
+                with array_next_col:
+                    if st.button("Next Array", use_container_width=True, disabled=not regions):
+                        jump_to_region(regions[(array_idx + 1) % len(regions)])
+                        st.rerun()
+                prev_col, next_col = st.columns(2)
+                with prev_col:
+                    if st.button("Previous Fault", use_container_width=True, disabled=not faulty_records):
+                        jump_to_fault(faulty_records[(idx - 1) % len(faulty_records)])
+                        st.rerun()
+                with next_col:
+                    if st.button("Next Fault", use_container_width=True, disabled=not faulty_records):
+                        jump_to_fault(faulty_records[(idx + 1) % len(faulty_records)])
+                        st.rerun()
+                recent_regions = [
+                    region for key in st.session_state.get("recent_arrays", [])[:6]
+                    for region in regions
+                    if region["key"] == key
+                ]
+                if recent_regions:
+                    st.caption("Recently Viewed")
+                    recent_cols = st.columns(min(3, len(recent_regions)))
+                    for i, region in enumerate(recent_regions):
+                        with recent_cols[i % len(recent_cols)]:
+                            if st.button(region["key"], key=f"recent_array_{region['key']}", use_container_width=True):
+                                jump_to_region(region)
+                                st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                st.markdown('<div class="pv-card"><div class="pv-section-title">Search</div>', unsafe_allow_html=True)
+                query = st.text_input("Search Panel / Cell ID", placeholder="R3-A02 or R3-C017")
+                if st.button("Go", use_container_width=True):
+                    parsed = parse_panel_search(query)
+                    if parsed and parsed[0] == "array":
+                        _, row_num, array_col = parsed
+                        row_id, cell = default_cell_for_array(location["id"], row_num, array_col)
+                        qp_set(**navigation_params(location["id"], view, row_id, cell["id"], section="Faults", selected_array=f"R{row_num}-A{array_col:02d}", selected_module="", cell_active=0))
+                        st.rerun()
+                    elif parsed and parsed[0] == "cell":
+                        _, row_num, cell_num = parsed
+                        row_id = f"{row_prefix(location['id'])}{row_num}"
+                        cell_id = f"{row_id}-C{cell_num:03d}"
+                        cell = cell_by_id(location["id"], row_id, cell_id)
+                        qp_set(**navigation_params(location["id"], view, row_id, cell["id"], section="Faults", selected_array=f"R{row_num}-A{int(cell.get('panel_number') or 1):02d}", selected_module=cell.get("module_number_in_panel", 1), cell_active=1))
+                        st.rerun()
+                    else:
+                        st.warning("Use a form like R1-A03 or R1-C017.")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+    elif section == "Review":
+        summary_col, analysis_col = st.columns([.45, .55])
+        with summary_col:
+            st.markdown('<div class="pv-card"><div class="pv-section-title">Fault Summary</div>', unsafe_allow_html=True)
+            summary = fault_summary_rows(records)
+            if summary:
+                st.table(summary)
+            else:
+                st.caption("No faults have been assigned yet.")
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown('<div class="pv-card"><div class="pv-section-title">Fault Legend</div><div class="pv-chip-row">', unsafe_allow_html=True)
+            for fault_type in selectable_fault_types_for_location(location["id"]):
+                st.markdown(f'<span class="pv-chip">{esc(fault_display_name(fault_type))}</span>', unsafe_allow_html=True)
+            st.markdown("</div></div>", unsafe_allow_html=True)
+        with analysis_col:
+            st.markdown('<div class="pv-card"><div class="pv-section-title">AI Classifier Check</div>', unsafe_allow_html=True)
+            if view == "thermal":
+                scene = get_thermal_scene()
+                render_classifier_check(scene)
+            else:
+                st.caption("Switch to Thermal view to run the classifier check on the current thermal scene.")
+            st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown('<div class="pv-card"><div class="pv-section-title">Fault List</div>', unsafe_allow_html=True)
+        st.dataframe(fault_table_rows(records), use_container_width=True, hide_index=True)
+        with st.expander("Advanced Data", expanded=False):
+            if st.checkbox("Load advanced metadata and selected-row cells", value=False):
+                st.json(load_solar_render_metadata(location["id"]) or {})
+                st.dataframe(
+                    [
+                        {
+                            "pv_cell_id": cell["id"],
+                            "row": selected_row_id,
+                            "array": cell.get("panel_number"),
+                            "module": cell.get("module_number_in_panel"),
+                            "module_cell": cell.get("module_cell_number"),
+                            "x1": cell["x1"],
+                            "y1": cell["y1"],
+                            "x2": cell["x2"],
+                            "y2": cell["y2"],
+                        }
+                        for cell in row_cells
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption("Advanced metadata is loaded on demand to keep the Review page responsive.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    elif section == "Export":
+        scene = get_scene()
+        selected_region = get_selected_region()
+        st.markdown('<div class="pv-card"><div class="pv-section-title">Export</div>', unsafe_allow_html=True)
+        crop_image, _ = crop_from_polygon(scene, selected_region.get("polygon") or box_polygon(selected_region["box"]), 0.075) if selected_region else (scene, (0, 0, scene.width, scene.height))
+        export_cols = st.columns(4)
+        with export_cols[0]:
+            st.download_button("Export Current View", export_current_view_bytes(scene), file_name=f"{location['id']}_{view}_scene.png", mime="image/png", use_container_width=True)
+        with export_cols[1]:
+            st.download_button("Export Selected Crop", export_current_view_bytes(crop_image), file_name=f"{location['id']}_{current_array_key}_{view}.png", mime="image/png", use_container_width=True)
+        with export_cols[2]:
+            st.download_button("Export CSV", fault_records_csv(records), file_name="faults.csv", mime="text/csv", use_container_width=True)
+        with export_cols[3]:
+            terrain = module_field_background(location["id"], view, module_field_static_canvas_size(location["id"], view), selected_row_id)
+            st.download_button("Export Dataset", export_package_bytes(location, view, selected_row, selected_cell, records, terrain, scene), file_name="pv_fault_dataset.zip", mime="application/zip", use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    elif section == "Settings":
+        st.markdown('<div class="pv-card"><div class="pv-section-title">Settings</div>', unsafe_allow_html=True)
+        st.caption("Generation settings are intentionally lightweight in the UI. Blender generation, topology, and safe placement are controlled by the renderer scripts.")
+        st.write(f"Custom layout: `{custom_layout_enabled()}`")
+        st.write(f"Rows: `{custom_row_count(location['id'])}`")
+        st.write(f"Nominal arrays per row: `{custom_panels_per_row(location['id'])}`")
+        if st.button("Open Legacy Interface", use_container_width=True):
+            qp_set(**navigation_params(location["id"], view, selected_row_id, selected_cell_id, section="legacy"))
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    elif section == "Help":
+        st.markdown(
+            """
+            <div class="pv-card">
+              <div class="pv-section-title">Workflow</div>
+              <p class="pv-muted">Choose a scene, set rows and arrays per row, inspect the generated installation, click real arrays, drill into real crops, assign faults, review, and export.</p>
+              <p class="pv-muted">The UI uses the existing RGB, thermal, fault, and export pipeline. It does not rerender Blender during inspection.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )

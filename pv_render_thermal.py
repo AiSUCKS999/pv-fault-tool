@@ -83,31 +83,103 @@ def blend_temp_patch(temp, box, patch, alpha):
     temp[y1:y2, x1:x2] = temp[y1:y2, x1:x2] * (1 - alpha) + local * alpha
 
 
-def real_fault_patch_boxes(fault_type, bx1, by1, bx2, by2, rng):
-    bw, bh = max(3, bx2 - bx1), max(3, by2 - by1)
+class FaultGeometryError(ValueError):
+    pass
+
+
+def clipped_effect_roi(temp, requested_bbox, effect_mask, fault_type, target_id):
+    """Return aligned temp ROI and effect mask after clipping a requested bbox to the image."""
+    if temp is None or effect_mask is None:
+        raise FaultGeometryError(f"Fault application geometry error: empty field or mask for {fault_type} target={target_id}")
+    if temp.ndim != 2:
+        raise FaultGeometryError(f"Fault application geometry error: expected HxW temperature field, got {temp.shape}")
+
+    x1, y1, x2, y2 = [int(round(float(value))) for value in requested_bbox]
+    h, w = temp.shape[:2]
+    cx1, cy1 = max(0, x1), max(0, y1)
+    cx2, cy2 = min(w, x2), min(h, y2)
+    if cx2 <= cx1 or cy2 <= cy1:
+        return None, None, (cx1, cy1, cx2, cy2)
+
+    local = temp[cy1:cy2, cx1:cx2]
+    mask = np.asarray(effect_mask, dtype=np.float32)
+    if mask.ndim == 3:
+        mask = mask[:, :, 0]
+
+    mx1 = cx1 - x1
+    my1 = cy1 - y1
+    mx2 = mx1 + local.shape[1]
+    my2 = my1 + local.shape[0]
+    mask_local = mask[my1:my2, mx1:mx2]
+    if local.shape[:2] != mask_local.shape[:2]:
+        raise FaultGeometryError(
+            "Fault application geometry error: "
+            f"fault_type={fault_type}, target={target_id}, "
+            f"requested_bbox={(x1, y1, x2, y2)}, clipped_bbox={(cx1, cy1, cx2, cy2)}, "
+            f"local_shape={local.shape[:2]}, mask_shape={mask.shape[:2]}, mask_local_shape={mask_local.shape[:2]}"
+        )
+    return local, mask_local, (cx1, cy1, cx2, cy2)
+
+
+def apply_local_thermal_effect(temp, requested_bbox, effect_mask, fault_type, target_id, updater):
+    local, mask_local, clipped_bbox = clipped_effect_roi(temp, requested_bbox, effect_mask, fault_type, target_id)
+    if local is None:
+        return clipped_bbox
+    updated = updater(local, mask_local)
+    if updated is not None:
+        updated = np.asarray(updated, dtype=np.float32)
+        if updated.shape[:2] != local.shape[:2]:
+            raise FaultGeometryError(
+                "Fault application geometry error: updater returned wrong shape "
+                f"fault_type={fault_type}, target={target_id}, local_shape={local.shape[:2]}, updated_shape={updated.shape[:2]}"
+            )
+        local[:] = updated
+    return clipped_bbox
+
+
+def clamp_bbox_to_field(temp, bbox):
+    h, w = temp.shape[:2]
+    x1, y1, x2, y2 = [int(round(float(value))) for value in bbox]
+    return (
+        clamp(x1, 0, w),
+        clamp(y1, 0, h),
+        clamp(x2, 0, w),
+        clamp(y2, 0, h),
+    )
+
+
+def real_fault_patch_boxes(fault_type, bx1, by1, bx2, by2, rng, origin=None):
+    bw, bh = max(1, bx2 - bx1), max(1, by2 - by1)
     if fault_type in HOTSPOT_FAULTS:
         count = 1 if fault_type == "SingleHotSpot" else int(rng.integers(2, 5))
         boxes = []
         for _ in range(count):
             if fault_type == "SingleHotSpot":
-                sw = max(3, int(bw * rng.uniform(0.34, 0.56)))
-                sh = max(3, int(bh * rng.uniform(0.40, 0.66)))
+                sw = min(bw, max(1, int(bw * rng.uniform(0.34, 0.56))))
+                sh = min(bh, max(1, int(bh * rng.uniform(0.40, 0.66))))
             else:
-                sw = max(3, int(bw * rng.uniform(0.08, 0.15)))
-                sh = max(3, int(bh * rng.uniform(0.28, 0.48)))
-            cx = int(bx1 + bw * rng.uniform(0.24, 0.76))
-            cy = int(by1 + bh * rng.uniform(0.24, 0.76))
-            x1 = clamp(cx - sw // 2, bx1, bx2 - sw)
-            y1 = clamp(cy - sh // 2, by1, by2 - sh)
+                sw = min(bw, max(1, int(bw * rng.uniform(0.08, 0.15))))
+                sh = min(bh, max(1, int(bh * rng.uniform(0.28, 0.48))))
+            if origin is not None:
+                ox, oy = origin
+                jitter_x = 0 if fault_type == "SingleHotSpot" else bw * rng.uniform(-0.18, 0.18)
+                jitter_y = 0 if fault_type == "SingleHotSpot" else bh * rng.uniform(-0.18, 0.18)
+                cx = int(clamp(round(float(ox) + jitter_x), bx1 + sw // 2, bx2 - max(1, sw // 2)))
+                cy = int(clamp(round(float(oy) + jitter_y), by1 + sh // 2, by2 - max(1, sh // 2)))
+            else:
+                cx = int(bx1 + bw * rng.uniform(0.24, 0.76))
+                cy = int(by1 + bh * rng.uniform(0.24, 0.76))
+            x1 = clamp(cx - sw // 2, bx1, max(bx1, bx2 - sw))
+            y1 = clamp(cy - sh // 2, by1, max(by1, by2 - sh))
             boxes.append((x1, y1, x1 + sw, y1 + sh))
         return boxes
     if fault_type in CRACKING_FAULTS:
-        sw = max(5, int(bw * rng.uniform(0.82, 1.00)))
-        sh = max(5, int(bh * rng.uniform(0.82, 1.00)))
+        sw = min(bw, max(1, int(bw * rng.uniform(0.82, 1.00))))
+        sh = min(bh, max(1, int(bh * rng.uniform(0.82, 1.00))))
         cx = int(bx1 + bw * rng.uniform(0.45, 0.55))
         cy = int(by1 + bh * rng.uniform(0.45, 0.55))
-        x1 = clamp(cx - sw // 2, bx1, bx2 - sw)
-        y1 = clamp(cy - sh // 2, by1, by2 - sh)
+        x1 = clamp(cx - sw // 2, bx1, max(bx1, bx2 - sw))
+        y1 = clamp(cy - sh // 2, by1, max(by1, by2 - sh))
         return [(x1, y1, x1 + sw, y1 + sh)]
     if fault_type in DIODE_FAULTS:
         count = 1 if fault_type in {"SingleDiode", "DB"} else 2
@@ -319,6 +391,9 @@ def apply_real_thermal_fault_patch(temp, cell, fault_type, scale):
         return False
 
     x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, fault_type)
+    x1, y1, x2, y2 = clamp_bbox_to_field(temp, (x1, y1, x2, y2))
+    if x2 <= x1 or y2 <= y1:
+        return temp
     w = max(4, x2 - x1)
     h = max(4, y2 - y1)
     pad_x = 0 if w < 9 else max(1, int(w * 0.06))
@@ -326,9 +401,19 @@ def apply_real_thermal_fault_patch(temp, cell, fault_type, scale):
     bx1, by1, bx2, by2 = x1 + pad_x, y1 + pad_y, x2 - pad_x, y2 - pad_y
     if bx2 <= bx1 or by2 <= by1:
         bx1, by1, bx2, by2 = x1, y1, x2, y2
+    bx1, by1, bx2, by2 = clamp_bbox_to_field(temp, (bx1, by1, bx2, by2))
+    if bx2 <= bx1 or by2 <= by1:
+        return temp
 
     severity = clamp(scale, 1, 10) / 10
-    boxes = real_fault_patch_boxes(fault_type, bx1, by1, bx2, by2, rng)
+    origin_info = cell.get("fault_origin_px") if isinstance(cell, dict) else None
+    origin = None
+    if origin_info:
+        origin = (
+            clamp(float(origin_info.get("x", (bx1 + bx2) / 2)), bx1, bx2),
+            clamp(float(origin_info.get("y", (by1 + by2) / 2)), by1, by2),
+        )
+    boxes = real_fault_patch_boxes(fault_type, bx1, by1, bx2, by2, rng, origin=origin)
     for idx, box in enumerate(boxes):
         px1, py1, px2, py2 = box
         pw, ph = max(2, px2 - px1), max(2, py2 - py1)
@@ -361,8 +446,8 @@ def apply_real_thermal_fault_patch(temp, cell, fault_type, scale):
             core = np.exp(-(((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2) * 2.2)
             hot_islands = np.clip(np.maximum(core, field * organic) - 0.18, 0, 1)
             patch_alpha = np.clip(alpha * 0.42 + hot_islands * 0.68, 0, 0.88)
-            lift = hot_islands * (46 + 70 * severity) + core * (74 + 92 * severity)
-            target = np.maximum(region + lift, 238 + hot_islands * (38 + 44 * severity))
+            lift = hot_islands * (38 + 64 * severity) + core * (66 + 84 * severity)
+            target = np.maximum(region + lift, 218 + hot_islands * (32 + 34 * severity) + core * (28 + 34 * severity))
             cool_base = region - (1 - patch_alpha) * (4 + 8 * severity)
             temp[py1:py2, px1:px2] = cool_base * (1 - patch_alpha) + target * patch_alpha
         elif fault_type in SURFACE_OBSTRUCTION_FAULTS:
@@ -501,7 +586,14 @@ def thermal_fault_tint_mask(shape, cell, fault_type, scale):
 
     rng = np.random.default_rng(seed_for(cell["id"], fault_type, scale, "thermal-tint"))
     patch = selected_fault_patch(fault_type, seed_for(cell["id"], fault_type, scale, "tint-patch-choice"))
-    boxes = real_fault_patch_boxes(fault_type, bx1, by1, bx2, by2, rng)
+    origin_info = cell.get("fault_origin_px") if isinstance(cell, dict) else None
+    origin = None
+    if origin_info:
+        origin = (
+            clamp(float(origin_info.get("x", (bx1 + bx2) / 2)), bx1, bx2),
+            clamp(float(origin_info.get("y", (by1 + by2) / 2)), by1, by2),
+        )
+    boxes = real_fault_patch_boxes(fault_type, bx1, by1, bx2, by2, rng, origin=origin)
     for idx, box in enumerate(boxes):
         px1, py1, px2, py2 = box
         px1, px2 = clamp(px1, bx1, bx2), clamp(px2, bx1, bx2)
@@ -566,7 +658,7 @@ def surface_obstruction_shape(width, height, seed):
 
 def apply_surface_obstruction_rgb_tint(output, cell, scale):
     height, width = output.shape[:2]
-    x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, "PartialShading")
+    x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, "SurfaceObstruction")
     x1, x2 = clamp(x1, 0, width), clamp(x2, 0, width)
     y1, y2 = clamp(y1, 0, height), clamp(y2, 0, height)
     if x2 <= x1 or y2 <= y1:
@@ -715,15 +807,26 @@ def apply_thermal_fault(temp, cell, fault_type, scale):
     bx1, by1, bx2, by2 = x1 + pad_x, y1 + pad_y, x2 - pad_x, y2 - pad_y
     if bx2 <= bx1 or by2 <= by1:
         bx1, by1, bx2, by2 = x1, y1, x2, y2
-    bw, bh = max(3, bx2 - bx1), max(3, by2 - by1)
+    bw, bh = bx2 - bx1, by2 - by1
+    if bw <= 0 or bh <= 0:
+        return temp
     severity = clamp(scale, 1, 10) / 10
     rng = np.random.default_rng(seed_for(cell["id"], fault_type, scale, "thermal-field"))
 
     if fault_type in HOTSPOT_FAULTS:
+        origin_info = cell.get("fault_origin_px") if isinstance(cell, dict) else None
         spot_count = 1 if fault_type == "SingleHotSpot" else int(rng.integers(2, 5))
         for spot_idx in range(spot_count):
-            center_x = bx1 + bw * rng.uniform(0.28, 0.72)
-            center_y = by1 + bh * rng.uniform(0.30, 0.70)
+            if origin_info:
+                base_x = float(origin_info.get("x", bx1 + bw * 0.5))
+                base_y = float(origin_info.get("y", by1 + bh * 0.5))
+                jitter_x = 0 if fault_type == "SingleHotSpot" else bw * rng.uniform(-0.16, 0.16)
+                jitter_y = 0 if fault_type == "SingleHotSpot" else bh * rng.uniform(-0.16, 0.16)
+                center_x = clamp(base_x + jitter_x, bx1 + bw * 0.18, bx2 - bw * 0.18)
+                center_y = clamp(base_y + jitter_y, by1 + bh * 0.18, by2 - bh * 0.18)
+            else:
+                center_x = bx1 + bw * rng.uniform(0.28, 0.72)
+                center_y = by1 + bh * rng.uniform(0.30, 0.70)
             radius_x = max(1.4, bw * rng.uniform(0.22, 0.34) * (0.75 + 0.50 * severity))
             radius_y = max(1.2, bh * rng.uniform(0.24, 0.38) * (0.75 + 0.50 * severity))
             spread = max(radius_x, radius_y) * 3.8
@@ -743,11 +846,46 @@ def apply_thermal_fault(temp, cell, fault_type, scale):
             core = np.exp(-dist * 2.9)
             rough = smooth_unit_field((local_h, local_w), seed_for(cell["id"], scale, spot_idx, "hotspot-edge"), max(1.0, min(local_w, local_h) * 0.20), octaves=3)
             mask = np.clip(halo * (0.78 + rough * 0.35), 0, 1)
+            mask *= 0.82 + 0.24 * np.sin((xx * 0.19) + (yy * 0.11) + float(rng.uniform(-2.0, 2.0)))
+            mask = np.clip(mask, 0, 1)
             region = temp[hy1:hy2, hx1:hx2]
-            lift = mask * (12 + 24 * severity) + core * (54 + 74 * severity)
-            target = np.maximum(region + lift, 246 + core * (18 + 36 * severity))
+            lift = mask * (22 + 36 * severity) + core * (58 + 78 * severity)
+            target = np.maximum(region + lift, 218 + mask * (30 + 38 * severity) + core * (26 + 30 * severity))
             spot_alpha = np.clip((mask - 0.035) / 0.58, 0, 1)
             temp[hy1:hy2, hx1:hx2] = region * (1.0 - spot_alpha) + target * spot_alpha
+
+    elif fault_type == "PartialShading":
+        shade_bbox = cell.get("active_module_bbox_px") if isinstance(cell, dict) else None
+        if shade_bbox:
+            sx1 = int(round(shade_bbox.get("x1", bx1)))
+            sy1 = int(round(shade_bbox.get("y1", by1)))
+            sx2 = int(round(shade_bbox.get("x2", bx2)))
+            sy2 = int(round(shade_bbox.get("y2", by2)))
+        else:
+            sx1, sy1, sx2, sy2 = bx1, by1, bx2, by2
+        sw, sh = max(1, sx2 - sx1), max(1, sy2 - sy1)
+        yy, xx = np.mgrid[0:sh, 0:sw].astype(np.float32)
+        direction = rng.uniform(-0.85, 0.85)
+        along = (np.cos(direction) * (xx / max(1, sw - 1)) + np.sin(direction) * (yy / max(1, sh - 1)))
+        along = (along - along.min()) / max(1e-6, float(along.max() - along.min()))
+        edge = np.clip((along - rng.uniform(0.28, 0.46)) / rng.uniform(0.18, 0.30), 0, 1)
+        cloud = smooth_unit_field((sh, sw), seed_for(cell["id"], scale, "partial-shade-cloud"), max(2.0, min(sw, sh) * 0.24), octaves=3)
+        shade = np.clip((edge * 0.72 + cloud * 0.44 - 0.18) * (0.74 + 0.28 * severity), 0, 0.92).astype(np.float32)
+        shade = cv2.GaussianBlur(shade, (0, 0), max(0.8, min(sw, sh) * 0.035))
+
+        def apply_partial_shade(local, shade_local):
+            cool_delta = shade_local * (26 + 34 * severity)
+            uneven_rebound = cv2.GaussianBlur(shade_local, (0, 0), max(0.7, min(shade_local.shape) * 0.035)) * (4 + 7 * severity)
+            return local - cool_delta + uneven_rebound
+
+        apply_local_thermal_effect(
+            temp,
+            (sx1, sy1, sx2, sy2),
+            shade,
+            fault_type,
+            cell.get("id", "unknown"),
+            apply_partial_shade,
+        )
 
     elif fault_type in DIODE_FAULTS:
         band_count = 1 if fault_type in {"SingleDiode", "DB"} else 2
@@ -850,12 +988,26 @@ def apply_thermal_fault(temp, cell, fault_type, scale):
 
     elif fault_type in SURFACE_OBSTRUCTION_FAULTS:
         shade = surface_obstruction_shape(bw, bh, seed_for(cell["id"], scale, "surface-obstruction-temp"))
-        local = temp[by1:by2, bx1:bx2]
-        shade_local = shade[:bh, :bw]
-        cool_target = 104 + 18 * (1 - shade_local)
-        local[:] = local * (1 - shade_local * (0.50 + 0.10 * severity)) + cool_target * (shade_local * (0.50 + 0.10 * severity))
+        def apply_shade(local, shade_local):
+            cool_target = 104 + 18 * (1 - shade_local)
+            return local * (1 - shade_local * (0.50 + 0.10 * severity)) + cool_target * (shade_local * (0.50 + 0.10 * severity))
+        apply_local_thermal_effect(
+            temp,
+            (bx1, by1, bx2, by2),
+            shade,
+            fault_type,
+            cell.get("id", "unknown"),
+            apply_shade,
+        )
         edge = np.clip(cv2.Laplacian(shade, cv2.CV_32F), 0, 1)
-        local += edge[:bh, :bw] * (8 + 14 * severity)
+        apply_local_thermal_effect(
+            temp,
+            (bx1, by1, bx2, by2),
+            edge,
+            fault_type,
+            cell.get("id", "unknown"),
+            lambda local, edge_local: local + edge_local * (8 + 14 * severity),
+        )
 
     elif fault_type == "Electrical / open circuit":
         fault = np.zeros((bh, bw), dtype=np.float32)

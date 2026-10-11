@@ -105,19 +105,19 @@ AGRI_GREEN_ROW_DEFS = [
 ]
 
 LAYOUT_CAPS = {
-    "grass_open": {"rows": 4, "modules": 6, "module_height": 112},
-    "agri_field_new": {"rows": 4, "modules": 6, "module_height": 112},
-    "desert_track": {"rows": 4, "modules": 6, "module_height": 108},
-    "rooftop_warehouse": {"rows": 4, "modules": 6, "module_height": 98},
-    "floating_water": {"rows": 4, "modules": 6, "module_height": 104},
+    "grass_open": {"rows": 6, "modules": 6, "module_height": 112},
+    "agri_field_new": {"rows": 6, "modules": 6, "module_height": 112},
+    "desert_track": {"rows": 6, "modules": 6, "module_height": 108},
+    "rooftop_warehouse": {"rows": 6, "modules": 6, "module_height": 98},
+    "floating_water": {"rows": 6, "modules": 6, "module_height": 104},
 }
 
 CAP_JUSTIFICATIONS = {
-    "grass_open": "Cap: 4 rows x 6 panels for open grass-field placement.",
-    "agri_field_new": "Cap: 4 rows x 6 panels to retain visible agricultural alleys.",
-    "desert_track": "Cap: 4 rows x 6 panels for the desert utility-site layout.",
-    "rooftop_warehouse": "Cap: 4 rows x 6 panels for the warehouse rooftop layout.",
-    "floating_water": "Cap: 4 rows x 6 panels for the floating-water platform layout.",
+    "grass_open": "Cap: 6 rows x 6 arrays, matching the offline Blender render dataset.",
+    "agri_field_new": "Cap: 6 rows x 6 arrays, matching the offline Blender render dataset.",
+    "desert_track": "Cap: 6 rows x 6 arrays, matching the offline Blender render dataset.",
+    "rooftop_warehouse": "Cap: 6 rows x 6 arrays, matching the offline Blender render dataset.",
+    "floating_water": "Cap: 6 rows x 6 arrays, matching the offline Blender render dataset.",
 }
 
 CUSTOM_LAYOUT_X_LIMITS = {
@@ -445,6 +445,72 @@ def custom_panels_per_row(location_id=None):
     return qp_int("panels_per_row", default_panels_per_row(location_id), 1, max_custom_panels_per_row(location_id))
 
 
+def solar_render_asset_path(location_id=None):
+    location_id = normalize_location_id(location_id)
+    if location_id not in LAYOUT_CAPS or not custom_layout_enabled():
+        return None
+    rows = custom_row_count(location_id)
+    arrays_per_row = custom_panels_per_row(location_id)
+    if not (1 <= rows <= 6 and 1 <= arrays_per_row <= 6):
+        return None
+    location_path = ASSET_DIR / "solar-renders" / location_id / f"{rows}x{arrays_per_row}.webp"
+    if location_path.exists():
+        return location_path
+    if location_id == "grass_open":
+        legacy_path = ASSET_DIR / "solar-renders" / f"{rows}x{arrays_per_row}.webp"
+        if legacy_path.exists():
+            return legacy_path
+    return None
+
+
+def solar_render_metadata_path(location_id=None):
+    location_id = normalize_location_id(location_id)
+    if location_id not in LAYOUT_CAPS or not custom_layout_enabled():
+        return None
+    rows = custom_row_count(location_id)
+    arrays_per_row = custom_panels_per_row(location_id)
+    if not (1 <= rows <= 6 and 1 <= arrays_per_row <= 6):
+        return None
+    location_path = ROOT / "renders" / "master" / location_id / f"{rows}x{arrays_per_row}.json"
+    if location_path.exists():
+        return location_path
+    if location_id == "grass_open":
+        legacy_path = ROOT / "renders" / "master" / f"{rows}x{arrays_per_row}.json"
+        if legacy_path.exists():
+            return legacy_path
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def _read_solar_render_metadata(path_text, modified_ns):
+    try:
+        path = Path(path_text)
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def load_solar_render_metadata(location_id=None):
+    path = solar_render_metadata_path(location_id)
+    if not path:
+        return None
+    try:
+        modified_ns = path.stat().st_mtime_ns
+    except OSError:
+        return None
+    return _read_solar_render_metadata(str(path), modified_ns)
+
+
+def solar_render_image(location_id=None, size=None):
+    path = solar_render_asset_path(location_id)
+    if not path:
+        return None
+    image = Image.open(path).convert("RGB")
+    if size:
+        image = ImageOps.contain(image, size, method=Image.Resampling.LANCZOS)
+    return image
+
+
 def preferred_custom_module_height(location_id=None):
     return LAYOUT_CAPS.get(location_id, {}).get("module_height", 28)
 
@@ -517,7 +583,7 @@ def module_layouts_for_row(row, module_count):
 
 
 def panel_module_layouts_for_row(row, panel_count):
-    """Return module boxes arranged as 2x2 module groups inside each solar panel."""
+    """Return module boxes arranged as 2x2 module groups inside each solar array."""
     width = max(1, row["x2"] - row["x1"])
     height = max(1, row["y2"] - row["y1"])
     panel_count = max(1, int(panel_count))
@@ -746,7 +812,7 @@ def cells_for_row(location_id, row_id):
                     cell_id = f"{row['id']}-C{pv_cell_number:03d}"
                     label = (
                         f"{row['label']} PV cell {pv_cell_number} "
-                        f"(panel {panel_number}, module {module_number_in_panel}, cell {module_cell_number})"
+                        f"(array {panel_number}, module {module_number_in_panel}, cell {module_cell_number})"
                     )
                     x1 = int(ix1 + (module_cell_col - 1) * module_w / module_cell_cols)
                     x2 = int(ix1 + module_cell_col * module_w / module_cell_cols)
@@ -815,7 +881,7 @@ def cells_for_row(location_id, row_id):
                 module_cell_row = None
                 module_cell_number = None
                 cell_id = f"{row['id']}-P{pv_cell_number:03d}"
-                label = f"{row['label']} panel {pv_cell_number}"
+                label = f"{row['label']} array cell {pv_cell_number}"
                 x1 = int(row["x1"] + cx * width / cols + gap_x)
                 x2 = int(row["x1"] + (cx + 1) * width / cols - gap_x)
             y1 = int(row["y1"] + cy * height / rows + gap_y)
@@ -862,8 +928,16 @@ def cell_by_id(location_id, row_id, cell_id):
 def target_counts(location_id):
     location_rows = panels(location_id)
     per_row_cells = [len(cells_for_row(location_id, row["id"])) for row in location_rows]
+    arrays_per_row = custom_panels_per_row(location_id) if custom_layout_enabled() else default_panels_per_row(location_id)
+    total_arrays = len(location_rows) * arrays_per_row
+    total_modules = total_arrays * SOLAR_PANEL_MODULES
+    cells_per_module = CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS
     return {
         "rows": len(location_rows),
+        "arrays_per_row": arrays_per_row,
+        "arrays": total_arrays,
+        "modules": total_modules,
+        "cells_per_module": cells_per_module,
         "panel_cells": sum(per_row_cells),
         "pv_cells": sum(per_row_cells),
     }

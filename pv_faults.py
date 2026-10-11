@@ -32,7 +32,7 @@ SOLAR_PANEL_MODULE_COLS = 2
 SOLAR_PANEL_MODULE_ROWS = 2
 SOLAR_PANEL_MODULES = SOLAR_PANEL_MODULE_COLS * SOLAR_PANEL_MODULE_ROWS
 PV_MODULE_MODEL_NAME = "PV module"
-PV_PANEL_MODEL_NAME = "PV panel"
+PV_PANEL_MODEL_NAME = "PV array"
 PV_MODULE_WIDTH_MM = 676
 PV_MODULE_HEIGHT_MM = 780
 CUSTOM_MODULE_ASPECT_RATIO = 1.62
@@ -40,7 +40,8 @@ CUSTOM_MODULE_GAP_RATIO = 0.055
 DEFAULT_FAULT_SCALE = 8
 
 FAULT_TYPES = {
-    "PartialShading": "Root-cause fault: surface obstruction or partial shading that produces a local thermal hotspot symptom",
+    "PartialShading": "Far-view observation: partial shading / uneven irradiance thermal condition",
+    "SurfaceObstruction": "Root-cause fault: physical surface obstruction on active PV area",
     "SoilingDust": "Root-cause fault: dust or soiling deposited on the panel surface",
     "CellCracking": "Root-cause fault: cracked/damaged cell path that can create localized heating",
     "SingleHotSpot": "Internal symptom label: one localized thermal hotspot pattern",
@@ -57,7 +58,8 @@ FAULT_TYPES = {
 }
 
 FAULT_DISPLAY_NAMES = {
-    "PartialShading": "Surface Obstruction / Partial Shading",
+    "PartialShading": "Partial Shading Observation",
+    "SurfaceObstruction": "Surface Obstruction",
     "SoilingDust": "Dust / Soiling",
     "CellCracking": "Cell Cracking",
     "SingleHotSpot": "Thermal Hotspot Symptom",
@@ -77,13 +79,13 @@ HOTSPOT_FAULTS = {"SingleHotSpot", "MultiHotSpot"}
 HIDDEN_SYMPTOM_FAULTS = set()
 LOW_CONFIDENCE_LEGACY_FAULTS = {"DB", "DL", "TB"}
 HIDDEN_MULTICELL_FAULTS = {"MultiDiode", "MultiByPassed"}
-HIDDEN_TOOL_FAULTS = HOTSPOT_FAULTS | LOW_CONFIDENCE_LEGACY_FAULTS | HIDDEN_MULTICELL_FAULTS
-FAR_SCOUT_FAULT_TYPES = ["SingleHotSpot", "MultiHotSpot", "PartialShading", "StringOpenCircuit"]
+HIDDEN_TOOL_FAULTS = HOTSPOT_FAULTS
+FAR_SCOUT_FAULT_TYPES = ["SingleHotSpot", "MultiHotSpot", "PartialShading"]
 CLOSE_DIAGNOSTIC_FAULT_TYPES = [
     fault_type for fault_type in FAULT_TYPES
-    if fault_type not in HOTSPOT_FAULTS | LOW_CONFIDENCE_LEGACY_FAULTS | HIDDEN_MULTICELL_FAULTS
+    if fault_type not in HOTSPOT_FAULTS | {"PartialShading"}
 ]
-SURFACE_OBSTRUCTION_FAULTS = {"PartialShading"}
+SURFACE_OBSTRUCTION_FAULTS = {"SurfaceObstruction"}
 SURFACE_OBSTRUCTION_LOCATIONS = {"scenario_1", "agri_rows", "grass_open", "agri_field_new"}
 SOILING_FAULTS = {"SoilingDust"}
 CRACKING_FAULTS = {"CellCracking"}
@@ -120,13 +122,14 @@ PATCH_FALLBACKS = {
     "SingleByPassed": ["SingleDiode"],
     "MultiByPassed": ["SingleDiode"],
     "StringReversedPolarity": ["StringOpenCircuit"],
-    "SoilingDust": ["PartialShading"],
+    "SoilingDust": ["SurfaceObstruction", "PartialShading"],
+    "SurfaceObstruction": ["PartialShading"],
 }
 
 FAULT_ALIASES = {
     "Hotspot": "SingleHotSpot",
     "Partial shading": "PartialShading",
-    "Surface obstruction": "PartialShading",
+    "Surface obstruction": "SurfaceObstruction",
     "Soiling / dust": "SoilingDust",
     "Dust": "SoilingDust",
     "Dust shading": "SoilingDust",

@@ -106,11 +106,14 @@ def fault_records_csv(records):
 
 def fault_table_rows(records):
     rows = []
+    far_observation_types = set(globals().get("FAR_SCOUT_FAULT_TYPES", [])) | set(HOTSPOT_FAULTS)
     for idx, record in enumerate(records, start=1):
         affected_cell_ids = record.get("affected_cell_ids") or [record["target_cell_id"]]
+        fault_kind = "Thermal Observation" if record.get("fault_type") in far_observation_types else "Diagnostic Fault"
         rows.append(
             {
                 "#": idx,
+                "kind": fault_kind,
                 "location": record["location_name"],
                 "view": record["view"],
                 "row": record["row_label"],
@@ -135,14 +138,20 @@ def fault_table_rows(records):
 
 def fault_type_counts(records):
     counts = {}
+    far_observation_types = set(globals().get("FAR_SCOUT_FAULT_TYPES", [])) | set(HOTSPOT_FAULTS)
     for record in records:
+        kind = "Thermal Observation" if record.get("fault_type") in far_observation_types else "Diagnostic Fault"
         fault_type = record["fault_type"]
-        counts[fault_type] = counts.get(fault_type, 0) + 1
+        key = (kind, fault_type)
+        counts[key] = counts.get(key, 0) + 1
     return counts
 
 
 def fault_summary_rows(records):
-    return [{"fault_type": fault_display_name(key), "count": value} for key, value in fault_type_counts(records).items()]
+    return [
+        {"kind": kind, "fault_type": fault_display_name(fault_type), "count": value}
+        for (kind, fault_type), value in fault_type_counts(records).items()
+    ]
 
 
 def image_png_bytes(image):
@@ -164,17 +173,25 @@ def cropped_row_image(image, location_id, selected_row_id, selected_cell_id):
 def scene_metadata(location, view, selected_row, selected_cell, records):
     panels_per_row = custom_panels_per_row(location["id"]) if custom_layout_enabled() else default_panels_per_row(location["id"])
     modules_per_row = panels_per_row * SOLAR_PANEL_MODULES if custom_layout_enabled() else panels_per_row
+    row_count = len(panels(location["id"]))
+    total_arrays = row_count * panels_per_row if custom_layout_enabled() else panels_per_row
+    total_modules = total_arrays * SOLAR_PANEL_MODULES if custom_layout_enabled() else modules_per_row
+    cells_per_module = CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS if custom_layout_enabled() else None
     return {
         "location_id": location["id"],
         "location_name": location["name"],
         "view": view.upper(),
         "custom_layout": custom_layout_enabled(),
-        "row_count": len(panels(location["id"])),
+        "row_count": row_count,
         "panels_per_row": panels_per_row,
+        "arrays_per_row": panels_per_row,
+        "total_arrays": total_arrays,
+        "total_modules": total_modules,
         "modules_per_panel": SOLAR_PANEL_MODULES if custom_layout_enabled() else None,
         "modules_per_row": modules_per_row,
-        "cells_per_module": CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS if custom_layout_enabled() else None,
+        "cells_per_module": cells_per_module,
         "cells_per_panel": CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS * SOLAR_PANEL_MODULES if custom_layout_enabled() else None,
+        "total_cells": total_modules * cells_per_module if cells_per_module else None,
         "selected_row": selected_row["id"],
         "selected_cell": selected_cell["id"],
         "fault_count": len(records),
