@@ -1593,7 +1593,44 @@ def module_field_static_canvas_size(location_id, view):
     return (1280, 720)
 
 
-def solar_render_panel_mask(rendered):
+@st.cache_data(show_spinner=False)
+def load_solar_render_geometry_index(path_text, modified_ns):
+    try:
+        return json.loads(Path(path_text).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def solar_render_geometry_items(location_id):
+    path = ASSET_DIR / "solar-render-geometry.json"
+    if not path.exists():
+        return []
+    try:
+        index = load_solar_render_geometry_index(str(path), path.stat().st_mtime_ns)
+    except OSError:
+        return []
+    layout_key = f"{custom_row_count(location_id)}x{custom_panels_per_row(location_id)}"
+    return (((index or {}).get("scenes") or {}).get(location_id) or {}).get(layout_key, [])
+
+
+def solar_render_panel_mask(rendered, location_id=None):
+    geometry_items = solar_render_geometry_items(location_id) if location_id else []
+    if geometry_items:
+        width, height = rendered.size
+        mask = np.zeros((height, width), dtype=np.uint8)
+        for item in geometry_items:
+            polygon = np.asarray(
+                [
+                    [round(float(point[0]) * width), round(float(point[1]) * height)]
+                    for point in item.get("polygon", [])
+                ],
+                dtype=np.int32,
+            )
+            if polygon.shape == (4, 2):
+                cv2.fillPoly(mask, [polygon], 255, lineType=cv2.LINE_AA)
+        return cv2.GaussianBlur(mask, (0, 0), 0.75)
+
+    # Compatibility fallback for older asset bundles without geometry metadata.
     rgb = np.asarray(rendered.convert("RGB")).astype(np.float32)
     r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
     gray = rgb.mean(axis=2)
@@ -1986,6 +2023,7 @@ def rendered_fault_cell_from_record(location_id, record, selected_row_id, select
         "x2": cx2,
         "y2": cy2,
         "source_polygon": cell_geometry["polygon"],
+        "active_module_polygon": cell_geometry["active_polygon"],
         "safe_fault_polygon": cell_geometry["safe_fault_polygon"],
         "fault_origin_px": {
             "x": float(cell_geometry["safe_centroid"][0]),
@@ -2073,7 +2111,7 @@ def solar_render_thermal_base_field(location_id, rendered):
     temp *= scene_env
     temp = np.clip(temp, terrain_low - 10, terrain_high + 16)
 
-    panel_mask = solar_render_panel_mask(rendered).astype(np.float32) / 255.0
+    panel_mask = solar_render_panel_mask(rendered, location_id).astype(np.float32) / 255.0
     panel_mask = np.clip(panel_mask * 1.18, 0.0, 0.98)
     metadata = load_solar_render_metadata(location_id)
     array_geometries = solar_render_metadata_array_geometries((panel_mask * 255).astype(np.uint8), metadata)
@@ -2288,7 +2326,7 @@ def close_fault_visibility_cell(cell, fault_type):
     """Expand only the close-view display footprint while keeping the stored target cell unchanged."""
     fault_type = canonical_fault_type(fault_type)
     item = dict(cell)
-    module_box = item.get("module_bbox_px") or item.get("fault_bbox_px") or {}
+    module_box = item.get("active_module_bbox_px") or item.get("module_bbox_px") or item.get("fault_bbox_px") or {}
     mx1 = int(module_box.get("x1", item["x1"]))
     my1 = int(module_box.get("y1", item["y1"]))
     mx2 = int(module_box.get("x2", item["x2"]))
@@ -2297,7 +2335,10 @@ def close_fault_visibility_cell(cell, fault_type):
     cell_w, cell_h = max(2, cx2 - cx1), max(2, cy2 - cy1)
 
     if fault_type in SOILING_FAULTS:
-        pad_x, pad_y = 2.3 * cell_w, 2.4 * cell_h
+        bounds = {"x1": mx1, "y1": my1, "x2": mx2, "y2": my2}
+        item.update(bounds)
+        item["fault_bbox_px"] = dict(bounds)
+        return item
     elif fault_type in SURFACE_OBSTRUCTION_FAULTS:
         pad_x, pad_y = 1.35 * cell_w, 1.65 * cell_h
     elif fault_type in CRACKING_FAULTS:
@@ -2327,16 +2368,21 @@ def finalize_solar_render_thermal_image(location_id, base_temp, array_geometries
                 continue
             fault_type = canonical_fault_type(record["fault_type"])
             fault_scale = record.get("fault_scale", DEFAULT_FAULT_SCALE)
-            temp = apply_thermal_fault(
-                temp,
-                cell,
-                fault_type,
-                fault_scale,
-            )
-            if str(scene_distance).lower() == "close" and fault_type in (
+            close_surface_fault = str(scene_distance).lower() == "close" and fault_type in (
                 SURFACE_OBSTRUCTION_FAULTS | SOILING_FAULTS | CRACKING_FAULTS
-            ):
+            )
+            if close_surface_fault:
+                # These surface faults use clean vector/field masks after palette
+                # mapping. Reapplying the small reference patch here introduced
+                # grid and label artifacts from the source-bank thumbnails.
                 close_visibility_tints.append((close_fault_visibility_cell(cell, fault_type), fault_type, fault_scale))
+            else:
+                temp = apply_thermal_fault(
+                    temp,
+                    cell,
+                    fault_type,
+                    fault_scale,
+                )
 
     temp = apply_sensor_model(temp, location_id, scene_distance)
     thermal_image = thermal_display_rgb_from_scalar(temp, location_id, scene_distance)
@@ -2364,7 +2410,7 @@ def draw_solar_render_overlays(image, location_id, selected_row_id, selected_cel
         return image
     output = image.convert("RGBA")
     draw = ImageDraw.Draw(output, "RGBA")
-    mask = solar_render_panel_mask(image)
+    mask = solar_render_panel_mask(image, location_id)
     metadata = load_solar_render_metadata(location_id)
     geometries = solar_render_metadata_array_geometries(mask, metadata)
     if not geometries:
@@ -3379,7 +3425,7 @@ def cached_array_regions(location_id, render_size, render_signature):
 
 def array_regions_from_image(location_id, rgb_scene):
     metadata = load_solar_render_metadata(location_id)
-    mask = solar_render_panel_mask(rgb_scene)
+    mask = solar_render_panel_mask(rgb_scene, location_id)
     geometries = solar_render_metadata_array_geometries(mask, metadata)
     transforms = ((metadata or {}).get("topology") or {}).get("array_transforms") or []
     transforms = sorted(transforms, key=lambda item: (int(item.get("row", 0)), int(item.get("col", 0))))
@@ -3643,7 +3689,7 @@ def render_interactive_scene_canvas(
             border-top:1px solid rgba(125,211,252,.28);
             padding:6px 10px;
           }}
-          .pv-canvas a:hover polygon {{ stroke:#7dd3fc; stroke-opacity:1; filter: drop-shadow(0 0 10px rgba(56,189,248,.85)); }}
+          .pv-canvas a:hover polygon {{ stroke-opacity:0; fill-opacity:.001; filter:none; }}
         </style>
         """,
         height=(230 if compact else min(980, max(660, int(height * 0.52)))),
@@ -3824,10 +3870,10 @@ def render_array_module_selector(
                 cell_stroke_width = ".65"
             elif selected:
                 fill = "#38bdf8"
-                fill_opacity = ".045"
+                fill_opacity = ".001"
                 cell_stroke = "#38bdf8"
-                cell_stroke_opacity = ".72"
-                cell_stroke_width = "1.1"
+                cell_stroke_opacity = "0"
+                cell_stroke_width = ".65"
             else:
                 fill = "#38bdf8"
                 fill_opacity = ".001"
@@ -3857,11 +3903,9 @@ def render_array_module_selector(
           .pv-array-crop {{ width:100%; overflow:hidden; border:1px solid #20324a; border-radius:14px; background:#020617; }}
           .pv-array-crop svg {{ width:{width}px; max-width:100%; height:auto; display:block; margin:auto; }}
           .pv-array-crop .pv-cell-hit:hover polygon {{
-            stroke:#7dd3fc;
-            stroke-opacity:.82;
-            stroke-width:1.15;
-            fill-opacity:.055;
-            filter: drop-shadow(0 0 3px rgba(56,189,248,.32));
+            stroke-opacity:0;
+            fill-opacity:.001;
+            filter:none;
           }}
         </style>
         """,
@@ -3923,6 +3967,26 @@ def main():
 
     ui_css()
     app_state_defaults()
+
+    base_source = qp_get("base_source", "generated")
+    if base_source not in {"generated", "real_farm"}:
+        base_source = "generated"
+    with st.sidebar:
+        st.markdown("### Base Source")
+        source_choice = st.radio(
+            "Source mode",
+            ["Generated PV Farm", "Real PV Farm Image"],
+            index=1 if base_source == "real_farm" else 0,
+            label_visibility="collapsed",
+        )
+        chosen_source = "real_farm" if source_choice == "Real PV Farm Image" else "generated"
+        if chosen_source != base_source:
+            qp_set(base_source=chosen_source)
+            st.rerun()
+
+    if base_source == "real_farm":
+        real_farm_main()
+        return
 
     location = selected_location()
     view = qp_get("view", "thermal")
@@ -4105,7 +4169,9 @@ def main():
             if record.get("location_id") == location["id"]
             and record.get("fault_type") in far_observation_types
         ]
-        target_record = (diagnostic_records or observation_records or [None])[0]
+        # Close View is the observation-to-diagnosis workflow. Start on the
+        # first generated hotspot and keep existing diagnoses available after it.
+        target_record = (observation_records or diagnostic_records or [None])[0]
         if target_record:
             row_id = target_record["row_id"]
             cell = cell_by_id(location["id"], row_id, target_record["target_cell_id"])
@@ -4115,10 +4181,6 @@ def main():
             region = get_selected_region()
             row_id, cell = default_cell_for_array(location["id"], region["row"], region["col"], 1, 1)
             array_key = region["key"]
-
-        if st.session_state.get("random_fault_records"):
-            push_fault_history()
-            st.session_state["random_fault_records"] = []
 
         qp_set(**navigation_params(
             location["id"],
@@ -4335,13 +4397,32 @@ def main():
                     st.caption("Select a suspicious cell from the real array crop.")
                 if cell_active:
                     st.write(f"**Cell:** `{selected_cell_id}`")
-                    selected_faults = [record for record in records if record.get("target_cell_id") == selected_cell_id]
+                    selected_faults = [
+                        record for record in records
+                        if record.get("row_id") == selected_row_id
+                        and record.get("target_cell_id") == selected_cell_id
+                    ]
                     far_observations = [record for record in selected_faults if record.get("fault_type") in far_observation_types]
                     diagnostic_faults = [record for record in selected_faults if record.get("fault_type") not in far_observation_types]
                     if far_observations:
                         st.caption("Observed thermal phenomenon")
                         for record in far_observations:
                             st.markdown(f'<span class="pv-chip">{esc(fault_display_name(record["fault_type"]))}</span>', unsafe_allow_html=True)
+                        all_observations = [
+                            record for record in records
+                            if record.get("location_id") == location["id"]
+                            and record.get("fault_type") in far_observation_types
+                        ]
+                        observation_index = next(
+                            (
+                                index for index, record in enumerate(all_observations)
+                                if record.get("row_id") == selected_row_id
+                                and record.get("target_cell_id") == selected_cell_id
+                            ),
+                            -1,
+                        )
+                        if observation_index >= 0:
+                            st.caption(f"Hotspot {observation_index + 1} of {len(all_observations)}")
                     if diagnostic_faults:
                         st.caption("Assigned diagnostic fault(s)")
                         for record in diagnostic_faults:
@@ -4504,12 +4585,69 @@ def main():
                     st.markdown("</div>", unsafe_allow_html=True)
 
                 st.markdown('<div class="pv-card"><div class="pv-section-title">Fault Navigation</div>', unsafe_allow_html=True)
+                observation_records = [
+                    record for record in records
+                    if record.get("location_id") == location["id"]
+                    and record.get("fault_type") in far_observation_types
+                ]
+                observation_idx = next(
+                    (
+                        i for i, record in enumerate(observation_records)
+                        if record.get("row_id") == selected_row_id
+                        and record.get("target_cell_id") == selected_cell_id
+                    ),
+                    -1,
+                )
+                if inspection_state != "scene" and observation_records:
+                    current_observation_number = observation_idx + 1 if observation_idx >= 0 else 0
+                    st.caption(f"Generated hotspots: {len(observation_records)} | Current: {current_observation_number or 'none'}")
+                    hotspot_options = list(range(len(observation_records)))
+                    selected_hotspot_option = observation_idx if observation_idx >= 0 else 0
+                    hotspot_choice = st.selectbox(
+                        "Select Generated Hotspot",
+                        hotspot_options,
+                        index=selected_hotspot_option,
+                        format_func=lambda index: (
+                            f"Hotspot {index + 1} | "
+                            f"{observation_records[index].get('row_id')} | "
+                            f"Array {observation_records[index].get('panel_number_in_row')} | "
+                            f"M{observation_records[index].get('module_number_in_panel')} | "
+                            f"Cell {observation_records[index].get('module_cell_number')}"
+                        ),
+                        # Scope widget state to the active target. Otherwise a
+                        # Next/Previous navigation rerun replays the old selectbox
+                        # value and immediately jumps back to the previous fault.
+                        key=(
+                            f"hotspot_target_{location['id']}_{len(observation_records)}_"
+                            f"{selected_row_id}_{selected_cell_id}"
+                        ),
+                    )
+                    if hotspot_choice != observation_idx:
+                        jump_to_fault(observation_records[hotspot_choice])
+                        st.rerun()
+                    hotspot_prev_col, hotspot_next_col = st.columns(2)
+                    with hotspot_prev_col:
+                        if st.button("Previous Hotspot", use_container_width=True):
+                            previous_index = observation_idx - 1 if observation_idx >= 0 else -1
+                            jump_to_fault(observation_records[previous_index % len(observation_records)])
+                            st.rerun()
+                    with hotspot_next_col:
+                        if st.button("Next Hotspot", use_container_width=True):
+                            next_index = observation_idx + 1 if observation_idx >= 0 else 0
+                            jump_to_fault(observation_records[next_index % len(observation_records)])
+                            st.rerun()
                 faulty_records = [
                     record for record in records
                     if record.get("location_id") == location["id"]
-                    and record.get("fault_type") not in far_observation_types
                 ]
-                idx = next((i for i, record in enumerate(faulty_records) if record.get("target_cell_id") == selected_cell_id), -1)
+                idx = next(
+                    (
+                        i for i, record in enumerate(faulty_records)
+                        if record.get("row_id") == selected_row_id
+                        and record.get("target_cell_id") == selected_cell_id
+                    ),
+                    -1,
+                )
                 array_idx = next((i for i, region in enumerate(regions) if region["key"] == current_array_key), -1)
                 array_prev_col, array_next_col = st.columns(2)
                 with array_prev_col:

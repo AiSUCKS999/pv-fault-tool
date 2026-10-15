@@ -1,8 +1,10 @@
 import contextlib
 import io
+import json
 import logging
 import random
 import runpy
+import zipfile
 
 import numpy as np
 
@@ -79,6 +81,7 @@ def assert_scene(namespace, location_id, rows, arrays):
 
     if location_id == "grass_open" and rows == 3 and arrays == 3:
         assert_close_fault_visibility(namespace, location_id, location, regions[0])
+        assert_observation_diagnosis_workflow(namespace, location_id, location, rgb)
 
     if rows == 6 and arrays == 6:
         assert_random_fault_origins(namespace, location_id, location, regions)
@@ -137,6 +140,55 @@ def assert_close_fault_visibility(namespace, location_id, location, region):
             f"{fault_type} is not visible in the final close-view crop: "
             f"changed_pixels={changed_pixels}, p99.9_delta={p999_delta:.2f}"
         )
+        changed_rgb = np.asarray(faulted_crop, dtype=np.float32)[diff > 18.0]
+        assert float(changed_rgb[:, 0].mean()) > float(changed_rgb[:, 2].mean()) + 35.0, (
+            f"{fault_type} close-view mask is not orange: "
+            f"mean_red={changed_rgb[:, 0].mean():.2f}, mean_blue={changed_rgb[:, 2].mean():.2f}"
+        )
+
+
+def assert_observation_diagnosis_workflow(namespace, location_id, location, scene_image):
+    st = namespace["st"]
+    targets = namespace["fault_target_cells"](location_id)[:7]
+    assert len(targets) == 7, "Expected seven available hotspot targets"
+    observations = [
+        namespace["fault_record"](location, "thermal", row, cell, "SingleHotSpot", 8)
+        for row, cell in targets
+    ]
+    st.session_state["random_fault_records"] = observations
+    st.session_state["panel_cell_fault_records"] = []
+    initial = namespace["records_for_location"](location_id, "thermal")
+    assert len(initial) == 7, f"Expected seven generated hotspots, got {len(initial)}"
+
+    diagnoses = [
+        namespace["fault_record"](location, "thermal", targets[0][0], targets[0][1], "CellCracking", 8),
+        namespace["fault_record"](location, "thermal", targets[1][0], targets[1][1], "SurfaceObstruction", 8),
+    ]
+    assert diagnoses[0]["target_cell_id"] != diagnoses[1]["target_cell_id"]
+    assert diagnoses[0]["module_number_in_panel"] == diagnoses[1]["module_number_in_panel"]
+    st.session_state["panel_cell_fault_records"] = diagnoses
+    combined = namespace["records_for_location"](location_id, "thermal")
+    observation_types = set(namespace.get("FAR_SCOUT_FAULT_TYPES") or []) | set(namespace["HOTSPOT_FAULTS"])
+    assert sum(record["fault_type"] in observation_types for record in combined) == 7
+    assert len(combined) == 9, "Diagnosing two hotspots in one module must preserve all observations"
+    assert len(namespace["fault_table_rows"](combined)) == 9, "Review table omitted an observation or diagnosis"
+    package_bytes = namespace["export_package_bytes"](
+        location,
+        "thermal",
+        targets[0][0],
+        targets[0][1],
+        combined,
+        scene_image,
+        scene_image,
+    )
+    with zipfile.ZipFile(io.BytesIO(package_bytes)) as package:
+        metadata = json.loads(package.read("metadata.json"))
+        exported_faults = json.loads(package.read("faults.json"))
+        assert len(exported_faults) == 9
+        assert isinstance(metadata["fault_type_counts"], dict)
+        assert all(isinstance(key, str) for key in metadata["fault_type_counts"])
+    st.session_state["random_fault_records"] = []
+    st.session_state["panel_cell_fault_records"] = []
 
 
 def assert_random_fault_origins(namespace, location_id, location, regions):

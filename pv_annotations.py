@@ -200,6 +200,28 @@ def scene_metadata(location, view, selected_row, selected_cell, records):
     }
 
 
+def json_safe_export_value(value):
+    """Convert nested export data to structures accepted by json.dumps."""
+    if isinstance(value, dict):
+        safe = {}
+        for key, item in value.items():
+            if isinstance(key, tuple):
+                safe_key = " | ".join(str(part) for part in key)
+            elif isinstance(key, (str, int, float, bool)) or key is None:
+                safe_key = key
+            else:
+                safe_key = str(key)
+            safe[safe_key] = json_safe_export_value(item)
+        return safe
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe_export_value(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
 def export_package_bytes(location, view, selected_row, selected_cell, records, terrain, pv_scene):
     metadata = scene_metadata(location, view, selected_row, selected_cell, records)
     cropped = cropped_row_image(pv_scene, location["id"], selected_row["id"], selected_cell["id"])
@@ -208,9 +230,9 @@ def export_package_bytes(location, view, selected_row, selected_cell, records, t
         package.writestr("terrain.png", image_png_bytes(terrain))
         package.writestr("pv_scene.png", image_png_bytes(pv_scene))
         package.writestr("cropped_row.png", image_png_bytes(cropped))
-        package.writestr("faults.json", json.dumps(records, indent=2))
+        package.writestr("faults.json", json.dumps(json_safe_export_value(records), indent=2))
         package.writestr("faults.csv", fault_records_csv(records))
-        package.writestr("metadata.json", json.dumps(metadata, indent=2))
+        package.writestr("metadata.json", json.dumps(json_safe_export_value(metadata), indent=2))
     return buffer.getvalue()
 
 

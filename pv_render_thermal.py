@@ -991,6 +991,24 @@ def surface_obstruction_shape(width, height, seed):
     return np.clip(mask, 0, 0.95)
 
 
+def polygon_roi_clip(cell, polygon_key, bounds):
+    """Return a local antialiased mask that keeps a fault on its real panel polygon."""
+    x1, y1, x2, y2 = bounds
+    local_w, local_h = max(0, x2 - x1), max(0, y2 - y1)
+    if local_w <= 0 or local_h <= 0:
+        return np.zeros((local_h, local_w), dtype=np.float32)
+    polygon = cell.get(polygon_key) if isinstance(cell, dict) else None
+    if not polygon or len(polygon) < 3:
+        return np.ones((local_h, local_w), dtype=np.float32)
+    points = np.asarray(
+        [[round(float(px) - x1), round(float(py) - y1)] for px, py in polygon],
+        dtype=np.int32,
+    )
+    clip = np.zeros((local_h, local_w), dtype=np.float32)
+    cv2.fillPoly(clip, [points], 1.0, lineType=cv2.LINE_AA)
+    return np.clip(cv2.GaussianBlur(clip, (0, 0), 0.45), 0, 1)
+
+
 def apply_surface_obstruction_rgb_tint(output, cell, scale):
     height, width = output.shape[:2]
     x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, "SurfaceObstruction")
@@ -1010,13 +1028,14 @@ def apply_surface_obstruction_rgb_tint(output, cell, scale):
     # Keep the obstruction coherent across the close-view panel surface. Strong
     # seam preservation made the mask look like a tiny regular cell grid.
     preserve = panel_segmentation_preserve_mask(output.shape, cell)[y1:y2, x1:x2]
-    visible_shadow = np.clip(shadow * (1.0 - preserve * 0.12), 0, 1)
-    visible_hot = np.clip(hot * (1.0 - preserve * 0.10), 0, 1)
+    panel_clip = polygon_roi_clip(cell, "active_module_polygon", (x1, y1, x2, y2))
+    visible_shadow = np.clip(shadow * panel_clip * (1.0 - preserve * 0.12), 0, 1)
+    visible_hot = np.clip(hot * panel_clip * (1.0 - preserve * 0.10), 0, 1)
 
     region = output[y1:y2, x1:x2]
-    cool_color = np.array([62, 18, 122], dtype=np.float32)
-    warm_color = np.array([214, 88, 38], dtype=np.float32)
-    white_hot = np.array([230, 128, 62], dtype=np.float32)
+    cool_color = np.array([202, 70, 18], dtype=np.float32)
+    warm_color = np.array([238, 112, 24], dtype=np.float32)
+    white_hot = np.array([255, 174, 58], dtype=np.float32)
 
     cool_alpha = (visible_shadow * (0.42 + 0.16 * severity))[..., None]
     region = region * (1 - cool_alpha) + cool_color * cool_alpha
@@ -1039,32 +1058,33 @@ def apply_soiling_rgb_tint(output, cell, scale):
     local_w, local_h = x2 - x1, y2 - y1
     severity = clamp(scale, 1, 10) / 10
     seed = seed_for(cell["id"], scale, "close-soiling-rgb")
-    broad = smooth_unit_field(
-        (local_h, local_w),
-        seed,
-        max(1.0, min(local_w, local_h) * 0.24),
-        octaves=3,
-    )
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:local_h, 0:local_w].astype(np.float32)
+    cx = local_w * (0.50 + rng.uniform(-0.035, 0.035))
+    cy = local_h * (0.58 + rng.uniform(-0.035, 0.035))
+    rx = max(1.0, local_w * 0.72)
+    ry = max(1.0, local_h * 0.68)
+    dust = np.exp(-0.58 * (((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2)).astype(np.float32)
     fine = smooth_unit_field(
         (local_h, local_w),
         seed_for(seed, "fine"),
         max(0.8, min(local_w, local_h) * 0.055),
         octaves=2,
     )
-    dust = np.clip((broad - 0.30) / 0.54, 0, 1)
-    dust = np.clip(dust * (0.72 + fine * 0.42), 0, 1)
+    dust = np.clip(dust * (0.72 + fine * 0.16), 0, 1)
     dust *= np.linspace(0.62, 1.0, local_h, dtype=np.float32)[:, None]
     dust *= cell_edge_feather(local_w, local_h, strength=4.2)
     dust = cv2.GaussianBlur(dust.astype(np.float32), (0, 0), max(0.55, min(local_w, local_h) * 0.030))
+    dust *= polygon_roi_clip(cell, "active_module_polygon", (x1, y1, x2, y2))
 
     region = output[y1:y2, x1:x2]
-    cool_color = np.array([66, 22, 104], dtype=np.float32)
+    cool_color = np.array([196, 66, 16], dtype=np.float32)
     dust_alpha = (dust * (0.48 + 0.22 * severity))[..., None]
     region = region * (1 - dust_alpha) + cool_color * dust_alpha
 
     specks = np.clip((fine - 0.72) / 0.24, 0, 1) * dust
     speck_alpha = (specks * (0.12 + 0.10 * severity))[..., None]
-    region = region * (1 - speck_alpha) + np.array([42, 14, 72], dtype=np.float32) * speck_alpha
+    region = region * (1 - speck_alpha) + np.array([132, 38, 8], dtype=np.float32) * speck_alpha
     output[y1:y2, x1:x2] = region
     return output
 
@@ -1102,11 +1122,12 @@ def apply_cell_cracking_rgb_tint(output, cell, scale):
     hot = np.clip(edge * 0.32 + bloom * (0.82 + 0.18 * severity), 0, 1)
 
     preserve = panel_segmentation_preserve_mask(output.shape, cell)[y1:y2, x1:x2]
-    visible_crack = np.clip(crack * (1.0 - preserve * 0.50), 0, 1)
-    visible_hot = np.clip(hot * (1.0 - preserve * 0.38), 0, 1)
+    cell_clip = polygon_roi_clip(cell, "source_polygon", (x1, y1, x2, y2))
+    visible_crack = np.clip(crack * cell_clip * (1.0 - preserve * 0.50), 0, 1)
+    visible_hot = np.clip(hot * cell_clip * (1.0 - preserve * 0.38), 0, 1)
 
     region = output[y1:y2, x1:x2]
-    cool_color = np.array([72, 12, 112], dtype=np.float32)
+    cool_color = np.array([188, 52, 14], dtype=np.float32)
     warm_color = np.array([242, 126, 44], dtype=np.float32)
     white_hot = np.array([255, 218, 118], dtype=np.float32)
     cool_alpha = (np.clip(visible_crack - visible_hot * 0.20, 0, 1) * (0.24 + 0.12 * severity))[..., None]
@@ -1134,12 +1155,29 @@ def apply_cell_cracking_rgb_tint(output, cell, scale):
         max(1, int(round(min(local_w, local_h) * 0.045))),
         lineType=cv2.LINE_AA,
     )
+    branch = np.asarray(
+        [
+            path[4],
+            (clamp(int(local_w * 0.60), 0, local_w - 1), clamp(int(local_h * 0.40), 0, local_h - 1)),
+            (clamp(int(local_w * 0.69), 0, local_w - 1), clamp(int(local_h * 0.27), 0, local_h - 1)),
+        ],
+        dtype=np.int32,
+    )
+    cv2.polylines(
+        fracture,
+        [branch],
+        False,
+        0.82,
+        max(1, int(round(min(local_w, local_h) * 0.030))),
+        lineType=cv2.LINE_AA,
+    )
+    fracture *= cell_clip
     fracture_core = cv2.GaussianBlur(fracture, (0, 0), max(0.30, min(local_w, local_h) * 0.012))
     fracture_halo = cv2.GaussianBlur(fracture, (0, 0), max(0.65, min(local_w, local_h) * 0.085))
     halo_alpha = (fracture_halo * (0.54 + 0.18 * severity))[..., None]
     region = region * (1 - halo_alpha) + warm_color * halo_alpha
     line_alpha = (fracture_core * (0.82 + 0.14 * severity))[..., None]
-    region = region * (1 - line_alpha) + np.array([58, 8, 82], dtype=np.float32) * line_alpha
+    region = region * (1 - line_alpha) + np.array([126, 28, 6], dtype=np.float32) * line_alpha
     output[y1:y2, x1:x2] = region
     return output
 
