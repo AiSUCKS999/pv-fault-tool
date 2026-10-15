@@ -1,0 +1,256 @@
+{
+  "field_width": 6.269468152984765,
+  "field_depth": 7.114559610309971,
+  "ground_width": 19.969468152984764,
+  "ground_depth": 20.81455961030997,
+  "bounds": [
+    -3.31857054040154,
+    3.3108976125832252,
+    -3.774300471805234,
+    3.780259138504738,
+    -0.05,
+    0.8849126140046178
+  ],
+  "counts": {
+    "arrays": 2,
+    "modules": 8,
+    "cells": 320,
+    "cells_per_array": 160,
+    "modules_per_array": 4
+  },
+  "topology": {
+    "topology_mode": "realistic",
+    "topology_type": "STAGGERED_START",
+    "requested_rows": 2,
+    "nominal_arrays_per_row": 1,
+    "target_total_arrays": 2,
+    "row_capacity": 3,
+    "row_lengths": [
+      1,
+      1
+    ],
+    "occupied_slots": [
+      [
+        0
+      ],
+      [
+        0
+      ]
+    ],
+    "total_arrays": 2,
+    "seed": 8886,
+    "orientation_strategy": "installation",
+    "string_count": 1,
+    "electrical_strings": [
+      {
+        "string_id": 1,
+        "array_count": 2,
+        "module_count": 8,
+        "array_keys": [
+          [
+            1,
+            1
+          ],
+          [
+            2,
+            1
+          ]
+        ],
+        "start_row": 1,
+        "end_row": 2,
+        "start_x": -2.00649,
+        "start_y": 2.11032,
+        "end_x": 2.00649,
+        "end_y": -2.11032,
+        "temperature_bias_c": 0.0839
+      }
+    ],
+    "row_strings": [
+      {
+        "row_id": 1,
+        "count": 1,
+        "start_x": -2.00639,
+        "start_y": 2.07938,
+        "heading_deg": 0.18192,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [],
+        "gap_from_previous_row_m": null,
+        "row_length_m": 0.0,
+        "slot_indices": [
+          0
+        ],
+        "orientation": "portrait",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885
+      },
+      {
+        "row_id": 2,
+        "count": 1,
+        "start_x": 2.00648,
+        "start_y": -2.14087,
+        "heading_deg": -0.02046,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [],
+        "gap_from_previous_row_m": 1.33526,
+        "row_length_m": 0.0,
+        "slot_indices": [
+          0
+        ],
+        "orientation": "portrait",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885
+      }
+    ],
+    "array_transforms": [
+      {
+        "array_id": 1,
+        "row": 1,
+        "col": 1,
+        "slot": 1,
+        "x": -2.00649,
+        "y": 2.11032,
+        "yaw_deg": 0.3816,
+        "along_track_m": 0.0,
+        "cross_track_m": 0.03093,
+        "orientation": "portrait",
+        "string_id": 1,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 1,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 2,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 3,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 4,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 2,
+        "row": 2,
+        "col": 1,
+        "slot": 1,
+        "x": 2.00649,
+        "y": -2.11032,
+        "yaw_deg": 0.07588,
+        "along_track_m": 0.0,
+        "cross_track_m": 0.03056,
+        "orientation": "portrait",
+        "string_id": 1,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 5,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 6,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 7,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 8,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      }
+    ]
+  },
+  "composite": {
+    "background": "assets/bg_grass_open.png",
+    "safe_region": [
+      0.07,
+      0.08,
+      0.93,
+      0.92
+    ],
+    "background_is_immutable": true,
+    "location_id": "grass_open",
+    "safe_region_px": [
+      215,
+      164,
+      2857,
+      1884
+    ],
+    "safe_region_normalized": [
+      0.07,
+      0.08,
+      0.93,
+      0.92
+    ],
+    "source_visible_bbox_px": [
+      0,
+      0,
+      3072,
+      2048
+    ],
+    "source_measured_cluster_bbox_px": [
+      847,
+      119,
+      2332,
+      1783
+    ],
+    "source_crop_bbox_px": [
+      805,
+      77,
+      2374,
+      1825
+    ],
+    "final_scaled_cluster_bbox_px": [
+      903,
+      319,
+      2169,
+      1729
+    ],
+    "alpha_threshold": 64,
+    "raw_scale_to_safe_region": 0.9839816933638444,
+    "fit_factor": 0.82,
+    "applied_uniform_scale": 0.8068649885583524
+  }
+}

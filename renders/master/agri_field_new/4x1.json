@@ -1,0 +1,404 @@
+{
+  "field_width": 5.536296146481575,
+  "field_depth": 15.77658243281017,
+  "ground_width": 19.236296146481575,
+  "ground_depth": 29.47658243281017,
+  "bounds": [
+    -2.949321215817698,
+    2.946974930663878,
+    -8.108921062905337,
+    8.107661369904834,
+    -0.05,
+    0.8849126140046178
+  ],
+  "counts": {
+    "arrays": 4,
+    "modules": 16,
+    "cells": 640,
+    "cells_per_array": 160,
+    "modules_per_array": 4
+  },
+  "topology": {
+    "topology_mode": "realistic",
+    "topology_type": "VARIABLE_ROW_GAP",
+    "requested_rows": 4,
+    "nominal_arrays_per_row": 1,
+    "target_total_arrays": 4,
+    "row_capacity": 3,
+    "row_lengths": [
+      1,
+      1,
+      1,
+      1
+    ],
+    "occupied_slots": [
+      [
+        0
+      ],
+      [
+        0
+      ],
+      [
+        0
+      ],
+      [
+        0
+      ]
+    ],
+    "total_arrays": 4,
+    "seed": 16006,
+    "orientation_strategy": "installation",
+    "string_count": 1,
+    "electrical_strings": [
+      {
+        "string_id": 1,
+        "array_count": 4,
+        "module_count": 16,
+        "array_keys": [
+          [
+            1,
+            1
+          ],
+          [
+            2,
+            1
+          ],
+          [
+            3,
+            1
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "start_row": 1,
+        "end_row": 4,
+        "start_x": -1.56223,
+        "start_y": 6.44259,
+        "end_x": 1.63954,
+        "end_y": -6.44259,
+        "temperature_bias_c": 0.6636
+      }
+    ],
+    "row_strings": [
+      {
+        "row_id": 1,
+        "count": 1,
+        "start_x": -1.56223,
+        "start_y": 6.44409,
+        "heading_deg": 0.04603,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [],
+        "gap_from_previous_row_m": null,
+        "row_length_m": 0.0,
+        "slot_indices": [
+          0
+        ],
+        "orientation": "portrait",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885
+      },
+      {
+        "row_id": 2,
+        "count": 1,
+        "start_x": -1.63958,
+        "start_y": 1.98242,
+        "heading_deg": -0.26555,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [],
+        "gap_from_previous_row_m": 1.57667,
+        "row_length_m": 0.0,
+        "slot_indices": [
+          0
+        ],
+        "orientation": "portrait",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885
+      },
+      {
+        "row_id": 3,
+        "count": 1,
+        "start_x": 0.3778,
+        "start_y": -2.17558,
+        "heading_deg": -0.04709,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [],
+        "gap_from_previous_row_m": 1.273,
+        "row_length_m": 0.0,
+        "slot_indices": [
+          0
+        ],
+        "orientation": "portrait",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885
+      },
+      {
+        "row_id": 4,
+        "count": 1,
+        "start_x": 1.63952,
+        "start_y": -6.39162,
+        "heading_deg": 0.02834,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [],
+        "gap_from_previous_row_m": 1.33104,
+        "row_length_m": 0.0,
+        "slot_indices": [
+          0
+        ],
+        "orientation": "portrait",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885
+      }
+    ],
+    "array_transforms": [
+      {
+        "array_id": 1,
+        "row": 1,
+        "col": 1,
+        "slot": 1,
+        "x": -1.56223,
+        "y": 6.44259,
+        "yaw_deg": 0.13168,
+        "along_track_m": 0.0,
+        "cross_track_m": -0.0015,
+        "orientation": "portrait",
+        "string_id": 1,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 1,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 2,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 3,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 4,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 2,
+        "row": 2,
+        "col": 1,
+        "slot": 1,
+        "x": -1.63954,
+        "y": 1.99137,
+        "yaw_deg": -0.28972,
+        "along_track_m": 0.0,
+        "cross_track_m": 0.00896,
+        "orientation": "portrait",
+        "string_id": 1,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 5,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 6,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 7,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 8,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 3,
+        "row": 3,
+        "col": 1,
+        "slot": 1,
+        "x": 0.37779,
+        "y": -2.18664,
+        "yaw_deg": -0.11658,
+        "along_track_m": 0.0,
+        "cross_track_m": -0.01106,
+        "orientation": "portrait",
+        "string_id": 1,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 9,
+            "array_id": 3,
+            "row_id": 3,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 10,
+            "array_id": 3,
+            "row_id": 3,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 11,
+            "array_id": 3,
+            "row_id": 3,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 12,
+            "array_id": 3,
+            "row_id": 3,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 4,
+        "row": 4,
+        "col": 1,
+        "slot": 1,
+        "x": 1.63954,
+        "y": -6.44259,
+        "yaw_deg": 0.19622,
+        "along_track_m": 0.0,
+        "cross_track_m": -0.05096,
+        "orientation": "portrait",
+        "string_id": 1,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 13,
+            "array_id": 4,
+            "row_id": 4,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 14,
+            "array_id": 4,
+            "row_id": 4,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 15,
+            "array_id": 4,
+            "row_id": 4,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 16,
+            "array_id": 4,
+            "row_id": 4,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      }
+    ]
+  },
+  "composite": {
+    "background": "assets/bg_agri_field_new.png",
+    "safe_region": [
+      0.08,
+      0.1,
+      0.92,
+      0.88
+    ],
+    "background_is_immutable": true,
+    "location_id": "agri_field_new",
+    "safe_region_px": [
+      246,
+      205,
+      2826,
+      1802
+    ],
+    "safe_region_normalized": [
+      0.08,
+      0.1,
+      0.92,
+      0.88
+    ],
+    "source_visible_bbox_px": [
+      0,
+      0,
+      3072,
+      2048
+    ],
+    "source_measured_cluster_bbox_px": [
+      1243,
+      152,
+      1886,
+      1836
+    ],
+    "source_crop_bbox_px": [
+      1201,
+      110,
+      1928,
+      1878
+    ],
+    "final_scaled_cluster_bbox_px": [
+      1273,
+      364,
+      1798,
+      1636
+    ],
+    "alpha_threshold": 64,
+    "raw_scale_to_safe_region": 0.9032805429864253,
+    "fit_factor": 0.8,
+    "applied_uniform_scale": 0.7226244343891404
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "after_purity_metrics": {
+    "arbitrary_long_line_count": 0,
+    "axis_aligned_line_fraction": 0.0,
+    "grid_contamination_score": 0.0,
+    "horizontal_line_row_fraction": 0.0,
+    "vertical_line_col_fraction": 0.0
+  },
+  "contaminated_after_cleanup": false,
+  "contaminated_before_cleanup": true,
+  "duplicate_family_id": "66",
+  "mask_residual_agreement": {
+    "annotation_negligible_residual_fraction": 0.024194,
+    "largest_component_fraction": 0.830645,
+    "max_component_elongation": 1.6,
+    "residual_support_fraction": 0.01876,
+    "residual_support_iou": 0.895161,
+    "strong_residual_outside_annotation_fraction": 0.0,
+    "support_component_count": 2,
+    "support_fraction": 0.020957
+  },
+  "morphology_family": "SUBMODULE_REGION",
+  "production_quality_status": "PRODUCTION_APPROVED",
+  "quality_reasons": [
+    "passes strict production residual quality gates"
+  ],
+  "radiometric_status": "relative_thermal_anomaly_only",
+  "reference_id": "hotspot_00066",
+  "residual": "production_hotspot_bank\\production_approved\\submodule_region\\residuals\\hotspot_00066.png",
+  "residual_nonzero_fraction": 0.02045,
+  "residual_peak": 0.999988,
+  "source_dataset": "pv_anomalies_v14_clean",
+  "source_image": "210915_Hangchon_33m_211015_00065_JPG_jpg.rf.885f52c27aff5f252309d5f6e79a52a0.jpg",
+  "support_mask": "production_hotspot_bank\\production_approved\\submodule_region\\masks\\hotspot_00066.png",
+  "weak_residual": false
+}

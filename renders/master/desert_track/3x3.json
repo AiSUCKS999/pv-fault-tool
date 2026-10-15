@@ -1,0 +1,660 @@
+{
+  "field_width": 17.294784052638963,
+  "field_depth": 9.69716478215593,
+  "ground_width": 30.994784052638963,
+  "ground_depth": 23.39716478215593,
+  "bounds": [
+    -8.827458267609634,
+    8.827325785029329,
+    -5.067695261058471,
+    5.069469521097458,
+    -0.05,
+    0.8183808729429349
+  ],
+  "counts": {
+    "arrays": 9,
+    "modules": 36,
+    "cells": 1440,
+    "cells_per_array": 160,
+    "modules_per_array": 4
+  },
+  "topology": {
+    "topology_mode": "realistic",
+    "topology_type": "NEAR_REGULAR",
+    "requested_rows": 3,
+    "nominal_arrays_per_row": 3,
+    "target_total_arrays": 9,
+    "row_capacity": 5,
+    "row_lengths": [
+      3,
+      4,
+      2
+    ],
+    "occupied_slots": [
+      [
+        0,
+        1,
+        2
+      ],
+      [
+        0,
+        1,
+        2,
+        3
+      ],
+      [
+        0,
+        1
+      ]
+    ],
+    "total_arrays": 9,
+    "seed": 14099,
+    "orientation_strategy": "installation",
+    "string_count": 2,
+    "electrical_strings": [
+      {
+        "string_id": 1,
+        "array_count": 4,
+        "module_count": 16,
+        "array_keys": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            4
+          ]
+        ],
+        "start_row": 1,
+        "end_row": 2,
+        "start_x": -5.88667,
+        "start_y": 3.72292,
+        "end_x": 7.20408,
+        "end_y": 0.01513,
+        "temperature_bias_c": -0.2912
+      },
+      {
+        "string_id": 2,
+        "array_count": 5,
+        "module_count": 20,
+        "array_keys": [
+          [
+            2,
+            3
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            2,
+            1
+          ],
+          [
+            3,
+            1
+          ],
+          [
+            3,
+            2
+          ]
+        ],
+        "start_row": 2,
+        "end_row": 3,
+        "start_x": 2.53617,
+        "start_y": 0.02722,
+        "end_x": -2.59605,
+        "end_y": -3.72292,
+        "temperature_bias_c": -1.3369
+      }
+    ],
+    "row_strings": [
+      {
+        "row_id": 1,
+        "count": 3,
+        "start_x": -5.88666,
+        "start_y": 3.727,
+        "heading_deg": -0.08066,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [
+          1.72571,
+          1.75211
+        ],
+        "gap_from_previous_row_m": null,
+        "row_length_m": 9.24782,
+        "slot_indices": [
+          0,
+          1,
+          2
+        ],
+        "orientation": "landscape",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245
+      },
+      {
+        "row_id": 2,
+        "count": 4,
+        "start_x": -6.7346,
+        "start_y": 0.01865,
+        "heading_deg": -0.00817,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [
+          1.76724,
+          1.75976,
+          1.73471
+        ],
+        "gap_from_previous_row_m": 1.46335,
+        "row_length_m": 13.91671,
+        "slot_indices": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "orientation": "landscape",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1,
+          2
+        ],
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245
+      },
+      {
+        "row_id": 3,
+        "count": 2,
+        "start_x": -7.20408,
+        "start_y": -3.70451,
+        "heading_deg": -0.00297,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [
+          1.74375
+        ],
+        "gap_from_previous_row_m": 1.47816,
+        "row_length_m": 4.62875,
+        "slot_indices": [
+          0,
+          1
+        ],
+        "orientation": "landscape",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          2
+        ],
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245
+      }
+    ],
+    "array_transforms": [
+      {
+        "array_id": 1,
+        "row": 1,
+        "col": 1,
+        "slot": 1,
+        "x": -5.88667,
+        "y": 3.72292,
+        "yaw_deg": -0.161,
+        "along_track_m": 0.0,
+        "cross_track_m": -0.00408,
+        "orientation": "landscape",
+        "string_id": 1,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 1,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 2,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 3,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 4,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 2,
+        "row": 1,
+        "col": 2,
+        "slot": 2,
+        "x": -1.30265,
+        "y": 3.70288,
+        "yaw_deg": -0.00878,
+        "along_track_m": 4.58404,
+        "cross_track_m": -0.01766,
+        "orientation": "landscape",
+        "string_id": 1,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 5,
+            "array_id": 2,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 6,
+            "array_id": 2,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 7,
+            "array_id": 2,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 8,
+            "array_id": 2,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 3,
+        "row": 1,
+        "col": 3,
+        "slot": 3,
+        "x": 3.34264,
+        "y": 3.69867,
+        "yaw_deg": -0.01794,
+        "along_track_m": 9.22934,
+        "cross_track_m": -0.01533,
+        "orientation": "landscape",
+        "string_id": 1,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 9,
+            "array_id": 3,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 10,
+            "array_id": 3,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 11,
+            "array_id": 3,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 12,
+            "array_id": 3,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 4,
+        "row": 2,
+        "col": 1,
+        "slot": 1,
+        "x": -6.73459,
+        "y": 0.03246,
+        "yaw_deg": 0.00261,
+        "along_track_m": 0.0,
+        "cross_track_m": 0.01381,
+        "orientation": "landscape",
+        "string_id": 2,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 13,
+            "array_id": 4,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 14,
+            "array_id": 4,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 15,
+            "array_id": 4,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 16,
+            "array_id": 4,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 5,
+        "row": 2,
+        "col": 2,
+        "slot": 2,
+        "x": -2.10931,
+        "y": 0.00989,
+        "yaw_deg": -0.10624,
+        "along_track_m": 4.62528,
+        "cross_track_m": -0.0081,
+        "orientation": "landscape",
+        "string_id": 2,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 17,
+            "array_id": 5,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 18,
+            "array_id": 5,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 19,
+            "array_id": 5,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 20,
+            "array_id": 5,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 6,
+        "row": 2,
+        "col": 3,
+        "slot": 3,
+        "x": 2.53617,
+        "y": 0.02722,
+        "yaw_deg": 0.0248,
+        "along_track_m": 9.27076,
+        "cross_track_m": 0.0099,
+        "orientation": "landscape",
+        "string_id": 2,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 21,
+            "array_id": 6,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 22,
+            "array_id": 6,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 23,
+            "array_id": 6,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 24,
+            "array_id": 6,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 7,
+        "row": 2,
+        "col": 4,
+        "slot": 4,
+        "x": 7.20408,
+        "y": 0.01513,
+        "yaw_deg": -0.03808,
+        "along_track_m": 13.93868,
+        "cross_track_m": -0.00153,
+        "orientation": "landscape",
+        "string_id": 1,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 25,
+            "array_id": 7,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 26,
+            "array_id": 7,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 27,
+            "array_id": 7,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 28,
+            "array_id": 7,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 8,
+        "row": 3,
+        "col": 1,
+        "slot": 1,
+        "x": -7.20408,
+        "y": -3.69148,
+        "yaw_deg": -0.04484,
+        "along_track_m": 0.0,
+        "cross_track_m": 0.01303,
+        "orientation": "landscape",
+        "string_id": 2,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 29,
+            "array_id": 8,
+            "row_id": 3,
+            "string_id": 2,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 30,
+            "array_id": 8,
+            "row_id": 3,
+            "string_id": 2,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 31,
+            "array_id": 8,
+            "row_id": 3,
+            "string_id": 2,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 32,
+            "array_id": 8,
+            "row_id": 3,
+            "string_id": 2,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 9,
+        "row": 3,
+        "col": 2,
+        "slot": 2,
+        "x": -2.59605,
+        "y": -3.72292,
+        "yaw_deg": -0.09041,
+        "along_track_m": 4.60803,
+        "cross_track_m": -0.01817,
+        "orientation": "landscape",
+        "string_id": 2,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 33,
+            "array_id": 9,
+            "row_id": 3,
+            "string_id": 2,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 34,
+            "array_id": 9,
+            "row_id": 3,
+            "string_id": 2,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 35,
+            "array_id": 9,
+            "row_id": 3,
+            "string_id": 2,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 36,
+            "array_id": 9,
+            "row_id": 3,
+            "string_id": 2,
+            "module_number_in_array": 4
+          }
+        ]
+      }
+    ]
+  },
+  "composite": {
+    "background": "assets/bg_desert_track.png",
+    "safe_region": [
+      0.15,
+      0.14,
+      0.86,
+      0.86
+    ],
+    "background_is_immutable": true,
+    "location_id": "desert_track",
+    "safe_region_px": [
+      461,
+      287,
+      2642,
+      1761
+    ],
+    "safe_region_normalized": [
+      0.15,
+      0.14,
+      0.86,
+      0.86
+    ],
+    "source_visible_bbox_px": [
+      0,
+      0,
+      3072,
+      2048
+    ],
+    "source_measured_cluster_bbox_px": [
+      336,
+      282,
+      2772,
+      1682
+    ],
+    "source_crop_bbox_px": [
+      275,
+      221,
+      2833,
+      1743
+    ],
+    "final_scaled_cluster_bbox_px": [
+      657,
+      492,
+      2445,
+      1556
+    ],
+    "alpha_threshold": 64,
+    "raw_scale_to_safe_region": 0.8526192337763878,
+    "fit_factor": 0.82,
+    "applied_uniform_scale": 0.699147771696638
+  }
+}

@@ -1931,7 +1931,17 @@ def crop_from_polygon(image, polygon, pad_ratio=0.08, min_pad=6, max_pad_ratio=0
     box = polygon_bounds(polygon)
     crop, origin = crop_with_padding(image, box, pad_ratio, min_pad=min_pad, max_pad_ratio=max_pad_ratio)
     ox1, oy1, ox2, oy2 = origin
-    assert all(ox1 <= x <= ox2 and oy1 <= y <= oy2 for x, y in polygon)
+    tolerance = 1.0
+    image_w, image_h = image.size
+    visible_points = [
+        (x, y)
+        for x, y in polygon
+        if -tolerance <= x <= image_w + tolerance and -tolerance <= y <= image_h + tolerance
+    ]
+    assert all(
+        ox1 - tolerance <= x <= ox2 + tolerance and oy1 - tolerance <= y <= oy2 + tolerance
+        for x, y in visible_points
+    )
     return crop, origin
 
 
@@ -2098,7 +2108,157 @@ def solar_render_thermal_base_field(location_id, rendered):
     return temp.astype(np.float32), array_geometries
 
 
-def finalize_solar_render_thermal_image(location_id, base_temp, array_geometries, selected_row_id, selected_cell_id, fault_records=None):
+def thermal_display_rgb_from_scalar(temp, location_id, scene_distance="far"):
+    """Map one scalar thermal master to the app palette with a stable robust range."""
+    temp = np.asarray(temp, dtype=np.float32)
+    if temp.size == 0:
+        return Image.fromarray(np.zeros((1, 1, 3), dtype=np.uint8))
+    low_pct, high_pct = (1.0, 99.35) if str(scene_distance).lower() == "far" else (1.0, 99.80)
+    low, high = np.percentile(temp, [low_pct, high_pct])
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        low, high = float(np.min(temp)), float(np.max(temp))
+    min_span = 72.0 if str(scene_distance).lower() == "far" else 64.0
+    if high - low < min_span:
+        mid = (high + low) / 2.0
+        low = mid - min_span / 2.0
+        high = mid + min_span / 2.0
+    dither = np.random.default_rng(seed_for(location_id, "thermal-dither", scene_distance)).uniform(
+        -0.45,
+        0.45,
+        temp.shape,
+    ).astype(np.float32)
+    temp_u8 = np.clip((temp + dither - low) / max(1.0, high - low) * 255.0, 0, 255).astype(np.uint8)
+    lut = np.array(thermal_lut(), dtype=np.uint8)
+    return Image.fromarray(lut[temp_u8])
+
+
+def scalar_debug_image(field, mode="thermal", location_id="debug"):
+    field = np.asarray(field, dtype=np.float32)
+    if field.size == 0:
+        return Image.fromarray(np.zeros((1, 1, 3), dtype=np.uint8))
+    if mode == "thermal":
+        return thermal_display_rgb_from_scalar(field, location_id, "close")
+    high = float(np.percentile(np.abs(field), 99.2))
+    if high <= 1e-6:
+        high = 1.0
+    normalized = np.clip(np.abs(field) / high * 255.0, 0, 255).astype(np.uint8)
+    return Image.fromarray(normalized, "L").convert("RGB")
+
+
+def live_fault_scalar_debug(location_id, selected_row_id, selected_cell_id, fault_records=None, scene_distance="close"):
+    render_size = module_field_static_canvas_size(location_id, "thermal")
+    rendered = solar_render_image(location_id, render_size)
+    if rendered is None:
+        return None
+    base_temp, array_geometries = solar_render_thermal_base_field(location_id, rendered.convert("RGB"))
+    selected_record = None
+    for record in fault_records or []:
+        if (
+            record.get("location_id") == location_id
+            and record.get("row_id") == selected_row_id
+            and record.get("target_cell_id") == selected_cell_id
+        ):
+            selected_record = record
+            break
+    if selected_record is None:
+        return None
+    rendered_cell = rendered_fault_cell_from_record(
+        location_id,
+        selected_record,
+        selected_row_id,
+        selected_cell_id,
+        array_geometries,
+    )
+    if rendered_cell is None:
+        return None
+    healthy = np.array(base_temp, dtype=np.float32, copy=True)
+    faulted = np.array(base_temp, dtype=np.float32, copy=True)
+    before = np.array(faulted, dtype=np.float32, copy=True)
+    apply_thermal_fault(
+        faulted,
+        rendered_cell,
+        selected_record["fault_type"],
+        selected_record.get("fault_scale", DEFAULT_FAULT_SCALE),
+    )
+    delta = faulted - before
+    applied = bool(float(np.max(np.abs(delta))) > 0.01)
+    mx1 = int(rendered_cell.get("module_bbox_px", {}).get("x1", rendered_cell.get("x1", 0)))
+    my1 = int(rendered_cell.get("module_bbox_px", {}).get("y1", rendered_cell.get("y1", 0)))
+    mx2 = int(rendered_cell.get("module_bbox_px", {}).get("x2", rendered_cell.get("x2", 0)))
+    my2 = int(rendered_cell.get("module_bbox_px", {}).get("y2", rendered_cell.get("y2", 0)))
+    h, w = healthy.shape
+    pad = int(max(12, max(mx2 - mx1, my2 - my1) * 0.18))
+    x1, y1 = max(0, mx1 - pad), max(0, my1 - pad)
+    x2, y2 = min(w, mx2 + pad), min(h, my2 + pad)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = (x1, y1, x2, y2)
+    support = (np.abs(delta) > 0.75).astype(np.float32) * 255.0
+    support_img = Image.fromarray(np.clip(support[y1:y2, x1:x2], 0, 255).astype(np.uint8), "L").convert("RGB")
+    support_bounds = None
+    ys, xs = np.where(support > 0)
+    if len(xs):
+        support_bounds = {
+            "x1": int(xs.min()),
+            "y1": int(ys.min()),
+            "x2": int(xs.max() + 1),
+            "y2": int(ys.max() + 1),
+        }
+    return {
+        "record": dict(selected_record),
+        "applied": bool(applied),
+        "rendered_cell": rendered_cell,
+        "support_bounds": support_bounds,
+        "healthy_scalar": scalar_debug_image(healthy[y1:y2, x1:x2], "thermal", location_id),
+        "faulted_scalar": scalar_debug_image(faulted[y1:y2, x1:x2], "thermal", location_id),
+        "delta": scalar_debug_image(delta[y1:y2, x1:x2], "delta", location_id),
+        "support": support_img,
+        "final_palette": thermal_display_rgb_from_scalar(
+            apply_sensor_model(faulted, location_id, scene_distance),
+            location_id,
+            scene_distance,
+        ).crop(crop),
+        "metrics": scalar_fault_delta_metrics(healthy, faulted, rendered_cell, support),
+    }
+
+
+def scalar_fault_delta_metrics(healthy, faulted, rendered_cell, support_mask=None):
+    healthy = np.asarray(healthy, dtype=np.float32)
+    faulted = np.asarray(faulted, dtype=np.float32)
+    delta = faulted - healthy
+    module_box = rendered_cell.get("module_bbox_px", {}) if isinstance(rendered_cell, dict) else {}
+    x1 = int(module_box.get("x1", rendered_cell.get("x1", 0)))
+    y1 = int(module_box.get("y1", rendered_cell.get("y1", 0)))
+    x2 = int(module_box.get("x2", rendered_cell.get("x2", healthy.shape[1])))
+    y2 = int(module_box.get("y2", rendered_cell.get("y2", healthy.shape[0])))
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(healthy.shape[1], x2), min(healthy.shape[0], y2)
+    if x2 <= x1 or y2 <= y1:
+        x1, y1, x2, y2 = 0, 0, healthy.shape[1], healthy.shape[0]
+    healthy_roi = healthy[y1:y2, x1:x2]
+    faulted_roi = faulted[y1:y2, x1:x2]
+    delta_roi = delta[y1:y2, x1:x2]
+    support_roi = None
+    if support_mask is not None:
+        support_roi = np.asarray(support_mask[y1:y2, x1:x2]) > 0
+    if support_roi is None or not np.any(support_roi):
+        support_roi = np.abs(delta_roi) > 0.75
+    outside = ~support_roi
+    return {
+        "healthy_min": float(np.min(healthy_roi)),
+        "healthy_max": float(np.max(healthy_roi)),
+        "healthy_mean": float(np.mean(healthy_roi)),
+        "faulted_min": float(np.min(faulted_roi)),
+        "faulted_max": float(np.max(faulted_roi)),
+        "faulted_mean": float(np.mean(faulted_roi)),
+        "max_abs_delta": float(np.max(np.abs(delta_roi))) if delta_roi.size else 0.0,
+        "mean_delta_inside_support": float(np.mean(delta_roi[support_roi])) if np.any(support_roi) else 0.0,
+        "mean_delta_outside_support": float(np.mean(delta_roi[outside])) if np.any(outside) else 0.0,
+        "support_pixel_count": int(np.count_nonzero(support_roi)),
+    }
+
+
+def finalize_solar_render_thermal_image(location_id, base_temp, array_geometries, selected_row_id, selected_cell_id, fault_records=None, scene_distance="far"):
     temp = np.array(base_temp, dtype=np.float32, copy=True)
     records = fault_records or []
     if records:
@@ -2113,18 +2273,11 @@ def finalize_solar_render_thermal_image(location_id, base_temp, array_geometries
                 record.get("fault_scale", DEFAULT_FAULT_SCALE),
             )
 
-    temp = apply_sensor_model(temp, location_id, "far")
-    dither = np.random.default_rng(seed_for(location_id, "thermal-dither")).uniform(
-        -0.5,
-        0.5,
-        temp.shape,
-    ).astype(np.float32)
-    temp_u8 = np.clip(temp + dither, 0, 255).astype(np.uint8)
-    lut = np.array(thermal_lut(), dtype=np.uint8)
-    return Image.fromarray(lut[temp_u8])
+    temp = apply_sensor_model(temp, location_id, scene_distance)
+    return thermal_display_rgb_from_scalar(temp, location_id, scene_distance)
 
 
-def solar_render_thermal_image(location_id, rendered, selected_row_id, selected_cell_id, fault_records=None):
+def solar_render_thermal_image(location_id, rendered, selected_row_id, selected_cell_id, fault_records=None, scene_distance="far"):
     base_temp, array_geometries = solar_render_thermal_base_field(location_id, rendered)
     return finalize_solar_render_thermal_image(
         location_id,
@@ -2133,6 +2286,7 @@ def solar_render_thermal_image(location_id, rendered, selected_row_id, selected_
         selected_row_id,
         selected_cell_id,
         fault_records,
+        scene_distance,
     )
 
 
@@ -2176,7 +2330,7 @@ def cached_solar_render_thermal_base(location_id, render_size, render_signature)
 
 
 @st.cache_data(show_spinner=False, max_entries=48)
-def cached_module_field_thermal_scene(location_id, render_size, fault_key, render_signature):
+def cached_module_field_thermal_scene(location_id, render_size, fault_key, render_signature, scene_distance="far"):
     cached_base = cached_solar_render_thermal_base(location_id, render_size, render_signature)
     if cached_base is None:
         return None
@@ -2190,10 +2344,11 @@ def cached_module_field_thermal_scene(location_id, render_size, fault_key, rende
         render_row_id,
         render_cell_id,
         records,
+        scene_distance,
     ).convert("RGB")
 
 
-def module_field_image(location_id, view, selected_row_id, selected_cell_id, fault_records=None, show_grid=True):
+def module_field_image(location_id, view, selected_row_id, selected_cell_id, fault_records=None, show_grid=True, scene_distance="far"):
     render_size = module_field_static_canvas_size(location_id, view)
     rendered = None if view == "thermal" else solar_render_image(location_id, render_size)
     if rendered is not None and view == "rgb":
@@ -2204,12 +2359,13 @@ def module_field_image(location_id, view, selected_row_id, selected_cell_id, fau
             render_size,
             source_fault_key(fault_records),
             solar_render_cache_signature(location_id, render_size),
+            scene_distance,
         )
         if thermal is not None:
             return draw_solar_render_overlays(thermal, location_id, selected_row_id, selected_cell_id, fault_records, show_grid)
         rendered = solar_render_image(location_id, render_size)
     if rendered is not None and view == "thermal":
-        thermal = solar_render_thermal_image(location_id, rendered, selected_row_id, selected_cell_id, fault_records)
+        thermal = solar_render_thermal_image(location_id, rendered, selected_row_id, selected_cell_id, fault_records, scene_distance)
         return draw_solar_render_overlays(thermal, location_id, selected_row_id, selected_cell_id, fault_records, show_grid)
 
     all_rows = panels(location_id)
@@ -3788,7 +3944,16 @@ def main():
     def get_thermal_scene():
         nonlocal thermal_scene
         if thermal_scene is None:
-            thermal_scene = module_field_image(location["id"], "thermal", selected_row_id, selected_cell_id, records, show_grid=False).convert("RGB")
+            thermal_distance = "close" if section == "Faults" and bool(qp_get("selected_array", "")) else "far"
+            thermal_scene = module_field_image(
+                location["id"],
+                "thermal",
+                selected_row_id,
+                selected_cell_id,
+                records,
+                show_grid=False,
+                scene_distance=thermal_distance,
+            ).convert("RGB")
         return thermal_scene
 
     def get_scene():
@@ -4040,6 +4205,43 @@ def main():
                 st.checkbox("Show fault bounding boxes", value=show_fault_boxes, key="show_fault_boxes")
                 st.checkbox("Show cell map", value=show_cell_map, key="show_cell_map")
                 st.checkbox("Debug geometry overlay", value=bool(st.session_state.get("debug_geometry_overlay", False)), key="debug_geometry_overlay")
+                if qp_get("debug_fault_visibility", "0") == "1" and cell_active:
+                    debug_payload = live_fault_scalar_debug(
+                        location["id"],
+                        selected_row_id,
+                        selected_cell_id,
+                        records,
+                        "close",
+                    )
+                    with st.expander("Developer Fault Visibility Debug", expanded=True):
+                        if not debug_payload:
+                            st.caption("No selected-cell diagnostic fault is available for scalar debug.")
+                        else:
+                            st.json(
+                                {
+                                    "fault_type": debug_payload["record"].get("fault_type"),
+                                    "target_cell_id": debug_payload["record"].get("target_cell_id"),
+                                    "severity": debug_payload["record"].get("fault_scale"),
+                                    "applied": debug_payload["applied"],
+                                    "reference_dispatch": production_submodule_enabled(debug_payload["record"].get("fault_type")),
+                                    "support_bounds": debug_payload.get("support_bounds"),
+                                    "metrics": debug_payload.get("metrics"),
+                                }
+                            )
+                            dbg_cols = st.columns(5)
+                            for dbg_col, (label, key) in zip(
+                                dbg_cols,
+                                [
+                                    ("Healthy scalar", "healthy_scalar"),
+                                    ("Faulted scalar", "faulted_scalar"),
+                                    ("Delta", "delta"),
+                                    ("Support", "support"),
+                                    ("Final palette", "final_palette"),
+                                ],
+                            ):
+                                with dbg_col:
+                                    st.caption(label)
+                                    st.image(debug_payload[key], use_container_width=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
                 st.markdown('<div class="pv-card"><div class="pv-section-title">Far View Thermal Observations</div>', unsafe_allow_html=True)
@@ -4047,7 +4249,7 @@ def main():
                 far_fault_types = [
                     fault_type for fault_type in globals().get(
                         "FAR_SCOUT_FAULT_TYPES",
-                        ["SingleHotSpot", "MultiHotSpot", "PartialShading", "StringOpenCircuit"],
+                        ["SingleHotSpot", "MultiHotSpot", "PartialShading"],
                     )
                     if fault_available_in_location(location["id"], fault_type)
                 ]

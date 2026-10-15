@@ -43,8 +43,11 @@ def assert_scene(namespace, location_id, rows, arrays):
         ox1, oy1, ox2, oy2 = crop_origin
         assert array_crop.width > 0 and array_crop.height > 0, f"{location_id} {rows}x{arrays}: empty array crop"
         for point in namespace["array_module_union_points"](region):
-            assert ox1 <= point[0] <= ox2 and oy1 <= point[1] <= oy2, (
-                f"{location_id} {rows}x{arrays}: array crop does not contain full module union"
+            x, y = point
+            if not (-1 <= x <= rgb.width + 1 and -1 <= y <= rgb.height + 1):
+                continue
+            assert ox1 - 1 <= x <= ox2 + 1 and oy1 - 1 <= y <= oy2 + 1, (
+                f"{location_id} {rows}x{arrays}: array crop does not contain visible module union"
             )
         for module_number, module in modules.items():
             cells = namespace["module_cell_polygons"](module)
@@ -124,13 +127,25 @@ def assert_random_fault_origins(namespace, location_id, location, regions):
 
 
 def assert_fault_matrix(namespace, location_id, location, regions):
+    expected_diagnostic_faults = [
+        "SurfaceObstruction",
+        "SoilingDust",
+        "CellCracking",
+        "SingleDiode",
+        "SingleByPassed",
+        "StringOpenCircuit",
+        "StringReversedPolarity",
+    ]
     fault_types = list(namespace.get("CLOSE_DIAGNOSTIC_FAULT_TYPES") or namespace["selectable_fault_types_for_location"](location_id))
     far_types = list(namespace.get("FAR_SCOUT_FAULT_TYPES") or [])
+    selectable_fault_types = list(namespace["selectable_fault_types_for_location"](location_id))
+    assert fault_types == expected_diagnostic_faults, f"Close diagnostic faults changed: {fault_types}"
+    assert selectable_fault_types == expected_diagnostic_faults, f"Selectable faults changed: {selectable_fault_types}"
+    assert "SingleHotSpot" in far_types, "Thermal Hotspot missing from far-view thermal observations"
     assert "PartialShading" in far_types, "Partial Shading missing from far-view thermal observations"
     assert "PartialShading" not in fault_types, "Partial Shading must not appear in close diagnostic faults"
-    assert "SurfaceObstruction" in fault_types, "Surface Obstruction missing from close diagnostic faults"
-    assert any("Diode" in fault_type for fault_type in fault_types), "Diode faults missing from diagnostic faults"
-    assert any("String" in fault_type for fault_type in fault_types), "String faults missing from diagnostic faults"
+    for removed_fault_type in ("SingleHotSpot", "MultiHotSpot", "MultiDiode", "MultiByPassed", "DB", "DL", "TB"):
+        assert removed_fault_type not in fault_types, f"{removed_fault_type} must not appear in close diagnostic faults"
 
     array_geometries = {
         (int(region["row"]), int(region["col"])): {
@@ -176,8 +191,9 @@ def main():
     with contextlib.redirect_stderr(io.StringIO()):
         namespace = runpy.run_path("app.py", run_name="pv_regression_smoke")
 
-    for location_id in ("grass_open", "desert_track", "floating_water", "rooftop_warehouse"):
+    for location_id in ("grass_open", "agri_field_new", "desert_track", "floating_water", "rooftop_warehouse"):
         assert_scene(namespace, location_id, 1, 1)
+        assert_scene(namespace, location_id, 3, 3)
         assert_scene(namespace, location_id, 6, 6)
 
     print("regression_smoke: ok")

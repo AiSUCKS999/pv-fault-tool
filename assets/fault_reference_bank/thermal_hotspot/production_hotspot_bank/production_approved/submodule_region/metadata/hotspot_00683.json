@@ -1,0 +1,36 @@
+{
+  "after_purity_metrics": {
+    "arbitrary_long_line_count": 0,
+    "axis_aligned_line_fraction": 0.0,
+    "grid_contamination_score": 0.0,
+    "horizontal_line_row_fraction": 0.0,
+    "vertical_line_col_fraction": 0.0
+  },
+  "contaminated_after_cleanup": false,
+  "contaminated_before_cleanup": true,
+  "duplicate_family_id": "503",
+  "mask_residual_agreement": {
+    "annotation_negligible_residual_fraction": 0.026654,
+    "largest_component_fraction": 0.442684,
+    "max_component_elongation": 6.666667,
+    "residual_support_fraction": 0.015069,
+    "residual_support_iou": 0.886575,
+    "strong_residual_outside_annotation_fraction": 0.0,
+    "support_component_count": 7,
+    "support_fraction": 0.016909
+  },
+  "morphology_family": "SUBMODULE_REGION",
+  "production_quality_status": "PRODUCTION_APPROVED",
+  "quality_reasons": [
+    "passes strict production residual quality gates"
+  ],
+  "radiometric_status": "relative_thermal_anomaly_only",
+  "reference_id": "hotspot_00683",
+  "residual": "production_hotspot_bank\\production_approved\\submodule_region\\residuals\\hotspot_00683.png",
+  "residual_nonzero_fraction": 0.017031,
+  "residual_peak": 0.999998,
+  "source_dataset": "solarthermalcamera_hotspot_segment",
+  "source_image": "thermalhotspot45_PNG.rf.b9040562c1545cc980f02a2a6dc3e57e.jpg",
+  "support_mask": "production_hotspot_bank\\production_approved\\submodule_region\\masks\\hotspot_00683.png",
+  "weak_residual": false
+}

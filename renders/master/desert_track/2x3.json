@@ -1,0 +1,480 @@
+{
+  "field_width": 18.16576735347475,
+  "field_depth": 6.743710896981344,
+  "ground_width": 31.865767353474748,
+  "ground_depth": 20.443710896981344,
+  "bounds": [
+    -9.102684264249756,
+    9.423083089224992,
+    -3.750030068264834,
+    3.4336808287165113,
+    -0.05,
+    0.8849126140046178
+  ],
+  "counts": {
+    "arrays": 6,
+    "modules": 24,
+    "cells": 960,
+    "cells_per_array": 160,
+    "modules_per_array": 4
+  },
+  "topology": {
+    "topology_mode": "realistic",
+    "topology_type": "VARIABLE_ROW_LENGTH",
+    "requested_rows": 2,
+    "nominal_arrays_per_row": 3,
+    "target_total_arrays": 6,
+    "row_capacity": 5,
+    "row_lengths": [
+      2,
+      4
+    ],
+    "occupied_slots": [
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        1,
+        2,
+        3
+      ]
+    ],
+    "total_arrays": 6,
+    "seed": 13090,
+    "orientation_strategy": "row",
+    "string_count": 2,
+    "electrical_strings": [
+      {
+        "string_id": 1,
+        "array_count": 2,
+        "module_count": 8,
+        "array_keys": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            2
+          ]
+        ],
+        "start_row": 1,
+        "end_row": 1,
+        "start_x": 3.11415,
+        "start_y": 2.08717,
+        "end_x": 7.79824,
+        "end_y": 2.06308,
+        "temperature_bias_c": -0.8203
+      },
+      {
+        "string_id": 2,
+        "array_count": 4,
+        "module_count": 16,
+        "array_keys": [
+          [
+            2,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            2,
+            1
+          ]
+        ],
+        "start_row": 2,
+        "end_row": 2,
+        "start_x": 4.25313,
+        "start_y": -2.06285,
+        "end_x": -7.79824,
+        "end_y": -2.05506,
+        "temperature_bias_c": 1.0502
+      }
+    ],
+    "row_strings": [
+      {
+        "row_id": 1,
+        "count": 2,
+        "start_x": 3.11415,
+        "start_y": 2.08593,
+        "heading_deg": -0.09001,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [
+          1.75696
+        ],
+        "gap_from_previous_row_m": null,
+        "row_length_m": 4.64196,
+        "slot_indices": [
+          0,
+          1
+        ],
+        "orientation": "landscape",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245
+      },
+      {
+        "row_id": 2,
+        "count": 4,
+        "start_x": -7.79807,
+        "start_y": -2.00695,
+        "heading_deg": -0.19449,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [
+          1.77159,
+          1.7336,
+          1.79434
+        ],
+        "gap_from_previous_row_m": 1.52788,
+        "row_length_m": 12.03454,
+        "slot_indices": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "orientation": "portrait",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          2
+        ],
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885
+      }
+    ],
+    "array_transforms": [
+      {
+        "array_id": 1,
+        "row": 1,
+        "col": 1,
+        "slot": 1,
+        "x": 3.11415,
+        "y": 2.08717,
+        "yaw_deg": -0.1595,
+        "along_track_m": 0.0,
+        "cross_track_m": 0.00124,
+        "orientation": "landscape",
+        "string_id": 1,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 1,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 2,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 3,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 4,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 2,
+        "row": 1,
+        "col": 2,
+        "slot": 2,
+        "x": 7.79824,
+        "y": 2.06308,
+        "yaw_deg": 0.11998,
+        "along_track_m": 4.68412,
+        "cross_track_m": -0.01549,
+        "orientation": "landscape",
+        "string_id": 1,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 5,
+            "array_id": 2,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 6,
+            "array_id": 2,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 7,
+            "array_id": 2,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 8,
+            "array_id": 2,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 3,
+        "row": 2,
+        "col": 1,
+        "slot": 1,
+        "x": -7.79824,
+        "y": -2.05506,
+        "yaw_deg": -0.07744,
+        "along_track_m": 0.0,
+        "cross_track_m": -0.04811,
+        "orientation": "portrait",
+        "string_id": 2,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 9,
+            "array_id": 3,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 10,
+            "array_id": 3,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 11,
+            "array_id": 3,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 12,
+            "array_id": 3,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 4,
+        "row": 2,
+        "col": 2,
+        "slot": 2,
+        "x": -3.79405,
+        "y": -1.96498,
+        "yaw_deg": -0.20658,
+        "along_track_m": 4.00385,
+        "cross_track_m": 0.05556,
+        "orientation": "portrait",
+        "string_id": 2,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 13,
+            "array_id": 4,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 14,
+            "array_id": 4,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 15,
+            "array_id": 4,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 16,
+            "array_id": 4,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 5,
+        "row": 2,
+        "col": 3,
+        "slot": 3,
+        "x": 0.23068,
+        "y": -2.08717,
+        "yaw_deg": 0.0184,
+        "along_track_m": 8.02898,
+        "cross_track_m": -0.05296,
+        "orientation": "portrait",
+        "string_id": 2,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 17,
+            "array_id": 5,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 18,
+            "array_id": 5,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 19,
+            "array_id": 5,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 20,
+            "array_id": 5,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 6,
+        "row": 2,
+        "col": 4,
+        "slot": 4,
+        "x": 4.25313,
+        "y": -2.06285,
+        "yaw_deg": 0.01028,
+        "along_track_m": 12.05133,
+        "cross_track_m": -0.01499,
+        "orientation": "portrait",
+        "string_id": 2,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 21,
+            "array_id": 6,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 22,
+            "array_id": 6,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 23,
+            "array_id": 6,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 24,
+            "array_id": 6,
+            "row_id": 2,
+            "string_id": 2,
+            "module_number_in_array": 4
+          }
+        ]
+      }
+    ]
+  },
+  "composite": {
+    "background": "assets/bg_desert_track.png",
+    "safe_region": [
+      0.15,
+      0.14,
+      0.86,
+      0.86
+    ],
+    "background_is_immutable": true,
+    "location_id": "desert_track",
+    "safe_region_px": [
+      461,
+      287,
+      2642,
+      1761
+    ],
+    "safe_region_normalized": [
+      0.15,
+      0.14,
+      0.86,
+      0.86
+    ],
+    "source_visible_bbox_px": [
+      0,
+      0,
+      3072,
+      2048
+    ],
+    "source_measured_cluster_bbox_px": [
+      341,
+      500,
+      2764,
+      1457
+    ],
+    "source_crop_bbox_px": [
+      280,
+      439,
+      2825,
+      1518
+    ],
+    "final_scaled_cluster_bbox_px": [
+      657,
+      645,
+      2445,
+      1400
+    ],
+    "alpha_threshold": 64,
+    "raw_scale_to_safe_region": 0.8569744597249509,
+    "fit_factor": 0.82,
+    "applied_uniform_scale": 0.7027190569744597
+  }
+}

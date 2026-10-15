@@ -1,0 +1,36 @@
+{
+  "after_purity_metrics": {
+    "arbitrary_long_line_count": 0,
+    "axis_aligned_line_fraction": 0.0,
+    "grid_contamination_score": 0.0,
+    "horizontal_line_row_fraction": 0.0,
+    "vertical_line_col_fraction": 0.0
+  },
+  "contaminated_after_cleanup": false,
+  "contaminated_before_cleanup": true,
+  "duplicate_family_id": "313",
+  "mask_residual_agreement": {
+    "annotation_negligible_residual_fraction": 0.11828,
+    "largest_component_fraction": 0.677419,
+    "max_component_elongation": 5.6,
+    "residual_support_fraction": 0.016619,
+    "residual_support_iou": 0.793907,
+    "strong_residual_outside_annotation_fraction": 0.0,
+    "support_component_count": 6,
+    "support_fraction": 0.020933
+  },
+  "morphology_family": "SUBMODULE_REGION",
+  "production_quality_status": "PRODUCTION_APPROVED",
+  "quality_reasons": [
+    "passes strict production residual quality gates"
+  ],
+  "radiometric_status": "relative_thermal_anomaly_only",
+  "reference_id": "hotspot_00413",
+  "residual": "production_hotspot_bank\\production_approved\\submodule_region\\residuals\\hotspot_00413.png",
+  "residual_nonzero_fraction": 0.018532,
+  "residual_peak": 0.997795,
+  "source_dataset": "furkan_thermal_solar_hotspot_detect",
+  "source_image": "thermal1851_jpg.rf.a432e2664d0107bb7c287e189645139e.jpg",
+  "support_mask": "production_hotspot_bank\\production_approved\\submodule_region\\masks\\hotspot_00413.png",
+  "weak_residual": false
+}

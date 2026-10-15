@@ -1,0 +1,182 @@
+{
+  "field_width": 2.2473140356622205,
+  "field_depth": 2.886800330424832,
+  "ground_width": 15.94731403566222,
+  "ground_depth": 16.586800330424833,
+  "bounds": [
+    -1.3036570178311102,
+    1.3036570178311102,
+    -1.663400165212416,
+    1.663400165212416,
+    -0.05,
+    0.8849126140046178
+  ],
+  "counts": {
+    "arrays": 1,
+    "modules": 4,
+    "cells": 160,
+    "cells_per_array": 160,
+    "modules_per_array": 4
+  },
+  "topology": {
+    "topology_mode": "realistic",
+    "topology_type": "TAPERED_SITE",
+    "requested_rows": 1,
+    "nominal_arrays_per_row": 1,
+    "target_total_arrays": 1,
+    "row_capacity": 3,
+    "row_lengths": [
+      1
+    ],
+    "occupied_slots": [
+      [
+        0
+      ]
+    ],
+    "total_arrays": 1,
+    "seed": 10247,
+    "orientation_strategy": "installation",
+    "string_count": 1,
+    "electrical_strings": [
+      {
+        "string_id": 1,
+        "array_count": 1,
+        "module_count": 4,
+        "array_keys": [
+          [
+            1,
+            1
+          ]
+        ],
+        "start_row": 1,
+        "end_row": 1,
+        "start_x": 0.0,
+        "start_y": 0.0,
+        "end_x": 0.0,
+        "end_y": 0.0,
+        "temperature_bias_c": -0.7197
+      }
+    ],
+    "row_strings": [
+      {
+        "row_id": 1,
+        "count": 1,
+        "start_x": -3e-05,
+        "start_y": -0.03209,
+        "heading_deg": -0.05878,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [],
+        "gap_from_previous_row_m": null,
+        "row_length_m": 0.0,
+        "slot_indices": [
+          0
+        ],
+        "orientation": "portrait",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885
+      }
+    ],
+    "array_transforms": [
+      {
+        "array_id": 1,
+        "row": 1,
+        "col": 1,
+        "slot": 1,
+        "x": 0.0,
+        "y": 0.0,
+        "yaw_deg": -0.04597,
+        "along_track_m": 0.0,
+        "cross_track_m": 0.03209,
+        "orientation": "portrait",
+        "string_id": 1,
+        "array_width_m": 2.245,
+        "array_depth_m": 2.885,
+        "modules": [
+          {
+            "module_id": 1,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 2,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 3,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 4,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      }
+    ]
+  },
+  "composite": {
+    "background": "assets/bg_desert_track.png",
+    "safe_region": [
+      0.15,
+      0.14,
+      0.86,
+      0.86
+    ],
+    "background_is_immutable": true,
+    "location_id": "desert_track",
+    "safe_region_px": [
+      461,
+      287,
+      2642,
+      1761
+    ],
+    "safe_region_normalized": [
+      0.15,
+      0.14,
+      0.86,
+      0.86
+    ],
+    "source_visible_bbox_px": [
+      0,
+      0,
+      3072,
+      2048
+    ],
+    "source_measured_cluster_bbox_px": [
+      982,
+      54,
+      2295,
+      1654
+    ],
+    "source_crop_bbox_px": [
+      942,
+      14,
+      2335,
+      1694
+    ],
+    "final_scaled_cluster_bbox_px": [
+      1050,
+      419,
+      2052,
+      1628
+    ],
+    "alpha_threshold": 64,
+    "raw_scale_to_safe_region": 0.8773809523809524,
+    "fit_factor": 0.82,
+    "applied_uniform_scale": 0.719452380952381
+  }
+}

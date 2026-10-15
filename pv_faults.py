@@ -81,10 +81,17 @@ LOW_CONFIDENCE_LEGACY_FAULTS = {"DB", "DL", "TB"}
 HIDDEN_MULTICELL_FAULTS = {"MultiDiode", "MultiByPassed"}
 HIDDEN_TOOL_FAULTS = HOTSPOT_FAULTS
 FAR_SCOUT_FAULT_TYPES = ["SingleHotSpot", "MultiHotSpot", "PartialShading"]
+FAR_VIEW_OBSERVATIONS = FAR_SCOUT_FAULT_TYPES
 CLOSE_DIAGNOSTIC_FAULT_TYPES = [
-    fault_type for fault_type in FAULT_TYPES
-    if fault_type not in HOTSPOT_FAULTS | {"PartialShading"}
+    "SurfaceObstruction",
+    "SoilingDust",
+    "CellCracking",
+    "SingleDiode",
+    "SingleByPassed",
+    "StringOpenCircuit",
+    "StringReversedPolarity",
 ]
+SUPPORTED_DIAGNOSTIC_FAULTS = CLOSE_DIAGNOSTIC_FAULT_TYPES
 SURFACE_OBSTRUCTION_FAULTS = {"SurfaceObstruction"}
 SURFACE_OBSTRUCTION_LOCATIONS = {"scenario_1", "agri_rows", "grass_open", "agri_field_new"}
 SOILING_FAULTS = {"SoilingDust"}
@@ -99,15 +106,12 @@ BYPASSED_FAULTS = {"SingleByPassed", "MultiByPassed"}
 STRING_FAULTS = {"StringOpenCircuit", "StringReversedPolarity"}
 LEGACY_LINE_FAULTS = {"DL"}
 THERMAL_BLOCK_FAULTS = {"TB"}
-USER_SELECTABLE_FAULT_TYPES = [
-    fault_type for fault_type in FAULT_TYPES
-    if fault_type not in HIDDEN_TOOL_FAULTS
-]
+USER_SELECTABLE_FAULT_TYPES = list(CLOSE_DIAGNOSTIC_FAULT_TYPES)
 
 
 def fault_available_in_location(location_id, fault_type):
     fault_type = canonical_fault_type(fault_type)
-    return fault_type in USER_SELECTABLE_FAULT_TYPES or fault_type in HOTSPOT_FAULTS
+    return fault_type in USER_SELECTABLE_FAULT_TYPES or fault_type in FAR_VIEW_OBSERVATIONS
 
 
 def selectable_fault_types_for_location(location_id):

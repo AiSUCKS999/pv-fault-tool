@@ -1,0 +1,13 @@
+{
+  "enabled": {
+    "SingleDiode": true,
+    "SingleByPassed": true
+  },
+  "integrated_at": "2026-10-12T16:49:01",
+  "integration_scope": "BYPASS_DIODE_V3_AND_BYPASSED_SUBSTRING",
+  "bypass_diode_model": "assets/fault_reference_bank/bypass_diode_fault/production_model_v3_robust",
+  "bypass_diode_robust_signal_count": 14,
+  "bypassed_substring_model": "assets/fault_reference_bank/bypassed_substring_section/production_model_live",
+  "relative_thermal_only": true,
+  "no_absolute_delta_t": true
+}

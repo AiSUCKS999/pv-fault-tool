@@ -72,6 +72,309 @@ def thermal_noise(shape, rng, amplitude, sigma):
     return cv2.GaussianBlur(noise, (0, 0), sigma)
 
 
+HOTSPOT_PRODUCTION_BANK_DIR = ROOT / "assets" / "fault_reference_bank" / "thermal_hotspot" / "production_hotspot_bank"
+THERMAL_HOTSPOT_V1 = "FROZEN"
+_PRODUCTION_HOTSPOT_RESIDUALS = None
+
+SUBMODULE_FAULT_PRODUCTION_STATUS = "READY_FOR_GATED_INTEGRATION"
+SUBMODULE_FAULT_ENABLED_PATH = ROOT / "assets" / "fault_reference_bank" / "submodule_fault_production_enabled.json"
+SUBMODULE_FAULT_BANKS = {
+    "SingleDiode": ROOT / "assets" / "fault_reference_bank" / "bypass_diode_fault" / "production_model_v3_robust",
+    "SingleByPassed": ROOT / "assets" / "fault_reference_bank" / "bypassed_substring_section" / "production_model_live",
+}
+_PRODUCTION_SUBMODULE_SIGNALS = {}
+_PRODUCTION_SUBMODULE_ENABLED = None
+
+
+def _resolve_hotspot_bank_path(relative_path):
+    path_text = str(relative_path or "").replace("\\", "/")
+    if not path_text:
+        return None
+    path = Path(path_text)
+    if path.is_absolute():
+        return path
+    parts = list(path.parts)
+    if parts and parts[0] == HOTSPOT_PRODUCTION_BANK_DIR.name:
+        return HOTSPOT_PRODUCTION_BANK_DIR.parent / path
+    return HOTSPOT_PRODUCTION_BANK_DIR / path
+
+
+def production_hotspot_residuals():
+    global _PRODUCTION_HOTSPOT_RESIDUALS
+    if _PRODUCTION_HOTSPOT_RESIDUALS is not None:
+        return _PRODUCTION_HOTSPOT_RESIDUALS
+
+    records = []
+    metadata_root = HOTSPOT_PRODUCTION_BANK_DIR / "production_approved"
+    if not metadata_root.exists():
+        _PRODUCTION_HOTSPOT_RESIDUALS = []
+        return _PRODUCTION_HOTSPOT_RESIDUALS
+
+    for meta_path in sorted(metadata_root.rglob("*.json")):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if meta.get("production_quality_status") != "PRODUCTION_APPROVED":
+            continue
+        residual_path = _resolve_hotspot_bank_path(meta.get("residual"))
+        support_path = _resolve_hotspot_bank_path(meta.get("support_mask"))
+        if not residual_path or not residual_path.exists() or not support_path or not support_path.exists():
+            continue
+        try:
+            residual = np.asarray(Image.open(residual_path).convert("L"), dtype=np.float32) / 255.0
+            support = np.asarray(Image.open(support_path).convert("L"), dtype=np.float32) / 255.0
+        except Exception:
+            continue
+        if residual.size == 0 or support.size == 0 or float(residual.max(initial=0.0)) <= 0.01 or float(support.max(initial=0.0)) <= 0.01:
+            continue
+        records.append(
+            {
+                "reference_id": meta.get("reference_id", residual_path.stem),
+                "duplicate_family_id": meta.get("duplicate_family_id"),
+                "source_dataset": meta.get("source_dataset"),
+                "morphology_family": meta.get("morphology_family", "SUBMODULE_REGION"),
+                "residual": residual,
+                "support": support,
+            }
+        )
+    _PRODUCTION_HOTSPOT_RESIDUALS = records
+    return _PRODUCTION_HOTSPOT_RESIDUALS
+
+
+def apply_production_hotspot_residual(temp, cell, fault_type, scale):
+    fault_type = canonical_fault_type(fault_type)
+    if fault_type not in HOTSPOT_FAULTS:
+        return False
+
+    residuals = production_hotspot_residuals()
+    if not residuals:
+        return False
+
+    x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, fault_type)
+    x1, y1, x2, y2 = clamp_bbox_to_field(temp, (x1, y1, x2, y2))
+    if x2 <= x1 or y2 <= y1:
+        return False
+
+    rng = np.random.default_rng(seed_for(cell.get("id", "hotspot"), fault_type, scale, "production-hotspot-v1"))
+    severity = clamp(scale, 1, 10) / 10.0
+    spot_count = 1 if fault_type == "SingleHotSpot" else int(rng.integers(2, 6))
+    used = set()
+
+    for spot_idx in range(spot_count):
+        candidates = [item for item in residuals if item["reference_id"] not in used] or residuals
+        ref = candidates[int(rng.integers(0, len(candidates)))]
+        used.add(ref["reference_id"])
+        field = np.array(ref["residual"], dtype=np.float32, copy=True)
+        support = np.array(ref["support"], dtype=np.float32, copy=True)
+        if field.size == 0 or support.size == 0:
+            continue
+
+        bw, bh = max(2, x2 - x1), max(2, y2 - y1)
+        scale_jitter = float(rng.uniform(0.82, 1.12))
+        target_w = int(clamp(round(bw * scale_jitter), 2, bw))
+        target_h = int(clamp(round(bh * scale_jitter), 2, bh))
+        field = cv2.resize(field, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+        support = cv2.resize(support, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+        field = np.clip(field, 0, 1)
+        support = np.clip(support, 0, 1)
+
+        origin_info = cell.get("fault_origin_px") if isinstance(cell, dict) else None
+        if origin_info:
+            cx = float(origin_info.get("x", (x1 + x2) / 2))
+            cy = float(origin_info.get("y", (y1 + y2) / 2))
+        else:
+            cx = (x1 + x2) / 2
+            cy = (y1 + y2) / 2
+        if fault_type == "MultiHotSpot":
+            cx += bw * float(rng.uniform(-0.28, 0.28))
+            cy += bh * float(rng.uniform(-0.24, 0.24))
+        px1 = int(clamp(round(cx - target_w / 2), x1, max(x1, x2 - target_w)))
+        py1 = int(clamp(round(cy - target_h / 2), y1, max(y1, y2 - target_h)))
+        px2, py2 = px1 + target_w, py1 + target_h
+        px1, py1, px2, py2 = clamp_bbox_to_field(temp, (px1, py1, px2, py2))
+        if px2 <= px1 or py2 <= py1:
+            continue
+
+        local_field = field[: py2 - py1, : px2 - px1]
+        local_support = support[: py2 - py1, : px2 - px1]
+        if local_field.shape != temp[py1:py2, px1:px2].shape:
+            continue
+
+        strength = (30.0 + 52.0 * severity) * float(rng.uniform(0.86, 1.12))
+        halo = cv2.GaussianBlur(local_field, (0, 0), max(0.55, min(local_field.shape) * 0.065))
+        anomaly = np.clip(local_field * 0.78 + halo * 0.34, 0, 1)
+        alpha = np.clip(np.maximum(local_support, anomaly * 0.72), 0, 0.96)
+        region = temp[py1:py2, px1:px2]
+        target = region + anomaly * strength
+        target = np.maximum(target, 206 + anomaly * (30 + 42 * severity))
+        temp[py1:py2, px1:px2] = region * (1.0 - alpha * 0.88) + target * (alpha * 0.88)
+
+    return True
+
+
+def production_submodule_enabled(fault_type):
+    global _PRODUCTION_SUBMODULE_ENABLED
+    fault_type = canonical_fault_type(fault_type)
+    if fault_type not in SUBMODULE_FAULT_BANKS:
+        return False
+    if _PRODUCTION_SUBMODULE_ENABLED is None:
+        if not SUBMODULE_FAULT_ENABLED_PATH.exists():
+            _PRODUCTION_SUBMODULE_ENABLED = {}
+        else:
+            try:
+                _PRODUCTION_SUBMODULE_ENABLED = json.loads(SUBMODULE_FAULT_ENABLED_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                _PRODUCTION_SUBMODULE_ENABLED = {}
+    return bool(_PRODUCTION_SUBMODULE_ENABLED.get("enabled", {}).get(fault_type))
+
+
+def production_submodule_signals(fault_type):
+    fault_type = canonical_fault_type(fault_type)
+    if fault_type in _PRODUCTION_SUBMODULE_SIGNALS:
+        return _PRODUCTION_SUBMODULE_SIGNALS[fault_type]
+    bank_dir = SUBMODULE_FAULT_BANKS.get(fault_type)
+    if not bank_dir:
+        _PRODUCTION_SUBMODULE_SIGNALS[fault_type] = []
+        return []
+    index_path = bank_dir / "production_signal_index.json"
+    if not index_path.exists():
+        _PRODUCTION_SUBMODULE_SIGNALS[fault_type] = []
+        return []
+    try:
+        rows = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception:
+        _PRODUCTION_SUBMODULE_SIGNALS[fault_type] = []
+        return []
+    records = []
+    for row in rows:
+        if row.get("production_quality_status") != "PRODUCTION_APPROVED":
+            continue
+        try:
+            field_path = bank_dir / row["field"]
+            support_path = bank_dir / row["support_mask"]
+            field = np.asarray(Image.open(field_path).convert("L"), dtype=np.float32) / 255.0
+            support = np.asarray(Image.open(support_path).convert("L"), dtype=np.float32) / 255.0
+        except Exception:
+            continue
+        if field.size == 0 or support.size == 0 or float(field.max(initial=0.0)) <= 0.02 or float(support.max(initial=0.0)) <= 0.02:
+            continue
+        item = dict(row)
+        item["field_array"] = field
+        item["support_array"] = support
+        records.append(item)
+    _PRODUCTION_SUBMODULE_SIGNALS[fault_type] = records
+    return records
+
+
+def selected_production_submodule_signal(fault_type, cell, scale):
+    records = production_submodule_signals(fault_type)
+    if not records:
+        return None
+    rng = np.random.default_rng(seed_for(cell.get("id", "submodule"), fault_type, scale, "production-submodule-ref"))
+    families_used = set()
+    ordered = []
+    for _ in range(min(len(records), 7)):
+        ref = records[int(rng.integers(0, len(records)))]
+        family = ref.get("duplicate_family_id") or ref.get("reference_id")
+        if family in families_used and len(families_used) < len(records):
+            continue
+        families_used.add(family)
+        ordered.append(ref)
+    return ordered[0] if ordered else records[int(rng.integers(0, len(records)))]
+
+
+def submodule_target_bbox(cell, fault_type, ref, rng):
+    active = cell.get("active_module_bbox_px") if isinstance(cell, dict) else None
+    module = cell.get("module_bbox_px") if isinstance(cell, dict) else None
+    if active:
+        ax1 = int(active.get("x1", cell.get("x1", 0)))
+        ay1 = int(active.get("y1", cell.get("y1", 0)))
+        ax2 = int(active.get("x2", cell.get("x2", 0)))
+        ay2 = int(active.get("y2", cell.get("y2", 0)))
+    elif module:
+        ax1 = int(module.get("x1", cell.get("x1", 0)))
+        ay1 = int(module.get("y1", cell.get("y1", 0)))
+        ax2 = int(module.get("x2", cell.get("x2", 0)))
+        ay2 = int(module.get("y2", cell.get("y2", 0)))
+    else:
+        ax1, ay1, ax2, ay2 = int(cell["x1"]), int(cell["y1"]), int(cell["x2"]), int(cell["y2"])
+    aw, ah = max(2, ax2 - ax1), max(2, ay2 - ay1)
+    cell_col = int(cell.get("module_cell_col") or 3)
+    cell_row = int(cell.get("module_cell_row") or 4)
+    origin = cell.get("fault_origin_px") if isinstance(cell, dict) else None
+    ox = float(origin.get("x", ax1 + aw * (cell_col - 0.5) / CUSTOM_MODULE_CELL_COLS)) if origin else ax1 + aw * (cell_col - 0.5) / CUSTOM_MODULE_CELL_COLS
+    oy = float(origin.get("y", ay1 + ah * (cell_row - 0.5) / CUSTOM_MODULE_CELL_ROWS)) if origin else ay1 + ah * (cell_row - 0.5) / CUSTOM_MODULE_CELL_ROWS
+
+    ref_w = clamp(float(ref.get("width_fraction", 0.24)), 0.04, 0.82)
+    ref_h = clamp(float(ref.get("height_fraction", 0.36)), 0.04, 0.92)
+    if fault_type == "SingleByPassed":
+        section_w = clamp(float(rng.triangular(0.22, 0.29, 0.38)), 0.22, 0.38)
+        section_h = clamp(float(rng.triangular(0.74, 0.88, 0.98)), 0.74, 0.98)
+        target_w = int(max(3, aw * section_w))
+        target_h = int(max(3, ah * section_h))
+        section_centers = np.linspace(ax1 + aw * 0.14, ax2 - aw * 0.14, 5)
+        target_cx = float(section_centers[max(0, min(4, cell_col - 1))])
+        target_cx += aw * float(rng.uniform(-0.025, 0.025))
+        target_cy = ay1 + ah * 0.50 + ah * float(rng.uniform(-0.015, 0.015))
+    else:
+        target_w = int(max(3, aw * clamp(ref_w * float(rng.uniform(0.90, 1.18)), 0.16, 0.72)))
+        target_h = int(max(3, ah * clamp(ref_h * float(rng.uniform(0.84, 1.14)), 0.08, 0.46)))
+        if target_w < target_h * 0.75:
+            target_w = int(min(aw * 0.72, max(target_w, target_h * float(rng.uniform(1.0, 1.7)))))
+        target_cx = clamp(ox + aw * float(rng.uniform(-0.06, 0.06)), ax1 + target_w / 2, ax2 - target_w / 2)
+        target_cy = clamp(oy + ah * float(rng.uniform(-0.05, 0.05)), ay1 + target_h / 2, ay2 - target_h / 2)
+
+    x1 = int(clamp(round(target_cx - target_w / 2), ax1, ax2 - target_w))
+    y1 = int(clamp(round(target_cy - target_h / 2), ay1, ay2 - target_h))
+    return x1, y1, x1 + target_w, y1 + target_h
+
+
+def apply_production_submodule_fault_signal(temp, cell, fault_type, scale):
+    fault_type = canonical_fault_type(fault_type)
+    if fault_type not in {"SingleDiode", "SingleByPassed"}:
+        return False
+    if not production_submodule_enabled(fault_type):
+        return False
+    ref = selected_production_submodule_signal(fault_type, cell, scale)
+    if not ref:
+        return False
+
+    rng = np.random.default_rng(seed_for(cell.get("id", "submodule"), fault_type, scale, ref.get("reference_id", "ref")))
+    x1, y1, x2, y2 = submodule_target_bbox(cell, fault_type, ref, rng)
+    x1, y1, x2, y2 = clamp_bbox_to_field(temp, (x1, y1, x2, y2))
+    if x2 <= x1 or y2 <= y1:
+        return False
+    w, h = x2 - x1, y2 - y1
+
+    field = cv2.resize(np.array(ref["field_array"], dtype=np.float32, copy=True), (w, h), interpolation=cv2.INTER_CUBIC)
+    support = cv2.resize(np.array(ref["support_array"], dtype=np.float32, copy=True), (w, h), interpolation=cv2.INTER_CUBIC)
+    field = np.clip(field, 0, 1)
+    support = np.clip(support, 0, 1)
+    if float(field.max(initial=0.0)) <= 0.02 or float(support.max(initial=0.0)) <= 0.02:
+        return False
+
+    severity = clamp(scale, 1, 10) / 10.0
+    local_noise = smooth_unit_field((h, w), seed_for(cell.get("id", "submodule"), fault_type, scale, "target-panel-only-noise"), max(1.0, min(w, h) * 0.20), octaves=2)
+    low = cv2.GaussianBlur(field, (0, 0), max(0.55, min(w, h) * (0.070 if fault_type == "SingleDiode" else 0.090)))
+    if fault_type == "SingleDiode":
+        anomaly = np.clip(field * 0.62 + low * 0.34 + local_noise * support * 0.08, 0, 1)
+        strength = (18.0 + 38.0 * severity) * float(rng.uniform(0.86, 1.12))
+        alpha = np.clip(np.maximum(support * 0.78, anomaly * 0.56), 0, 0.86)
+        shoulder = cv2.GaussianBlur(support, (0, 0), max(0.85, min(w, h) * 0.12))
+        adjacent_lift = np.clip(shoulder - support * 0.45, 0, 1) * (4.0 + 8.0 * severity)
+    else:
+        anomaly = np.clip(low * 0.76 + field * 0.18 + local_noise * support * 0.06, 0, 1)
+        strength = (10.0 + 27.0 * severity) * float(rng.uniform(0.84, 1.08))
+        alpha = np.clip(np.maximum(support * 0.64, anomaly * 0.44), 0, 0.78)
+        adjacent_lift = 0
+
+    region = temp[y1:y2, x1:x2]
+    target = region + anomaly * strength + adjacent_lift
+    temp[y1:y2, x1:x2] = region * (1.0 - alpha) + target * alpha
+    return True
+
+
 def blend_temp_patch(temp, box, patch, alpha):
     x1, y1, x2, y2 = box
     h, w = temp.shape
@@ -797,6 +1100,10 @@ def apply_thermal_fault(temp, cell, fault_type, scale):
     if cell is None:
         return temp
     fault_type = canonical_fault_type(fault_type)
+    if apply_production_hotspot_residual(temp, cell, fault_type, scale):
+        return temp
+    if apply_production_submodule_fault_signal(temp, cell, fault_type, scale):
+        return temp
     if apply_real_thermal_fault_patch(temp, cell, fault_type, scale):
         return temp
     x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, fault_type)

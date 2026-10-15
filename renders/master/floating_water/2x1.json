@@ -1,0 +1,257 @@
+{
+  "field_width": 8.470207611072297,
+  "field_depth": 5.679356842528266,
+  "ground_width": 22.170207611072296,
+  "ground_depth": 19.379356842528267,
+  "bounds": [
+    -4.414358155980699,
+    4.415849455091597,
+    -3.0587189143107505,
+    3.0606379282175156,
+    -0.05,
+    0.8183808729429349
+  ],
+  "counts": {
+    "arrays": 2,
+    "modules": 8,
+    "cells": 320,
+    "cells_per_array": 160,
+    "modules_per_array": 4
+  },
+  "topology": {
+    "topology_mode": "realistic",
+    "topology_type": "VARIABLE_ROW_GAP",
+    "requested_rows": 2,
+    "nominal_arrays_per_row": 1,
+    "target_total_arrays": 2,
+    "row_capacity": 3,
+    "row_lengths": [
+      1,
+      1
+    ],
+    "occupied_slots": [
+      [
+        0
+      ],
+      [
+        0
+      ]
+    ],
+    "total_arrays": 2,
+    "seed": 14233,
+    "orientation_strategy": "row",
+    "string_count": 1,
+    "electrical_strings": [
+      {
+        "string_id": 1,
+        "array_count": 2,
+        "module_count": 8,
+        "array_keys": [
+          [
+            1,
+            1
+          ],
+          [
+            2,
+            1
+          ]
+        ],
+        "start_row": 1,
+        "end_row": 2,
+        "start_x": 2.78964,
+        "start_y": 1.71337,
+        "end_x": -2.78964,
+        "end_y": -1.71337,
+        "temperature_bias_c": 1.3627
+      }
+    ],
+    "row_strings": [
+      {
+        "row_id": 1,
+        "count": 1,
+        "start_x": 2.78966,
+        "start_y": 1.73537,
+        "heading_deg": -0.04508,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [],
+        "gap_from_previous_row_m": null,
+        "row_length_m": 0.0,
+        "slot_indices": [
+          0
+        ],
+        "orientation": "landscape",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245
+      },
+      {
+        "row_id": 2,
+        "count": 1,
+        "start_x": -2.78978,
+        "start_y": -1.7553,
+        "heading_deg": -0.18687,
+        "nominal_gap_m": 1.75,
+        "actual_gaps_m": [],
+        "gap_from_previous_row_m": 1.24568,
+        "row_length_m": 0.0,
+        "slot_indices": [
+          0
+        ],
+        "orientation": "landscape",
+        "row_string_id": null,
+        "electrical_string_ids": [
+          1
+        ],
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245
+      }
+    ],
+    "array_transforms": [
+      {
+        "array_id": 1,
+        "row": 1,
+        "col": 1,
+        "slot": 1,
+        "x": 2.78964,
+        "y": 1.71337,
+        "yaw_deg": -0.18974,
+        "along_track_m": 0.0,
+        "cross_track_m": -0.02201,
+        "orientation": "landscape",
+        "string_id": 1,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 1,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 2,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 3,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 4,
+            "array_id": 1,
+            "row_id": 1,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      },
+      {
+        "array_id": 2,
+        "row": 2,
+        "col": 1,
+        "slot": 1,
+        "x": -2.78964,
+        "y": -1.71337,
+        "yaw_deg": -0.11336,
+        "along_track_m": 0.0,
+        "cross_track_m": 0.04194,
+        "orientation": "landscape",
+        "string_id": 1,
+        "array_width_m": 2.885,
+        "array_depth_m": 2.245,
+        "modules": [
+          {
+            "module_id": 5,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 1
+          },
+          {
+            "module_id": 6,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 2
+          },
+          {
+            "module_id": 7,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 3
+          },
+          {
+            "module_id": 8,
+            "array_id": 2,
+            "row_id": 2,
+            "string_id": 1,
+            "module_number_in_array": 4
+          }
+        ]
+      }
+    ]
+  },
+  "composite": {
+    "background": "assets/bg_floating_water.png",
+    "safe_region": [
+      0.12,
+      0.13,
+      0.88,
+      0.86
+    ],
+    "background_is_immutable": true,
+    "location_id": "floating_water",
+    "safe_region_px": [
+      369,
+      266,
+      2703,
+      1761
+    ],
+    "safe_region_normalized": [
+      0.12,
+      0.13,
+      0.88,
+      0.86
+    ],
+    "source_visible_bbox_px": [
+      0,
+      0,
+      3072,
+      2048
+    ],
+    "source_measured_cluster_bbox_px": [
+      364,
+      124,
+      2759,
+      1782
+    ],
+    "source_crop_bbox_px": [
+      304,
+      64,
+      2819,
+      1842
+    ],
+    "final_scaled_cluster_bbox_px": [
+      605,
+      355,
+      2466,
+      1671
+    ],
+    "alpha_threshold": 96,
+    "raw_scale_to_safe_region": 0.8408323959505062,
+    "fit_factor": 0.88,
+    "applied_uniform_scale": 0.7399325084364454,
+    "debug_overlay": "2x1_placement.png"
+  }
+}
