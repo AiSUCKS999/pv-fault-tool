@@ -156,10 +156,33 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale):
     if x2 <= x1 or y2 <= y1:
         return False
 
+    # A far-view cell can project to only a few source pixels. The thermal
+    # sensor model downsamples that footprint again, which previously reduced
+    # approved residuals to zero while still reporting that they were applied.
+    # Give the anomaly a small, module-relative sensor footprint while keeping
+    # its center anchored to the selected cell.
+    module_box = cell.get("active_module_bbox_px") or cell.get("module_bbox_px") or {}
+    mx1 = int(module_box.get("x1", x1))
+    my1 = int(module_box.get("y1", y1))
+    mx2 = int(module_box.get("x2", x2))
+    my2 = int(module_box.get("y2", y2))
+    mx1, my1, mx2, my2 = clamp_bbox_to_field(temp, (mx1, my1, mx2, my2))
+    if mx2 > mx1 and my2 > my1:
+        module_w, module_h = mx2 - mx1, my2 - my1
+        footprint_w = min(module_w, max(x2 - x1, 12, int(round(module_w * 0.28))))
+        footprint_h = min(module_h, max(y2 - y1, 10, int(round(module_h * 0.28))))
+        origin_info = cell.get("fault_origin_px") if isinstance(cell, dict) else None
+        center_x = float(origin_info.get("x", (x1 + x2) / 2)) if origin_info else (x1 + x2) / 2
+        center_y = float(origin_info.get("y", (y1 + y2) / 2)) if origin_info else (y1 + y2) / 2
+        x1 = int(clamp(round(center_x - footprint_w / 2), mx1, max(mx1, mx2 - footprint_w)))
+        y1 = int(clamp(round(center_y - footprint_h / 2), my1, max(my1, my2 - footprint_h)))
+        x2, y2 = x1 + footprint_w, y1 + footprint_h
+
     rng = np.random.default_rng(seed_for(cell.get("id", "hotspot"), fault_type, scale, "production-hotspot-v1"))
     severity = clamp(scale, 1, 10) / 10.0
     spot_count = 1 if fault_type == "SingleHotSpot" else int(rng.integers(2, 6))
     used = set()
+    applied = False
 
     for spot_idx in range(spot_count):
         candidates = [item for item in residuals if item["reference_id"] not in used] or residuals
@@ -201,16 +224,25 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale):
         if local_field.shape != temp[py1:py2, px1:px2].shape:
             continue
 
-        strength = (30.0 + 52.0 * severity) * float(rng.uniform(0.86, 1.12))
-        halo = cv2.GaussianBlur(local_field, (0, 0), max(0.55, min(local_field.shape) * 0.065))
-        anomaly = np.clip(local_field * 0.78 + halo * 0.34, 0, 1)
-        alpha = np.clip(np.maximum(local_support, anomaly * 0.72), 0, 0.96)
+        strength = (34.0 + 58.0 * severity) * float(rng.uniform(0.90, 1.12))
+        halo_sigma = max(1.0, min(local_field.shape) * 0.14)
+        halo = cv2.GaussianBlur(local_field, (0, 0), halo_sigma)
+        halo_peak = float(halo.max(initial=0.0))
+        if halo_peak > 0.01:
+            halo = halo / halo_peak
+        support_halo = cv2.GaussianBlur(local_support, (0, 0), halo_sigma * 1.15)
+        support_peak = float(support_halo.max(initial=0.0))
+        if support_peak > 0.01:
+            support_halo = support_halo / support_peak
+        anomaly = np.clip(np.maximum(local_field * 0.88, halo * 0.72), 0, 1)
+        alpha = np.clip(np.maximum.reduce((local_support, support_halo * 0.68, anomaly * 0.82)), 0, 0.98)
         region = temp[py1:py2, px1:px2]
         target = region + anomaly * strength
-        target = np.maximum(target, 206 + anomaly * (30 + 42 * severity))
+        target = np.maximum(target, 212 + anomaly * (34 + 44 * severity))
         temp[py1:py2, px1:px2] = region * (1.0 - alpha * 0.88) + target * (alpha * 0.88)
+        applied = True
 
-    return True
+    return applied
 
 
 def production_submodule_enabled(fault_type):

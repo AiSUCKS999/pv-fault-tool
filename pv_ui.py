@@ -2012,6 +2012,27 @@ def rendered_fault_cell_from_record(location_id, record, selected_row_id, select
     }
 
 
+def smooth_thermal_array_field(size, seed, panel_min, panel_max):
+    """Create a natural low-frequency panel field without a drawn cell grid."""
+    width, height = size
+    rng = np.random.default_rng(seed)
+    normal_high = max(panel_min + 5.0, panel_max - 10.0)
+    midpoint = float(rng.uniform(panel_min + 2.0, normal_high))
+    field = np.full((height, width), midpoint, dtype=np.float32)
+    texture = smooth_unit_field(
+        (height, width),
+        seed_for(seed, "smooth-array-texture"),
+        max(2.0, min(width, height) * 0.24),
+        octaves=2,
+    )
+    field += (texture - 0.5) * 7.0
+    field += np.linspace(-1.8, 1.8, width, dtype=np.float32)[None, :]
+    field += np.linspace(1.4, -1.4, height, dtype=np.float32)[:, None]
+    field += rng.normal(0, 0.32, (height, width)).astype(np.float32)
+    field = cv2.GaussianBlur(field, (0, 0), max(0.75, min(width, height) * 0.018))
+    return np.clip(field, panel_min - 5.0, panel_max - 7.0).astype(np.float32)
+
+
 def solar_render_thermal_base_field(location_id, rendered):
     rgb = np.asarray(rendered.convert("RGB")).astype(np.float32)
     gray = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32)
@@ -2092,15 +2113,14 @@ def solar_render_thermal_base_field(location_id, rendered):
         if x2 <= x1 or y2 <= y1:
             continue
         local_w, local_h = x2 - x1, y2 - y1
-        local_panel = procedural_thermal_panel_row(
+        local_panel = smooth_thermal_array_field(
             (local_w, local_h),
-            SOLAR_PANEL_MODULES,
             seed_for(location_id, key, "rendered-original-thermal-array"),
             panel_min,
             panel_max,
         )
-        grad_x = np.linspace(-3.5, 3.5, local_w, dtype=np.float32)[None, :]
-        grad_y = np.linspace(2.0, -2.0, local_h, dtype=np.float32)[:, None]
+        grad_x = np.linspace(-1.8, 1.8, local_w, dtype=np.float32)[None, :]
+        grad_y = np.linspace(1.2, -1.2, local_h, dtype=np.float32)[:, None]
         local_panel = np.clip(local_panel + grad_x + grad_y, panel_min - 16, panel_max + 8)
         local_mask = panel_mask[y1:y2, x1:x2]
         temp[y1:y2, x1:x2] = temp[y1:y2, x1:x2] * (1.0 - local_mask) + local_panel * local_mask
@@ -2113,10 +2133,16 @@ def thermal_display_rgb_from_scalar(temp, location_id, scene_distance="far"):
     temp = np.asarray(temp, dtype=np.float32)
     if temp.size == 0:
         return Image.fromarray(np.zeros((1, 1, 3), dtype=np.uint8))
-    low_pct, high_pct = (1.0, 99.35) if str(scene_distance).lower() == "far" else (1.0, 99.80)
+    # Far-view hotspots occupy far less than one percent of the image. Keeping
+    # the old 99.35 percentile clipped them to the same hue as healthy panels.
+    low_pct, high_pct = (1.0, 99.995) if str(scene_distance).lower() == "far" else (1.0, 99.80)
     low, high = np.percentile(temp, [low_pct, high_pct])
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
         low, high = float(np.min(temp)), float(np.max(temp))
+    if str(scene_distance).lower() == "far":
+        # Reserve the yellow/cream end of the palette for actual anomalies.
+        # Healthy panels normally occupy the orange range around 160-190.
+        high = max(float(high), 238.0)
     min_span = 72.0 if str(scene_distance).lower() == "far" else 64.0
     if high - low < min_span:
         mid = (high + low) / 2.0
