@@ -182,6 +182,15 @@ def main():
     assert not invalid_accepted and len(invalid_blocked) == 1
     totals["blocked_polygons"] += 1
     (OUTPUT / "warnings_summary.json").write_text(json.dumps(warning_rows, indent=2), encoding="utf-8")
+    warning_lines = ["# Warning-only geometry summary", "", "These warnings never block mechanically valid manual geometry.", ""]
+    if warning_rows:
+        warning_lines.extend(["| Case | Module | Visual score | Warning codes |", "|---|---|---:|---|"])
+        for row in warning_rows:
+            codes = ", ".join(item.get("code", "unknown") for item in row["warnings"])
+            warning_lines.append(f"| `{row['case']}` | `{row['module_id']}` | {row['visual_score']:.4f} | {codes} |")
+    else:
+        warning_lines.append("No warning-only polygons were produced.")
+    (OUTPUT / "warnings_summary.md").write_text("\n".join(warning_lines) + "\n", encoding="utf-8")
     (OUTPUT / "summary.json").write_text(json.dumps(totals, indent=2), encoding="utf-8")
     if first_low_images:
         before = first_low_images[0].copy()
@@ -197,13 +206,18 @@ def main():
         comparison.save(OUTPUT / "before_after_low_texture.jpg", quality=92)
     lines = [
         "# Real Farm robust mask generation report", "",
-        "Manual quadrilateral geometry is authoritative. Mechanical validity is the only generation gate; RGB material confidence is advisory.", "",
+        "## Root cause", "",
+        "The previous workflow used `real_farm_module_visual_score >= 0.43` as a hard acceptance gate. That RGB color heuristic rejected valid manual polygons under low contrast, vegetation-like color, glare, roofs, water, and unusual panel appearance. It incorrectly made visual material confidence authoritative.", "",
+        "## New acceptance semantics", "",
+        "Manual quadrilateral geometry is authoritative. Mechanical validity is the only generation gate. RGB material confidence is stored as advisory `visually_supported` metadata and a warning. Orientation is derived as metadata and never grants permission. Every accepted quadrilateral is rectified to canonical module space; the unchanged production fault engines run there and their scalar deltas are warped back and clipped by the true polygon mask.", "",
+        "Hard blockers are limited to nonfinite or malformed geometry, duplicate/degenerate points, self-intersection, insufficient area, less than 5% image coverage, and impossible homography. Aspect ratio, perspective, boundary proximity, orientation ambiguity, and weak PV texture are warning or information tiers.", "",
+        "## Case results", "",
         "| Case | Category | Valid | Blocked | Warning-only | Result |", "|---|---|---:|---:|---:|---|",
     ]
     lines.extend(f"| `{slug}` | {title} | {valid} | {blocked} | {warnings} | {result} |" for slug, title, valid, blocked, warnings, result in case_rows)
     lines.extend(["", "## Totals", ""])
     lines.extend(f"- {key.replace('_', ' ').title()}: **{value}**" for key, value in totals.items())
-    lines.extend(["", "The blocked count is the deliberately degenerate hard-invalid control. All valid manual polygons produced one mask and all three requested production-fault renderings.", ""])
+    lines.extend(["", "The blocked count is the deliberately degenerate hard-invalid control. All valid manual polygons produced one mask and all three requested production-fault renderings.", "", "## Output contents", "", "Each case folder contains `original_rgb.png`, `polygon_overlay.png`, `canonical_rectified_modules.png`, `pv_union_mask.png`, `thermal_proxy.png`, `hotspot.png`, `bypass_diode.png`, `bypassed_substring.png`, and `qa_sheet.jpg`. `before_after_low_texture.jpg` demonstrates the previously blocked low-texture case now succeeding. `warnings_summary.md` and `warnings_summary.json` preserve the advisory diagnostics.", ""])
     (OUTPUT / "geometry_acceptance_report.md").write_text("\n".join(lines), encoding="utf-8")
     print(json.dumps({"result": "PASS", "output": str(OUTPUT), **totals}, indent=2))
 
