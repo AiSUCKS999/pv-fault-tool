@@ -2284,23 +2284,66 @@ def scalar_fault_delta_metrics(healthy, faulted, rendered_cell, support_mask=Non
     }
 
 
+def close_fault_visibility_cell(cell, fault_type):
+    """Expand only the close-view display footprint while keeping the stored target cell unchanged."""
+    fault_type = canonical_fault_type(fault_type)
+    item = dict(cell)
+    module_box = item.get("module_bbox_px") or item.get("fault_bbox_px") or {}
+    mx1 = int(module_box.get("x1", item["x1"]))
+    my1 = int(module_box.get("y1", item["y1"]))
+    mx2 = int(module_box.get("x2", item["x2"]))
+    my2 = int(module_box.get("y2", item["y2"]))
+    cx1, cy1, cx2, cy2 = int(item["x1"]), int(item["y1"]), int(item["x2"]), int(item["y2"])
+    cell_w, cell_h = max(2, cx2 - cx1), max(2, cy2 - cy1)
+
+    if fault_type in SOILING_FAULTS:
+        pad_x, pad_y = 2.3 * cell_w, 2.4 * cell_h
+    elif fault_type in SURFACE_OBSTRUCTION_FAULTS:
+        pad_x, pad_y = 1.35 * cell_w, 1.65 * cell_h
+    elif fault_type in CRACKING_FAULTS:
+        pad_x, pad_y = 0.35 * cell_w, 0.45 * cell_h
+    else:
+        return item
+
+    bounds = {
+        "x1": int(clamp(round(cx1 - pad_x), mx1, mx2)),
+        "y1": int(clamp(round(cy1 - pad_y), my1, my2)),
+        "x2": int(clamp(round(cx2 + pad_x), mx1, mx2)),
+        "y2": int(clamp(round(cy2 + pad_y), my1, my2)),
+    }
+    item.update(bounds)
+    item["fault_bbox_px"] = dict(bounds)
+    return item
+
+
 def finalize_solar_render_thermal_image(location_id, base_temp, array_geometries, selected_row_id, selected_cell_id, fault_records=None, scene_distance="far"):
     temp = np.array(base_temp, dtype=np.float32, copy=True)
     records = fault_records or []
+    close_visibility_tints = []
     if records:
         for record in records:
             cell = rendered_fault_cell_from_record(location_id, record, selected_row_id, selected_cell_id, array_geometries)
             if cell is None:
                 continue
+            fault_type = canonical_fault_type(record["fault_type"])
+            fault_scale = record.get("fault_scale", DEFAULT_FAULT_SCALE)
             temp = apply_thermal_fault(
                 temp,
                 cell,
-                record["fault_type"],
-                record.get("fault_scale", DEFAULT_FAULT_SCALE),
+                fault_type,
+                fault_scale,
             )
+            if str(scene_distance).lower() == "close" and fault_type in (
+                SURFACE_OBSTRUCTION_FAULTS | SOILING_FAULTS | CRACKING_FAULTS
+            ):
+                close_visibility_tints.append((close_fault_visibility_cell(cell, fault_type), fault_type, fault_scale))
 
     temp = apply_sensor_model(temp, location_id, scene_distance)
-    return thermal_display_rgb_from_scalar(temp, location_id, scene_distance)
+    thermal_image = thermal_display_rgb_from_scalar(temp, location_id, scene_distance)
+    if close_visibility_tints:
+        thermal_rgb = apply_thermal_fault_tints(np.asarray(thermal_image.convert("RGB")), close_visibility_tints)
+        thermal_image = Image.fromarray(thermal_rgb)
+    return thermal_image
 
 
 def solar_render_thermal_image(location_id, rendered, selected_row_id, selected_cell_id, fault_records=None, scene_distance="far"):

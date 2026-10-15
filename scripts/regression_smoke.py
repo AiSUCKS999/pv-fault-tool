@@ -77,9 +77,66 @@ def assert_scene(namespace, location_id, rows, arrays):
     crop, *_ = namespace["crop_natural_module_image"](thermal, rgb.size, regions[0], 1, 0.62)
     assert crop.width > 0 and crop.height > 0, f"{location_id} {rows}x{arrays}: empty module crop"
 
+    if location_id == "grass_open" and rows == 3 and arrays == 3:
+        assert_close_fault_visibility(namespace, location_id, location, regions[0])
+
     if rows == 6 and arrays == 6:
         assert_random_fault_origins(namespace, location_id, location, regions)
         assert_fault_matrix(namespace, location_id, location, regions)
+
+
+def assert_close_fault_visibility(namespace, location_id, location, region):
+    row_id, target_cell = namespace["default_cell_for_array"](
+        location_id,
+        int(region["row"]),
+        int(region["col"]),
+        4,
+        18,
+    )
+    row = namespace["row_by_id"](location_id, row_id)
+    healthy = namespace["module_field_image"](
+        location_id,
+        "thermal",
+        row_id,
+        target_cell["id"],
+        [],
+        False,
+        "close",
+    ).convert("RGB")
+    healthy_crop, *_ = namespace["crop_array_from_module_union"](
+        healthy,
+        region,
+        0.14,
+        target_width=1280,
+        max_scale=16,
+    )
+    healthy_pixels = np.asarray(healthy_crop, dtype=np.float32)
+
+    for fault_type in ("SoilingDust", "CellCracking", "SurfaceObstruction"):
+        record = namespace["fault_record"](location, "thermal", row, target_cell, fault_type, 8)
+        faulted = namespace["module_field_image"](
+            location_id,
+            "thermal",
+            row_id,
+            target_cell["id"],
+            [record],
+            False,
+            "close",
+        ).convert("RGB")
+        faulted_crop, *_ = namespace["crop_array_from_module_union"](
+            faulted,
+            region,
+            0.14,
+            target_width=1280,
+            max_scale=16,
+        )
+        diff = np.linalg.norm(np.asarray(faulted_crop, dtype=np.float32) - healthy_pixels, axis=2)
+        changed_pixels = int(np.count_nonzero(diff > 18.0))
+        p999_delta = float(np.percentile(diff, 99.9))
+        assert changed_pixels >= 1200 and p999_delta >= 28.0, (
+            f"{fault_type} is not visible in the final close-view crop: "
+            f"changed_pixels={changed_pixels}, p99.9_delta={p999_delta:.2f}"
+        )
 
 
 def assert_random_fault_origins(namespace, location_id, location, regions):

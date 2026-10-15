@@ -1007,9 +1007,11 @@ def apply_surface_obstruction_rgb_tint(output, cell, scale):
     hot = cv2.GaussianBlur(edge, (0, 0), max(0.35, min(local_w, local_h) * 0.012))
     hot = np.clip(hot * 0.24, 0, 0.22)
 
+    # Keep the obstruction coherent across the close-view panel surface. Strong
+    # seam preservation made the mask look like a tiny regular cell grid.
     preserve = panel_segmentation_preserve_mask(output.shape, cell)[y1:y2, x1:x2]
-    visible_shadow = np.clip(shadow * (1.0 - preserve * 0.72), 0, 1)
-    visible_hot = np.clip(hot * (1.0 - preserve * 0.50), 0, 1)
+    visible_shadow = np.clip(shadow * (1.0 - preserve * 0.12), 0, 1)
+    visible_hot = np.clip(hot * (1.0 - preserve * 0.10), 0, 1)
 
     region = output[y1:y2, x1:x2]
     cool_color = np.array([62, 18, 122], dtype=np.float32)
@@ -1022,6 +1024,47 @@ def apply_surface_obstruction_rgb_tint(output, cell, scale):
     region = region * (1 - warm_alpha) + warm_color * warm_alpha
     core_alpha = (np.clip((visible_hot - 0.34) / 0.30, 0, 1) * (0.02 + 0.03 * severity))[..., None]
     region = region * (1 - core_alpha) + white_hot * core_alpha
+    output[y1:y2, x1:x2] = region
+    return output
+
+
+def apply_soiling_rgb_tint(output, cell, scale):
+    height, width = output.shape[:2]
+    x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, "SoilingDust")
+    x1, x2 = clamp(x1, 0, width), clamp(x2, 0, width)
+    y1, y2 = clamp(y1, 0, height), clamp(y2, 0, height)
+    if x2 <= x1 or y2 <= y1:
+        return output
+
+    local_w, local_h = x2 - x1, y2 - y1
+    severity = clamp(scale, 1, 10) / 10
+    seed = seed_for(cell["id"], scale, "close-soiling-rgb")
+    broad = smooth_unit_field(
+        (local_h, local_w),
+        seed,
+        max(1.0, min(local_w, local_h) * 0.24),
+        octaves=3,
+    )
+    fine = smooth_unit_field(
+        (local_h, local_w),
+        seed_for(seed, "fine"),
+        max(0.8, min(local_w, local_h) * 0.055),
+        octaves=2,
+    )
+    dust = np.clip((broad - 0.30) / 0.54, 0, 1)
+    dust = np.clip(dust * (0.72 + fine * 0.42), 0, 1)
+    dust *= np.linspace(0.62, 1.0, local_h, dtype=np.float32)[:, None]
+    dust *= cell_edge_feather(local_w, local_h, strength=4.2)
+    dust = cv2.GaussianBlur(dust.astype(np.float32), (0, 0), max(0.55, min(local_w, local_h) * 0.030))
+
+    region = output[y1:y2, x1:x2]
+    cool_color = np.array([66, 22, 104], dtype=np.float32)
+    dust_alpha = (dust * (0.48 + 0.22 * severity))[..., None]
+    region = region * (1 - dust_alpha) + cool_color * dust_alpha
+
+    specks = np.clip((fine - 0.72) / 0.24, 0, 1) * dust
+    speck_alpha = (specks * (0.12 + 0.10 * severity))[..., None]
+    region = region * (1 - speck_alpha) + np.array([42, 14, 72], dtype=np.float32) * speck_alpha
     output[y1:y2, x1:x2] = region
     return output
 
@@ -1072,6 +1115,31 @@ def apply_cell_cracking_rgb_tint(output, cell, scale):
     region = region * (1 - warm_alpha) + warm_color * warm_alpha
     core_alpha = (np.clip((visible_hot - 0.52) / 0.30, 0, 1) * (0.26 + 0.14 * severity))[..., None]
     region = region * (1 - core_alpha) + white_hot * core_alpha
+
+    # Add a deterministic fracture path after palette mapping so a crack stays
+    # legible in the complete four-module close view instead of becoming a blob.
+    rng = np.random.default_rng(seed_for(cell["id"], scale, "close-crack-path"))
+    path = []
+    for index in range(9):
+        t = index / 8.0
+        px = int(round(local_w * (0.12 + 0.76 * t)))
+        py = int(round(local_h * (0.28 + 0.44 * t + rng.normal(0, 0.055))))
+        path.append((clamp(px, 0, local_w - 1), clamp(py, 0, local_h - 1)))
+    fracture = np.zeros((local_h, local_w), dtype=np.float32)
+    cv2.polylines(
+        fracture,
+        [np.asarray(path, dtype=np.int32)],
+        False,
+        1.0,
+        max(1, int(round(min(local_w, local_h) * 0.045))),
+        lineType=cv2.LINE_AA,
+    )
+    fracture_core = cv2.GaussianBlur(fracture, (0, 0), max(0.30, min(local_w, local_h) * 0.012))
+    fracture_halo = cv2.GaussianBlur(fracture, (0, 0), max(0.65, min(local_w, local_h) * 0.085))
+    halo_alpha = (fracture_halo * (0.54 + 0.18 * severity))[..., None]
+    region = region * (1 - halo_alpha) + warm_color * halo_alpha
+    line_alpha = (fracture_core * (0.82 + 0.14 * severity))[..., None]
+    region = region * (1 - line_alpha) + np.array([58, 8, 82], dtype=np.float32) * line_alpha
     output[y1:y2, x1:x2] = region
     return output
 
@@ -1086,6 +1154,9 @@ def apply_thermal_fault_tints(thermal_rgb, tint_items):
             continue
         if canonical_fault_type(fault_type) in CRACKING_FAULTS:
             output = apply_cell_cracking_rgb_tint(output, cell, scale)
+            continue
+        if canonical_fault_type(fault_type) in SOILING_FAULTS:
+            output = apply_soiling_rgb_tint(output, cell, scale)
             continue
         mask = thermal_fault_tint_mask(output.shape, cell, fault_type, scale)
         if not np.any(mask > 0.01):
