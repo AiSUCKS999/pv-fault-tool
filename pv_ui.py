@@ -3186,7 +3186,10 @@ def ui_css():
         .pv-focus-title { color:#8ba3bd; font-size:.82rem; margin:.05rem 0 .45rem; }
         .pv-context-thumb img { max-height:150px; object-fit:contain; }
         .pv-nav-compact button, .pv-card button, [data-testid="stButton"] button {
-          white-space: nowrap !important;
+          white-space: normal !important;
+          overflow-wrap: anywhere;
+          line-height: 1.15;
+          height: auto;
           min-height: 2.05rem;
         }
         @media (max-width: 1400px) {
@@ -4018,6 +4021,73 @@ def main():
                 st.session_state["recent_arrays"] = [current_array_key] + recent[:7]
         return selected_region
 
+    far_observation_types = set(globals().get("FAR_SCOUT_FAULT_TYPES", [])) | set(HOTSPOT_FAULTS)
+
+    def jump_to_fault(record):
+        row_id = record["row_id"]
+        cell = cell_by_id(location["id"], row_id, record["target_cell_id"])
+        array_col = int(cell.get("panel_number") or 1)
+        qp_set(**navigation_params(
+            location["id"],
+            view,
+            row_id,
+            cell["id"],
+            section="Faults",
+            selected_array=f"R{row_number_from_id(location['id'], row_id)}-A{array_col:02d}",
+            selected_module=cell.get("module_number_in_panel", 1),
+            cell_active=1,
+        ))
+
+    def jump_to_region(region):
+        row_id, cell = default_cell_for_array(location["id"], region["row"], region["col"], 1, 1)
+        qp_set(**navigation_params(
+            location["id"],
+            view,
+            row_id,
+            cell["id"],
+            section="Faults",
+            selected_array=region["key"],
+            selected_module="",
+            cell_active=0,
+        ))
+
+    def enter_close_view():
+        diagnostic_records = [
+            record for record in records
+            if record.get("location_id") == location["id"]
+            and record.get("fault_type") not in far_observation_types
+        ]
+        observation_records = [
+            record for record in records
+            if record.get("location_id") == location["id"]
+            and record.get("fault_type") in far_observation_types
+        ]
+        target_record = (diagnostic_records or observation_records or [None])[0]
+        if target_record:
+            row_id = target_record["row_id"]
+            cell = cell_by_id(location["id"], row_id, target_record["target_cell_id"])
+            array_col = int(cell.get("panel_number") or 1)
+            array_key = f"R{row_number_from_id(location['id'], row_id)}-A{array_col:02d}"
+        else:
+            region = get_selected_region()
+            row_id, cell = default_cell_for_array(location["id"], region["row"], region["col"], 1, 1)
+            array_key = region["key"]
+
+        if st.session_state.get("random_fault_records"):
+            push_fault_history()
+            st.session_state["random_fault_records"] = []
+
+        qp_set(**navigation_params(
+            location["id"],
+            view,
+            row_id,
+            cell["id"],
+            section="Faults",
+            selected_array=array_key,
+            selected_module=cell.get("module_number_in_panel", 1),
+            cell_active=1,
+        ))
+
     top_summary_bar(location, view, metadata, len(records))
 
     if section == "Scene Setup":
@@ -4173,7 +4243,6 @@ def main():
             pass
         else:
             with inspector_col:
-                far_observation_types = set(globals().get("FAR_SCOUT_FAULT_TYPES", [])) | set(HOTSPOT_FAULTS)
                 st.markdown('<div class="pv-card"><div class="pv-section-title">Inspector</div>', unsafe_allow_html=True)
                 if inspection_state in ("array", "module") and selected_region:
                     st.markdown('<div class="pv-context-thumb">', unsafe_allow_html=True)
@@ -4209,6 +4278,9 @@ def main():
                 if inspection_state == "scene":
                     st.write("**Scene Selection**")
                     st.caption("Click an array in the main scene to open the large array inspection view.")
+                    if st.button("Close View", type="primary", use_container_width=True):
+                        enter_close_view()
+                        st.rerun()
                 elif selected_region:
                     st.write(f"**{current_array_key}**")
                     st.caption(f"Row {selected_region['row']} | Array {selected_region['col']} | {selected_region.get('orientation', 'unknown')} | String {selected_region.get('string_id') or 'n/a'}")
@@ -4299,35 +4371,34 @@ def main():
                                     st.image(debug_payload[key], use_container_width=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
-                st.markdown('<div class="pv-card"><div class="pv-section-title">Far View Thermal Observations</div>', unsafe_allow_html=True)
-                st.caption("Generate scene-level thermal phenomena without changing close diagnostic fault classes.")
-                far_fault_types = [
-                    fault_type for fault_type in globals().get(
-                        "FAR_SCOUT_FAULT_TYPES",
-                        ["SingleHotSpot", "MultiHotSpot", "PartialShading"],
+                if inspection_state == "scene":
+                    st.markdown('<div class="pv-card"><div class="pv-section-title">Far View Thermal Observations</div>', unsafe_allow_html=True)
+                    st.caption("Generate scene-level thermal phenomena without changing close diagnostic fault classes.")
+                    far_fault_types = [
+                        fault_type for fault_type in globals().get(
+                            "FAR_SCOUT_FAULT_TYPES",
+                            ["SingleHotSpot", "MultiHotSpot", "PartialShading"],
+                        )
+                        if fault_available_in_location(location["id"], fault_type)
+                    ]
+                    if not far_fault_types:
+                        far_fault_types = ["SingleHotSpot", "MultiHotSpot"]
+                    if "modern_random_fault_types" in st.session_state:
+                        st.session_state["modern_random_fault_types"] = [
+                            canonical_fault_type(item)
+                            for item in st.session_state["modern_random_fault_types"]
+                            if canonical_fault_type(item) in far_fault_types
+                        ] or [far_fault_types[0]]
+                    scout_types = st.multiselect(
+                        "Observation Type",
+                        far_fault_types,
+                        default=st.session_state.get("modern_random_fault_types", [far_fault_types[0]]),
+                        format_func=fault_display_name,
+                        key="modern_random_fault_types",
                     )
-                    if fault_available_in_location(location["id"], fault_type)
-                ]
-                if not far_fault_types:
-                    far_fault_types = ["SingleHotSpot", "MultiHotSpot"]
-                if "modern_random_fault_types" in st.session_state:
-                    st.session_state["modern_random_fault_types"] = [
-                        canonical_fault_type(item)
-                        for item in st.session_state["modern_random_fault_types"]
-                        if canonical_fault_type(item) in far_fault_types
-                    ] or [far_fault_types[0]]
-                scout_types = st.multiselect(
-                    "Observation Type",
-                    far_fault_types,
-                    default=st.session_state.get("modern_random_fault_types", [far_fault_types[0]]),
-                    format_func=fault_display_name,
-                    key="modern_random_fault_types",
-                )
-                scout_max = max(1, min(50, int(metadata.get("total_cells") or 1)))
-                scout_count = st.number_input("Count", min_value=1, max_value=scout_max, value=min(3, scout_max), step=1, key="modern_random_fault_count")
-                scout_seed = st.number_input("Seed", min_value=0, max_value=999999, value=42, step=1, key="modern_random_fault_seed")
-                scout_col_a, scout_col_b = st.columns(2)
-                with scout_col_a:
+                    scout_max = max(1, min(50, int(metadata.get("total_cells") or 1)))
+                    scout_count = st.number_input("Count", min_value=1, max_value=scout_max, value=min(3, scout_max), step=1, key="modern_random_fault_count")
+                    scout_seed = st.number_input("Seed", min_value=0, max_value=999999, value=42, step=1, key="modern_random_fault_seed")
                     if st.button("Generate Observations", use_container_width=True, disabled=not scout_types):
                         available_cells = fault_target_cells(location["id"])
                         if not available_cells:
@@ -4341,12 +4412,11 @@ def main():
                             for row, cell in chosen
                         ]
                         st.rerun()
-                with scout_col_b:
                     if st.button("Clear Observations", use_container_width=True, disabled=not st.session_state.get("random_fault_records")):
                         push_fault_history()
                         st.session_state["random_fault_records"] = []
                         st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
 
                 if cell_active:
                     st.markdown('<div class="pv-card"><div class="pv-section-title">Fault Editor</div>', unsafe_allow_html=True)
@@ -4391,17 +4461,13 @@ def main():
                     st.markdown("</div>", unsafe_allow_html=True)
 
                 st.markdown('<div class="pv-card"><div class="pv-section-title">Fault Navigation</div>', unsafe_allow_html=True)
-                faulty_records = [record for record in records if record.get("location_id") == location["id"]]
+                faulty_records = [
+                    record for record in records
+                    if record.get("location_id") == location["id"]
+                    and record.get("fault_type") not in far_observation_types
+                ]
                 idx = next((i for i, record in enumerate(faulty_records) if record.get("target_cell_id") == selected_cell_id), -1)
                 array_idx = next((i for i, region in enumerate(regions) if region["key"] == current_array_key), -1)
-                def jump_to_fault(record):
-                    row_id = record["row_id"]
-                    cell = cell_by_id(location["id"], row_id, record["target_cell_id"])
-                    array_col = int(cell.get("panel_number") or 1)
-                    qp_set(**navigation_params(location["id"], view, row_id, cell["id"], section="Faults", selected_array=f"R{row_number_from_id(location['id'], row_id)}-A{array_col:02d}", selected_module=cell.get("module_number_in_panel", 1), cell_active=1))
-                def jump_to_region(region):
-                    row_id, cell = default_cell_for_array(location["id"], region["row"], region["col"], 1, 1)
-                    qp_set(**navigation_params(location["id"], view, row_id, cell["id"], section="Faults", selected_array=region["key"], selected_module="", cell_active=0))
                 array_prev_col, array_next_col = st.columns(2)
                 with array_prev_col:
                     if st.button("Previous Array", use_container_width=True, disabled=not regions):
@@ -4411,15 +4477,16 @@ def main():
                     if st.button("Next Array", use_container_width=True, disabled=not regions):
                         jump_to_region(regions[(array_idx + 1) % len(regions)])
                         st.rerun()
-                prev_col, next_col = st.columns(2)
-                with prev_col:
-                    if st.button("Previous Fault", use_container_width=True, disabled=not faulty_records):
-                        jump_to_fault(faulty_records[(idx - 1) % len(faulty_records)])
-                        st.rerun()
-                with next_col:
-                    if st.button("Next Fault", use_container_width=True, disabled=not faulty_records):
-                        jump_to_fault(faulty_records[(idx + 1) % len(faulty_records)])
-                        st.rerun()
+                if inspection_state != "scene":
+                    prev_col, next_col = st.columns(2)
+                    with prev_col:
+                        if st.button("Previous Fault", use_container_width=True, disabled=not faulty_records):
+                            jump_to_fault(faulty_records[(idx - 1) % len(faulty_records)])
+                            st.rerun()
+                    with next_col:
+                        if st.button("Next Fault", use_container_width=True, disabled=not faulty_records):
+                            jump_to_fault(faulty_records[(idx + 1) % len(faulty_records)])
+                            st.rerun()
                 recent_regions = [
                     region for key in st.session_state.get("recent_arrays", [])[:6]
                     for region in regions
