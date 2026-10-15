@@ -67,6 +67,21 @@ def main():
     assert len(layers["accepted_modules"]) == len(modules)
     assert not layers["rejected_modules"]
     assert np.count_nonzero(layers["pv_scalar"][mask == 0]) == 0
+    low_texture = Image.new("RGB", (320, 220), (110, 140, 110))
+    low_texture_module = namespace["real_farm_module_record"](
+        "MLOW", [[42, 44], [276, 62], [251, 184], [29, 169]], low_texture.size, "QA", 0.02, "low_texture_regression"
+    )
+    low_accepted, low_rejected = namespace["real_farm_thermal_modules"](low_texture, [low_texture_module])
+    assert len(low_accepted) == 1 and not low_rejected
+    assert low_accepted[0]["mechanically_valid"] is True
+    assert low_accepted[0]["visually_supported"] is False
+    assert any(item["code"] == "weak_pv_texture_confidence" for item in low_accepted[0]["warnings"])
+    invalid = namespace["real_farm_module_record"](
+        "MBAD", [[20, 20], [20, 20], [21, 21], [20, 21]], low_texture.size, "QA", 0.0, "invalid_regression"
+    )
+    invalid_accepted, invalid_rejected = namespace["real_farm_thermal_modules"](low_texture, [invalid])
+    assert not invalid_accepted and len(invalid_rejected) == 1
+    assert invalid_rejected[0]["mechanically_valid"] is False
     assert len(observations) == 10
     assert len({item["observation_id"] for item in observations}) == 10
     assert len(report) == 10

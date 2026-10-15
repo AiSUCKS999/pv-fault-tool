@@ -137,7 +137,7 @@ def real_farm_inset_quad(points, inset_ratio=0.035):
     return [[round(float(x), 2), round(float(y), 2)] for x, y in active]
 
 
-def real_farm_orientation(points):
+def real_farm_orientation_metadata(points):
     pts = np.asarray(points, dtype=np.float32).reshape(4, 2)
     edge_top = float(np.linalg.norm(pts[1] - pts[0]))
     edge_bottom = float(np.linalg.norm(pts[2] - pts[3]))
@@ -145,7 +145,26 @@ def real_farm_orientation(points):
     edge_left = float(np.linalg.norm(pts[3] - pts[0]))
     width = max(1e-6, (edge_top + edge_bottom) * 0.5)
     height = max(1e-6, (edge_right + edge_left) * 0.5)
-    return "landscape" if width >= height else "portrait"
+    ratio = max(width, height) / max(1e-6, min(width, height))
+    if ratio < 1.08:
+        label = "unknown"
+    else:
+        label = "landscape" if width > height else "portrait"
+    confidence = float(np.clip((ratio - 1.0) / 1.5, 0.0, 1.0))
+    return label, round(confidence, 4), width, height
+
+
+def real_farm_orientation(points):
+    return real_farm_orientation_metadata(points)[0]
+
+
+def real_farm_canonical_size(points, long_side=320):
+    """Derive canonical dimensions from geometry; the label never gates use."""
+    _, _, width, height = real_farm_orientation_metadata(points)
+    scale = float(long_side) / max(width, height, 1e-6)
+    canonical_width = int(np.clip(round(width * scale), 80, long_side))
+    canonical_height = int(np.clip(round(height * scale), 80, long_side))
+    return {"width": canonical_width, "height": canonical_height}
 
 
 def real_farm_homography(points):
@@ -169,31 +188,65 @@ def real_farm_quad_self_intersects(points):
     return intersect(pts[0], pts[1], pts[2], pts[3]) or intersect(pts[1], pts[2], pts[3], pts[0])
 
 
-def real_farm_quality(points, image_size, modules=None, current_id=None):
-    width, height = image_size
-    pts = np.asarray(points, dtype=np.float32).reshape(4, 2)
-    messages = []
+def real_farm_mechanical_validation(points, image_size, modules=None, current_id=None):
+    """Tiered geometry checks. Only mechanical failures block mask generation."""
+    width, height = map(float, image_size)
+    blockers, warnings, information = [], [], []
+    try:
+        pts = np.asarray(points, dtype=np.float32).reshape(4, 2)
+    except Exception:
+        return {
+            "mechanically_valid": False,
+            "blockers": [{"level": "error", "code": "invalid_point_count", "message": "A module requires exactly four two-dimensional corners."}],
+            "warnings": [],
+            "information": [],
+            "geometry_confidence": 0.0,
+        }
+    if not np.isfinite(pts).all():
+        blockers.append({"level": "error", "code": "nonfinite_geometry", "message": "Polygon contains NaN or infinite coordinates."})
+        return {"mechanically_valid": False, "blockers": blockers, "warnings": warnings, "information": information, "geometry_confidence": 0.0}
     area = abs(real_farm_polygon_area(pts))
     img_area = max(1.0, width * height)
     if real_farm_quad_self_intersects(pts):
-        messages.append({"level": "warning", "code": "self_intersecting_polygon", "message": "Polygon corners appear self-intersecting. Reorder corners clockwise around the module."})
-    if area < img_area * 0.00005:
-        messages.append({"level": "warning", "code": "extremely_tiny_polygon", "message": "Polygon is extremely small relative to the image."})
+        blockers.append({"level": "error", "code": "self_intersecting_polygon", "message": "Polygon corners self-intersect. Reorder corners around the module boundary."})
+    distances = [float(np.linalg.norm(pts[a] - pts[b])) for a in range(4) for b in range(a + 1, 4)]
+    if min(distances, default=0.0) < 1.0:
+        blockers.append({"level": "error", "code": "duplicate_or_degenerate_points", "message": "Two or more polygon corners are duplicated or degenerate."})
+    if area < max(4.0, img_area * 0.000001):
+        blockers.append({"level": "error", "code": "polygon_area_too_small", "message": "Polygon area is too small to create a stable module transform."})
     outside = sum(1 for x, y in pts if x < 0 or y < 0 or x > width or y > height)
     if outside:
-        messages.append({"level": "warning", "code": "polygon_partly_outside_image", "message": f"{outside} corner(s) are outside the image bounds."})
+        warnings.append({"level": "warning", "code": "near_boundary_or_partial_crop", "message": f"{outside} corner(s) are outside the image bounds; the visible portion will be used."})
+    image_rect = np.asarray([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype=np.float32)
     try:
-        _, _, det = real_farm_homography(pts)
-        if abs(det) < 1e-6:
-            messages.append({"level": "warning", "code": "degenerate_homography", "message": "Homography is near-degenerate; spread the corners apart."})
+        ordered_for_clip = np.asarray(real_farm_order_quad(pts), dtype=np.float32)
+        visible_area, _ = cv2.intersectConvexConvex(ordered_for_clip, image_rect)
+        visible_fraction = float(visible_area) / max(area, 1e-6)
     except Exception:
-        messages.append({"level": "warning", "code": "homography_failed", "message": "Could not compute a stable module-local homography."})
+        visible_fraction = 0.0
+    if visible_fraction < 0.05:
+        blockers.append({"level": "error", "code": "polygon_almost_completely_outside", "message": "Less than 5% of the module polygon lies inside the image."})
+    try:
+        h_local, h_inverse, det = real_farm_homography(pts)
+        condition = max(float(np.linalg.cond(h_local)), float(np.linalg.cond(h_inverse)))
+        if abs(det) < 1e-8 or not np.isfinite(condition) or condition > 1e12:
+            blockers.append({"level": "error", "code": "impossible_homography", "message": "The module-to-image homography is numerically unstable."})
+    except Exception:
+        blockers.append({"level": "error", "code": "homography_failed", "message": "Could not compute a module-local homography."})
     edge_lengths = [float(np.linalg.norm(pts[(idx + 1) % 4] - pts[idx])) for idx in range(4)]
     if min(edge_lengths) <= 1:
-        messages.append({"level": "warning", "code": "impossible_corner_ordering", "message": "At least one edge is almost zero length."})
+        blockers.append({"level": "error", "code": "degenerate_edge", "message": "At least one polygon edge is almost zero length."})
     aspect = max(edge_lengths[0] + edge_lengths[2], edge_lengths[1] + edge_lengths[3]) / max(1e-6, min(edge_lengths[0] + edge_lengths[2], edge_lengths[1] + edge_lengths[3]))
     if aspect > 12:
-        messages.append({"level": "warning", "code": "extremely_distorted_aspect_ratio", "message": "The quadrilateral is extremely elongated or distorted."})
+        warnings.append({"level": "warning", "code": "unusual_aspect_ratio", "message": "The quadrilateral has an unusual aspect ratio, but generation is allowed."})
+    opposite_ratio = max(edge_lengths[0] / max(edge_lengths[2], 1e-6), edge_lengths[2] / max(edge_lengths[0], 1e-6), edge_lengths[1] / max(edge_lengths[3], 1e-6), edge_lengths[3] / max(edge_lengths[1], 1e-6))
+    if opposite_ratio > 3.5:
+        warnings.append({"level": "warning", "code": "heavy_perspective", "message": "The module has strong perspective distortion; canonical rectification will still be used."})
+    orientation, orientation_confidence, _, _ = real_farm_orientation_metadata(pts)
+    if orientation == "unknown":
+        information.append({"level": "info", "code": "orientation_ambiguous", "message": "Orientation is ambiguous and is stored as unknown; generation is still allowed."})
+    elif orientation_confidence < 0.3:
+        information.append({"level": "info", "code": "orientation_low_confidence", "message": f"Orientation inferred as {orientation} with low confidence."})
     if modules:
         rounded = np.round(pts, 1)
         for item in modules:
@@ -201,24 +254,48 @@ def real_farm_quality(points, image_size, modules=None, current_id=None):
                 continue
             other = np.round(np.asarray(item.get("outer_polygon_rgb", []), dtype=np.float32), 1)
             if other.shape == (4, 2) and np.allclose(rounded, other, atol=1.5):
-                messages.append({"level": "warning", "code": "duplicate_polygon", "message": f"Polygon duplicates {item.get('module_id')}."})
+                warnings.append({"level": "warning", "code": "duplicate_polygon", "message": f"Polygon duplicates {item.get('module_id')}."})
                 break
-    return messages
+    confidence = float(np.clip(1.0 - 0.18 * len(warnings) - 0.08 * len(information), 0.0, 1.0)) if not blockers else 0.0
+    return {
+        "mechanically_valid": not blockers,
+        "blockers": blockers,
+        "warnings": warnings,
+        "information": information,
+        "geometry_confidence": round(confidence, 4),
+    }
+
+
+def real_farm_quality(points, image_size, modules=None, current_id=None):
+    validation = real_farm_mechanical_validation(points, image_size, modules, current_id)
+    return validation["blockers"] + validation["warnings"] + validation["information"]
 
 
 def real_farm_module_record(module_id, points, image_size, array_id="", inset_ratio=0.035, provenance_note="manual"):
+    raw_validation = real_farm_mechanical_validation(points, image_size)
     ordered = real_farm_order_quad(points)
     active = real_farm_inset_quad(ordered, inset_ratio)
     h_local, h_inv, det = real_farm_homography(ordered)
-    quality = real_farm_quality(ordered, image_size)
+    ordered_validation = real_farm_mechanical_validation(ordered, image_size)
+    validation = raw_validation if raw_validation["blockers"] else ordered_validation
+    orientation, orientation_confidence, _, _ = real_farm_orientation_metadata(ordered)
+    quality = validation["blockers"] + validation["warnings"] + validation["information"]
     return {
         "module_id": module_id,
         "array_id": array_id.strip() or None,
         "source_mode": REAL_FARM_SOURCE_MODE,
+        "polygon_rgb": ordered,
         "outer_polygon_rgb": ordered,
         "active_polygon_rgb": active,
         "active_inset_ratio": round(float(inset_ratio), 4),
-        "orientation": real_farm_orientation(ordered),
+        "canonical_size": real_farm_canonical_size(ordered),
+        "orientation": orientation,
+        "orientation_label": orientation,
+        "orientation_confidence": orientation_confidence,
+        "geometry_confidence": validation["geometry_confidence"],
+        "warnings": validation["warnings"] + validation["information"],
+        "mechanically_valid": validation["mechanically_valid"],
+        "visually_supported": None,
         "homography_module_to_rgb": np.round(h_local, 8).tolist(),
         "homography_rgb_to_module": np.round(h_inv, 8).tolist(),
         "cells": None,
@@ -278,15 +355,20 @@ def real_farm_load_project(path_or_file):
 def real_farm_modules_csv(state):
     output = BytesIO()
     text = io.StringIO()
-    fieldnames = ["module_id", "array_id", "orientation", "confidence", "outer_polygon_rgb", "active_polygon_rgb"]
+    fieldnames = ["module_id", "array_id", "orientation_label", "orientation_confidence", "geometry_confidence", "mechanically_valid", "visually_supported", "canonical_size", "warnings", "outer_polygon_rgb", "active_polygon_rgb"]
     writer = csv.DictWriter(text, fieldnames=fieldnames)
     writer.writeheader()
     for module in state.get("modules", []):
         writer.writerow({
             "module_id": module.get("module_id"),
             "array_id": module.get("array_id") or "",
-            "orientation": module.get("orientation"),
-            "confidence": module.get("confidence", {}).get("label"),
+            "orientation_label": module.get("orientation_label", module.get("orientation")),
+            "orientation_confidence": module.get("orientation_confidence"),
+            "geometry_confidence": module.get("geometry_confidence"),
+            "mechanically_valid": module.get("mechanically_valid"),
+            "visually_supported": module.get("visually_supported"),
+            "canonical_size": json.dumps(module.get("canonical_size")),
+            "warnings": json.dumps(module.get("warnings", [])),
             "outer_polygon_rgb": json.dumps(module.get("outer_polygon_rgb")),
             "active_polygon_rgb": json.dumps(module.get("active_polygon_rgb")),
         })
@@ -328,11 +410,12 @@ def real_farm_annotated_preview(image, modules, selected_id=None, max_width=1800
     return overlay.convert("RGB")
 
 
-def real_farm_rectified_crop(image, module, output_size=(320, 520)):
-    orientation = module.get("orientation", "portrait")
-    if orientation == "landscape":
-        output_size = (520, 320)
-    w, h = output_size
+def real_farm_rectified_crop(image, module, output_size=None):
+    if output_size is None:
+        size = module.get("canonical_size") or real_farm_canonical_size(module.get("outer_polygon_rgb"))
+        scale = 520.0 / max(float(size["width"]), float(size["height"]), 1.0)
+        output_size = (max(80, int(round(size["width"] * scale))), max(80, int(round(size["height"] * scale))))
+    w, h = map(int, output_size)
     source = np.asarray(image.convert("RGB"))
     dst = np.asarray([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
     src = np.asarray(module.get("outer_polygon_rgb"), dtype=np.float32).reshape(4, 2)
@@ -543,13 +626,30 @@ def real_farm_module_visual_score(image, module):
 
 
 def real_farm_thermal_modules(image, modules):
-    """Separate usable module geometry from obvious starter/ground ROIs."""
+    """Accept mechanically valid manual geometry; visual evidence is advisory."""
     accepted, rejected = [], []
     for module in modules:
         score = real_farm_module_visual_score(image, module)
         item = dict(module)
         item["thermal_geometry_score"] = round(score, 4)
-        if score >= 0.43:
+        item["visually_supported"] = bool(score >= 0.43)
+        validation = real_farm_mechanical_validation(item.get("outer_polygon_rgb", []), image.size)
+        stored_validity = item.get("mechanically_valid")
+        mechanically_valid = validation["mechanically_valid"] if stored_validity is None else bool(stored_validity and validation["mechanically_valid"])
+        item["mechanically_valid"] = mechanically_valid
+        item["geometry_confidence"] = validation["geometry_confidence"]
+        notices = list(item.get("warnings") or [])
+        notices.extend(validation["warnings"] + validation["information"])
+        if not item["visually_supported"]:
+            notices.append({
+                "level": "warning",
+                "code": "weak_pv_texture_confidence",
+                "message": f"{item.get('module_id', 'Module')} has weak PV-texture confidence, but mask generation is allowed.",
+            })
+        deduplicated = {notice.get("code", str(index)): notice for index, notice in enumerate(notices)}
+        item["warnings"] = list(deduplicated.values())
+        item["mechanical_blockers"] = validation["blockers"]
+        if mechanically_valid:
             accepted.append(item)
         else:
             rejected.append(item)
@@ -586,12 +686,9 @@ def real_farm_module_scalar_layer(image, modules):
     union_mask = real_farm_module_mask(image.size, modules, active=True)
     for module_index, module in enumerate(modules):
         points = np.asarray(module.get("active_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
-        top = float(np.linalg.norm(points[1] - points[0]))
-        bottom = float(np.linalg.norm(points[2] - points[3]))
-        left = float(np.linalg.norm(points[3] - points[0]))
-        right = float(np.linalg.norm(points[2] - points[1]))
-        local_width = int(np.clip(round((top + bottom) * 0.5), 24, 720))
-        local_height = int(np.clip(round((left + right) * 0.5), 24, 960))
+        canonical_size = module.get("canonical_size") or real_farm_canonical_size(points)
+        local_width = int(np.clip(canonical_size["width"], 24, 720))
+        local_height = int(np.clip(canonical_size["height"], 24, 960))
         destination = np.asarray([[0, 0], [local_width - 1, 0], [local_width - 1, local_height - 1], [0, local_height - 1]], dtype=np.float32)
         to_local = cv2.getPerspectiveTransform(points, destination)
         x1 = max(0, int(math.floor(float(points[:, 0].min()))) - 1)
@@ -702,9 +799,10 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
     """Run the unchanged production engine in module-local space, then homography-warp its scalar delta."""
     output = np.asarray(master_scalar, dtype=np.float32).copy()
     points = np.asarray(module.get("active_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
-    orientation = module.get("orientation", "portrait")
-    canonical_size = (320, 192) if orientation == "landscape" else (192, 320)
-    width, height = canonical_size
+    stored_size = module.get("canonical_size") or real_farm_canonical_size(points)
+    width = int(stored_size["width"])
+    height = int(stored_size["height"])
+    canonical_size = (width, height)
     canonical = np.asarray([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype=np.float32)
     to_local = cv2.getPerspectiveTransform(points, canonical)
     to_rgb = cv2.getPerspectiveTransform(canonical, points)
@@ -802,13 +900,29 @@ def real_farm_fault_workflow(state, image, modules):
 
     st.markdown('<div class="pv-card"><div class="pv-section-title">Real-image Thermal Mask & Fault Workflow</div>', unsafe_allow_html=True)
     st.caption("The real RGB image supplies the scene and your active module polygons supply the exact PV mask. The result is a simulated thermal view for fault generation; it is not a radiometric temperature measurement.")
+    valid_geometry, invalid_geometry = real_farm_thermal_modules(image, modules) if modules else ([], [])
+    if valid_geometry:
+        st.success(f"{len(valid_geometry)} mechanically valid module polygon(s) available. Thermal mask can be generated.")
+        weak_ids = [item.get("module_id", "unknown") for item in valid_geometry if not item.get("visually_supported")]
+        if weak_ids:
+            st.warning(f"Weak PV-texture confidence for {', '.join(weak_ids)}. Manual geometry is authoritative, so mask generation remains allowed.")
+    if invalid_geometry:
+        blocked_ids = ", ".join(item.get("module_id", "unknown") for item in invalid_geometry)
+        st.error(f"Mechanically invalid polygon(s) are blocked: {blocked_ids}. Fix duplicate points, self-intersection, insufficient area, image coverage, or homography stability.")
     button_label = "Regenerate Real Thermal Mask" if thermal_ready else "Generate Real Thermal Mask"
-    if st.button(button_label, type="primary", use_container_width=True, disabled=not modules):
+    if st.button(button_label, type="primary", use_container_width=True, disabled=not valid_geometry):
         layers = real_farm_build_thermal_master(image, modules)
         if not layers.get("accepted_modules"):
-            st.error("No module polygon is aligned with visible PV material. Edit the starter/ROI rectangle so it follows a real PV module, then generate again.")
+            st.error("No mechanically valid module polygon is available. Correct the polygon geometry, then generate again.")
             st.markdown("</div>", unsafe_allow_html=True)
             return
+        assessed = {item.get("module_id"): item for item in layers.get("accepted_modules", []) + layers.get("rejected_modules", [])}
+        for stored in state.get("modules", []):
+            result = assessed.get(stored.get("module_id"))
+            if result:
+                for key in ("mechanically_valid", "visually_supported", "thermal_geometry_score", "geometry_confidence", "warnings", "canonical_size", "orientation_label", "orientation_confidence"):
+                    if key in result:
+                        stored[key] = result[key]
         state["thermal_source"] = REAL_FARM_SYNTHETIC_THERMAL
         state["thermal_is_real"] = False
         state["thermal_is_radiometric"] = False
@@ -856,7 +970,10 @@ def real_farm_fault_workflow(state, image, modules):
         st.image(thermal, use_container_width=True)
     if rejected_modules:
         rejected_ids = ", ".join(item.get("module_id", "unknown") for item in rejected_modules)
-        st.warning(f"Ignored geometry that does not align with visible PV material: {rejected_ids}. Edit these polygons before using them for hotspots.")
+        st.warning(f"Mechanically invalid geometry was excluded: {rejected_ids}.")
+    weak_ids = [item.get("module_id", "unknown") for item in thermal_modules if not item.get("visually_supported")]
+    if weak_ids:
+        st.warning(f"Weak PV-texture confidence for {', '.join(weak_ids)}. The manually defined polygons remain active for masks and faults.")
     with st.expander("Developer thermal QA"):
         debug_show_mask = st.checkbox("debug_show_mask", value=False)
         if debug_show_mask:
