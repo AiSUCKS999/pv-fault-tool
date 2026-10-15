@@ -3454,7 +3454,17 @@ def scene_context_image(image, selected_region):
     return context.convert("RGB")
 
 
-def render_interactive_scene_canvas(image, location, view, regions, selected_key, records, filter_mode, compact=False):
+def render_interactive_scene_canvas(
+    image,
+    location,
+    view,
+    regions,
+    selected_key,
+    records,
+    filter_mode,
+    compact=False,
+    show_fault_markers=True,
+):
     uri = data_uri(image)
     width, height = image.size
     expected_total = ((load_solar_render_metadata(location["id"]) or {}).get("counts") or {}).get("arrays", len(regions))
@@ -3470,13 +3480,14 @@ def render_interactive_scene_canvas(image, location, view, regions, selected_key
         x1, y1, x2, y2 = region["box"]
         polygon = region.get("polygon") or box_polygon(region["box"])
         fault_count = fault_count_for_region(records, region)
+        fault_marked = show_fault_markers and fault_count > 0
         dim = filter_mode == "Faulty Only" and fault_count == 0
         if dim:
             svg.append(f'<polygon points="{svg_points(polygon)}" fill="#020617" fill-opacity=".48"/>')
         selected = region["key"] == selected_key
-        stroke = "#38bdf8" if selected else ("#ef4444" if fault_count else "#7dd3fc")
-        opacity = ".95" if selected else (".72" if fault_count else (".16" if debug_geometry else "0"))
-        stroke_width = "2.2" if selected else ("1.7" if fault_count else ("1" if debug_geometry else "0"))
+        stroke = "#38bdf8" if selected else ("#ef4444" if fault_marked else "#7dd3fc")
+        opacity = ".95" if selected else (".72" if fault_marked else (".16" if debug_geometry else "0"))
+        stroke_width = "2.2" if selected else ("1.7" if fault_marked else ("1" if debug_geometry else "0"))
         row_id, cell = default_cell_for_array(location["id"], region["row"], region["col"])
         params = navigation_params(
             location["id"],
@@ -3496,7 +3507,7 @@ def render_interactive_scene_canvas(image, location, view, regions, selected_key
             f'fill="#38bdf8" fill-opacity=".001" stroke="{stroke}" stroke-width="{stroke_width}" '
             f'stroke-opacity="{opacity}" pointer-events="all"/></a>'
         )
-        if fault_count:
+        if fault_marked:
             badge_x = max(0, x2 - 18)
             badge_y = max(0, y1 + 10)
             svg.append(
@@ -4108,11 +4119,29 @@ def main():
                     st.markdown("</div>", unsafe_allow_html=True)
                 else:
                     st.markdown('<div class="pv-canvas-card">', unsafe_allow_html=True)
-                    render_interactive_scene_canvas(scene, location, view, regions, "", records, qp_get("filter", "Show All"))
+                    render_interactive_scene_canvas(
+                        scene,
+                        location,
+                        view,
+                        regions,
+                        "",
+                        records,
+                        qp_get("filter", "Show All"),
+                        show_fault_markers=show_fault_boxes,
+                    )
                     st.markdown("</div>", unsafe_allow_html=True)
             else:
                 st.markdown('<div class="pv-canvas-card">', unsafe_allow_html=True)
-                render_interactive_scene_canvas(scene, location, view, regions, "", records, qp_get("filter", "Show All"))
+                render_interactive_scene_canvas(
+                    scene,
+                    location,
+                    view,
+                    regions,
+                    "",
+                    records,
+                    qp_get("filter", "Show All"),
+                    show_fault_markers=show_fault_boxes,
+                )
                 st.markdown("</div>", unsafe_allow_html=True)
         if inspector_col is None:
             pass
