@@ -82,6 +82,22 @@ def main():
     invalid_accepted, invalid_rejected = namespace["real_farm_thermal_modules"](low_texture, [invalid])
     assert not invalid_accepted and len(invalid_rejected) == 1
     assert invalid_rejected[0]["mechanically_valid"] is False
+    coarse_roi = namespace["real_farm_module_record"](
+        "MROI", [[60, 85], [270, 85], [270, 135], [60, 135]], low_texture.size, "QA", 0.0, "manual_add"
+    )
+    pending_accepted, pending_rejected = namespace["real_farm_thermal_modules"](low_texture, [coarse_roi])
+    assert not pending_accepted and pending_rejected[0]["refinement_ready"] is False
+    refined = {
+        "success": True,
+        "refined_pv_polygon_rgb": [[135, 25], [175, 25], [175, 195], [135, 195]],
+        "refined_mask_contours_rgb": [[[135, 25], [175, 25], [175, 195], [135, 195]]],
+        "refined_roi_fraction": 0.2,
+    }
+    namespace["real_farm_accept_refinement"](coarse_roi, refined)
+    refined_accepted, refined_rejected = namespace["real_farm_thermal_modules"](low_texture, [coarse_roi])
+    refined_mask = namespace["real_farm_module_mask"](low_texture.size, refined_accepted)
+    assert len(refined_accepted) == 1 and not refined_rejected
+    assert np.count_nonzero(refined_mask[:, :120]) == 0 and np.count_nonzero(refined_mask[:, 190:]) == 0
     assert len(observations) == 10
     assert len({item["observation_id"] for item in observations}) == 10
     assert len(report) == 10

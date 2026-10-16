@@ -280,13 +280,20 @@ def real_farm_module_record(module_id, points, image_size, array_id="", inset_ra
     validation = raw_validation if raw_validation["blockers"] else ordered_validation
     orientation, orientation_confidence, _, _ = real_farm_orientation_metadata(ordered)
     quality = validation["blockers"] + validation["warnings"] + validation["information"]
+    starter_roi = provenance_note in {"manual_add", "manual_edit", "manual_duplicate", "manual_repeat_row", "manual_repeat_grid"}
     return {
         "module_id": module_id,
         "array_id": array_id.strip() or None,
         "source_mode": REAL_FARM_SOURCE_MODE,
         "polygon_rgb": ordered,
+        "coarse_roi_polygon_rgb": ordered,
         "outer_polygon_rgb": ordered,
         "active_polygon_rgb": active,
+        "manual_final_polygon_rgb": None if starter_roi else active,
+        "refined_pv_polygon_rgb": None,
+        "refined_mask_contours_rgb": [],
+        "mask_source": "SEARCH_ROI" if starter_roi else "MANUAL_FINAL_POLYGON",
+        "refinement_status": "pending" if starter_roi else "accepted",
         "active_inset_ratio": round(float(inset_ratio), 4),
         "canonical_size": real_farm_canonical_size(ordered),
         "orientation": orientation,
@@ -355,13 +362,15 @@ def real_farm_load_project(path_or_file):
 def real_farm_modules_csv(state):
     output = BytesIO()
     text = io.StringIO()
-    fieldnames = ["module_id", "array_id", "orientation_label", "orientation_confidence", "geometry_confidence", "mechanically_valid", "visually_supported", "canonical_size", "warnings", "outer_polygon_rgb", "active_polygon_rgb"]
+    fieldnames = ["module_id", "array_id", "mask_source", "refinement_status", "orientation_label", "orientation_confidence", "geometry_confidence", "mechanically_valid", "visually_supported", "canonical_size", "warnings", "coarse_roi_polygon_rgb", "refined_pv_polygon_rgb", "refined_mask_contours_rgb", "outer_polygon_rgb", "active_polygon_rgb"]
     writer = csv.DictWriter(text, fieldnames=fieldnames)
     writer.writeheader()
     for module in state.get("modules", []):
         writer.writerow({
             "module_id": module.get("module_id"),
             "array_id": module.get("array_id") or "",
+            "mask_source": module.get("mask_source"),
+            "refinement_status": module.get("refinement_status"),
             "orientation_label": module.get("orientation_label", module.get("orientation")),
             "orientation_confidence": module.get("orientation_confidence"),
             "geometry_confidence": module.get("geometry_confidence"),
@@ -369,6 +378,9 @@ def real_farm_modules_csv(state):
             "visually_supported": module.get("visually_supported"),
             "canonical_size": json.dumps(module.get("canonical_size")),
             "warnings": json.dumps(module.get("warnings", [])),
+            "coarse_roi_polygon_rgb": json.dumps(module.get("coarse_roi_polygon_rgb")),
+            "refined_pv_polygon_rgb": json.dumps(module.get("refined_pv_polygon_rgb")),
+            "refined_mask_contours_rgb": json.dumps(module.get("refined_mask_contours_rgb", [])),
             "outer_polygon_rgb": json.dumps(module.get("outer_polygon_rgb")),
             "active_polygon_rgb": json.dumps(module.get("active_polygon_rgb")),
         })
@@ -478,6 +490,8 @@ def real_farm_geometry_signature(modules):
         {
             "module_id": item.get("module_id"),
             "active_polygon_rgb": item.get("active_polygon_rgb", []),
+            "mask_source": item.get("mask_source", "MANUAL_FINAL_POLYGON"),
+            "refined_mask_contours_rgb": item.get("refined_mask_contours_rgb", []),
         }
         for item in modules
     ]
@@ -511,10 +525,185 @@ def real_farm_module_mask(image_size, modules, active=True):
     mask = np.zeros((height, width), dtype=np.uint8)
     polygon_key = "active_polygon_rgb" if active else "outer_polygon_rgb"
     for module in modules:
+        if active and module.get("mask_source") == "AUTO_REFINED_RGB" and module.get("refinement_status") == "accepted":
+            for contour in module.get("refined_mask_contours_rgb", []):
+                points = np.rint(np.asarray(contour, dtype=np.float32)).astype(np.int32)
+                if len(points) >= 3:
+                    cv2.fillPoly(mask, [points], 255, lineType=cv2.LINE_AA)
+            continue
         points = np.rint(np.asarray(module.get(polygon_key, []), dtype=np.float32)).astype(np.int32)
         if points.shape == (4, 2):
             cv2.fillConvexPoly(mask, points, 255, lineType=cv2.LINE_AA)
     return mask
+
+
+def real_farm_roi_mask(image_size, module):
+    width, height = map(int, image_size)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    points = module.get("coarse_roi_polygon_rgb") or module.get("outer_polygon_rgb", [])
+    polygon = np.rint(np.asarray(points, dtype=np.float32)).astype(np.int32)
+    if polygon.shape == (4, 2):
+        cv2.fillConvexPoly(mask, polygon, 255, lineType=cv2.LINE_AA)
+    return mask
+
+
+def real_farm_refined_overlay(image, module, result=None):
+    overlay = image.convert("RGBA")
+    draw = ImageDraw.Draw(overlay)
+    roi = module.get("coarse_roi_polygon_rgb") or module.get("outer_polygon_rgb", [])
+    if len(roi) == 4:
+        coarse = [tuple(map(float, point)) for point in roi]
+        draw.line(coarse + [coarse[0]], fill=(56, 189, 248, 235), width=max(2, image.width // 900))
+    contours = (result or {}).get("refined_mask_contours_rgb") or module.get("refined_mask_contours_rgb", [])
+    for contour in contours:
+        points = [tuple(map(float, point)) for point in contour]
+        if len(points) >= 3:
+            draw.line(points + [points[0]], fill=(34, 197, 94, 255), width=max(3, image.width // 650))
+    return overlay.convert("RGB")
+
+
+def real_farm_refine_pv_support(image, module):
+    """Refine a coarse search ROI into orientation-independent PV support."""
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    height, width = rgb.shape[:2]
+    roi_mask = real_farm_roi_mask(image.size, module)
+    roi_points = np.asarray(module.get("coarse_roi_polygon_rgb") or module.get("outer_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
+    x_min, y_min = np.floor(roi_points.min(axis=0)).astype(int)
+    x_max, y_max = np.ceil(roi_points.max(axis=0)).astype(int)
+    span = max(x_max - x_min, y_max - y_min, 40)
+    padding = int(max(80, span * 1.5))
+    x1, y1 = max(0, x_min - padding), max(0, y_min - padding)
+    x2, y2 = min(width, x_max + padding + 1), min(height, y_max + padding + 1)
+    crop = rgb[y1:y2, x1:x2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+    red, green, blue = [crop[:, :, index].astype(np.int16) for index in range(3)]
+    hue, saturation, value = [hsv[:, :, index] for index in range(3)]
+    blue_surface = (hue >= 78) & (hue <= 132) & (saturation >= 24) & (value >= 24)
+    cool_dark_surface = (blue >= green - 4) & (blue >= red + 6) & (value <= 175) & (saturation >= 18)
+    vegetation = green > ((red + blue) // 2 + 12)
+    candidate_local = ((blue_surface | cool_dark_surface) & ~vegetation).astype(np.uint8) * 255
+    raw_mask = np.zeros((height, width), dtype=np.uint8)
+    raw_mask[y1:y2, x1:x2] = candidate_local
+    scale = max(1, int(round(max(crop.shape[:2]) / 900)))
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(5, 7 * scale) | 1, max(5, 7 * scale) | 1))
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, 3 * scale) | 1, max(3, 3 * scale) | 1))
+    cleaned_local = cv2.morphologyEx(candidate_local, cv2.MORPH_CLOSE, close_kernel, iterations=2)
+    cleaned_local = cv2.morphologyEx(cleaned_local, cv2.MORPH_OPEN, open_kernel, iterations=1)
+    roi_local = roi_mask[y1:y2, x1:x2]
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(cleaned_local, connectivity=8)
+    selections = []
+    roi_area = max(1, int(np.count_nonzero(roi_local)))
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        component = labels == label
+        overlap = int(np.count_nonzero(component & (roi_local > 0)))
+        if area < max(80, roi_area * 0.015) or overlap < max(12, roi_area * 0.002):
+            continue
+        component_values = value[component]
+        component_hue = hue[component]
+        panel_fraction = float(np.mean((component_hue >= 78) & (component_hue <= 132)))
+        score = overlap / max(1.0, roi_area) + min(1.0, area / max(1.0, roi_area)) * 0.25 + panel_fraction * 0.5
+        selections.append((score, label, area, overlap))
+    if not selections:
+        return {
+            "success": False, "message": "No connected PV-material candidate intersects the coarse ROI.",
+            "roi_bbox": [x1, y1, x2, y2], "raw_mask": raw_mask,
+            "cleaned_mask": np.zeros_like(raw_mask), "final_mask": np.zeros_like(raw_mask),
+            "refined_mask_contours_rgb": [], "refined_pv_polygon_rgb": None,
+        }
+    selections.sort(reverse=True)
+    best_score = selections[0][0]
+    selected_labels = [label for score, label, _, _ in selections if score >= max(0.18, best_score * 0.62)]
+    selected_local = np.isin(labels, selected_labels).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(selected_local, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    final_local = np.zeros_like(selected_local)
+    stored_contours = []
+    largest_contour = None
+    largest_area = 0.0
+    for contour in contours:
+        if cv2.contourArea(contour) < max(80, roi_area * 0.015):
+            continue
+        cv2.fillPoly(final_local, [contour], 255, lineType=cv2.LINE_AA)
+        global_contour = contour.reshape(-1, 2).astype(np.float32) + np.asarray([x1, y1], dtype=np.float32)
+        epsilon = max(1.5, cv2.arcLength(global_contour.reshape(-1, 1, 2), True) * 0.003)
+        simplified = cv2.approxPolyDP(global_contour.reshape(-1, 1, 2), epsilon, True).reshape(-1, 2)
+        stored_contours.append([[round(float(x), 2), round(float(y), 2)] for x, y in simplified])
+        contour_area = float(cv2.contourArea(contour))
+        if contour_area > largest_area:
+            largest_area, largest_contour = contour_area, global_contour
+    if largest_contour is None:
+        return {
+            "success": False, "message": "PV candidates were too small after cleanup.",
+            "roi_bbox": [x1, y1, x2, y2], "raw_mask": raw_mask,
+            "cleaned_mask": np.zeros_like(raw_mask), "final_mask": np.zeros_like(raw_mask),
+            "refined_mask_contours_rgb": [], "refined_pv_polygon_rgb": None,
+        }
+    rect = cv2.minAreaRect(largest_contour.reshape(-1, 1, 2))
+    quad = real_farm_order_quad(cv2.boxPoints(rect))
+    cleaned_mask = np.zeros((height, width), dtype=np.uint8)
+    cleaned_mask[y1:y2, x1:x2] = selected_local
+    final_mask = np.zeros((height, width), dtype=np.uint8)
+    final_mask[y1:y2, x1:x2] = final_local
+    roi_pixels = final_mask[roi_mask > 0]
+    refined_fraction = float(np.mean(roi_pixels > 0)) if roi_pixels.size else 0.0
+    return {
+        "success": True,
+        "message": f"Refined PV support covers {refined_fraction:.1%} of the coarse ROI; non-PV pixels remain background.",
+        "roi_bbox": [x1, y1, x2, y2],
+        "raw_mask": raw_mask,
+        "cleaned_mask": cleaned_mask,
+        "final_mask": final_mask,
+        "refined_mask_contours_rgb": stored_contours,
+        "refined_pv_polygon_rgb": quad,
+        "refined_roi_fraction": round(refined_fraction, 6),
+        "candidate_component_count": len(stored_contours),
+    }
+
+
+def real_farm_accept_refinement(module, result):
+    if not result.get("success") or not result.get("refined_pv_polygon_rgb"):
+        raise ValueError("A successful refinement result is required.")
+    quad = real_farm_order_quad(result["refined_pv_polygon_rgb"])
+    h_local, h_inverse, determinant = real_farm_homography(quad)
+    orientation, orientation_confidence, _, _ = real_farm_orientation_metadata(quad)
+    module["coarse_roi_polygon_rgb"] = module.get("coarse_roi_polygon_rgb") or module.get("outer_polygon_rgb")
+    module["refined_pv_polygon_rgb"] = quad
+    module["refined_mask_contours_rgb"] = result["refined_mask_contours_rgb"]
+    module["active_polygon_rgb"] = quad
+    module["mask_source"] = "AUTO_REFINED_RGB"
+    module["refinement_status"] = "accepted"
+    module["refined_roi_fraction"] = result.get("refined_roi_fraction")
+    module["canonical_size"] = real_farm_canonical_size(quad)
+    module["orientation"] = orientation
+    module["orientation_label"] = orientation
+    module["orientation_confidence"] = orientation_confidence
+    module["homography_module_to_rgb"] = np.round(h_local, 8).tolist()
+    module["homography_rgb_to_module"] = np.round(h_inverse, 8).tolist()
+    module.setdefault("confidence", {})["homography_determinant"] = determinant
+    module.setdefault("provenance", {})["mask_refinement_method"] = "LOCAL_RGB_MULTI_CUE_CONNECTED_COMPONENT"
+    module["provenance"]["refinement_accepted_at"] = real_farm_now()
+    return module
+
+
+def real_farm_use_manual_final_polygon(module):
+    final_polygon = real_farm_inset_quad(module.get("outer_polygon_rgb", []), float(module.get("active_inset_ratio", 0.035)))
+    h_local, h_inverse, determinant = real_farm_homography(final_polygon)
+    orientation, orientation_confidence, _, _ = real_farm_orientation_metadata(final_polygon)
+    module["manual_final_polygon_rgb"] = final_polygon
+    module["active_polygon_rgb"] = final_polygon
+    module["refined_pv_polygon_rgb"] = None
+    module["refined_mask_contours_rgb"] = []
+    module["mask_source"] = "MANUAL_FINAL_POLYGON"
+    module["refinement_status"] = "accepted"
+    module["canonical_size"] = real_farm_canonical_size(final_polygon)
+    module["orientation"] = orientation
+    module["orientation_label"] = orientation
+    module["orientation_confidence"] = orientation_confidence
+    module["homography_module_to_rgb"] = np.round(h_local, 8).tolist()
+    module["homography_rgb_to_module"] = np.round(h_inverse, 8).tolist()
+    module.setdefault("confidence", {})["homography_determinant"] = determinant
+    module.setdefault("provenance", {})["mask_refinement_method"] = "EXPLICIT_MANUAL_POLYGON_OVERRIDE"
+    return module
 
 
 def real_farm_local_to_rgb(module, u, v):
@@ -649,11 +838,71 @@ def real_farm_thermal_modules(image, modules):
         deduplicated = {notice.get("code", str(index)): notice for index, notice in enumerate(notices)}
         item["warnings"] = list(deduplicated.values())
         item["mechanical_blockers"] = validation["blockers"]
-        if mechanically_valid:
+        refinement_ready = item.get("refinement_status", "accepted") == "accepted" and item.get("mask_source", "MANUAL_FINAL_POLYGON") != "SEARCH_ROI"
+        item["refinement_ready"] = refinement_ready
+        if mechanically_valid and refinement_ready:
             accepted.append(item)
         else:
+            if mechanically_valid and not refinement_ready:
+                item["mechanical_blockers"] = []
+                item["warnings"].append({
+                    "level": "info", "code": "refinement_required",
+                    "message": f"{item.get('module_id', 'Module')} is a coarse search ROI. Accept an auto-refined mask or choose the manual polygon override.",
+                })
             rejected.append(item)
     return accepted, rejected
+
+
+def real_farm_refinement_workflow(state, image, modules, selected_id):
+    st.markdown('<div class="pv-card"><div class="pv-section-title">Refined PV Area</div>', unsafe_allow_html=True)
+    st.caption("The blue polygon is only a coarse search ROI. Auto-Refine finds visible PV material; review the green result before accepting it as thermal support.")
+    selected = next((item for item in modules if item.get("module_id") == selected_id), None)
+    if selected is None:
+        st.info("Add and select a coarse PV region first.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    status = selected.get("refinement_status", "pending")
+    source = selected.get("mask_source", "SEARCH_ROI")
+    st.write(f"**{selected.get('module_id')}** · `{source}` · `{status}`")
+    preview_key = f"real_farm_refinement_preview_{selected.get('module_id')}"
+    action_cols = st.columns(3)
+    if action_cols[0].button("Auto-Refine", type="primary", use_container_width=True, key=f"rf_refine_{selected.get('module_id')}"):
+        st.session_state[preview_key] = real_farm_refine_pv_support(image, selected)
+    preview = st.session_state.get(preview_key)
+    if preview:
+        if preview.get("success"):
+            st.success(preview.get("message"))
+            preview_cols = st.columns(2)
+            preview_cols[0].image(real_farm_refined_overlay(image, selected, preview), caption="Blue: coarse ROI · Green: refined PV support", use_container_width=True)
+            preview_cols[1].image(Image.fromarray(preview["final_mask"], "L"), caption="Proposed final binary PV mask", use_container_width=True, clamp=True)
+            if action_cols[1].button("Accept Mask", type="primary", use_container_width=True, key=f"rf_accept_{selected.get('module_id')}"):
+                real_farm_push_history()
+                real_farm_invalidate_thermal(state)
+                real_farm_accept_refinement(selected, preview)
+                state["updated_at"] = real_farm_now()
+                st.session_state.pop(preview_key, None)
+                st.rerun()
+        else:
+            st.warning(preview.get("message", "Auto-refinement did not find a usable PV region."))
+            debug_cols = st.columns(2)
+            debug_cols[0].image(Image.fromarray(preview["raw_mask"], "L"), caption="Raw PV candidates", use_container_width=True, clamp=True)
+            debug_cols[1].image(Image.fromarray(preview["cleaned_mask"], "L"), caption="Cleaned candidates", use_container_width=True, clamp=True)
+    if action_cols[2].button("Use Manual Polygon", use_container_width=True, key=f"rf_manual_{selected.get('module_id')}"):
+        real_farm_push_history()
+        real_farm_invalidate_thermal(state)
+        real_farm_use_manual_final_polygon(selected)
+        state["updated_at"] = real_farm_now()
+        st.session_state.pop(preview_key, None)
+        st.rerun()
+    if source == "AUTO_REFINED_RGB" and status == "accepted":
+        accepted_cols = st.columns(2)
+        accepted_cols[0].image(real_farm_refined_overlay(image, selected), caption="Accepted refined outline", use_container_width=True)
+        accepted_cols[1].image(real_farm_mask_preview(image.size, [selected]), caption="Accepted final binary PV mask", use_container_width=True, clamp=True)
+    elif source == "MANUAL_FINAL_POLYGON" and status == "accepted":
+        st.warning("Manual override is active. The edited polygon is final thermal support; use Auto-Refine to derive support from RGB material instead.")
+    else:
+        st.info("Thermal generation stays locked until this coarse ROI has an accepted mask.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def real_farm_background_scalar(image):
@@ -676,11 +925,12 @@ def real_farm_background_scalar(image):
     return np.clip(base, 34, 190).astype(np.float32)
 
 
-def real_farm_module_scalar_layer(image, modules):
+def real_farm_module_scalar_layer(image, modules, background_scalar=None):
     """Rasterize per-module relative thermal response without using any union bbox."""
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     height, width = gray.shape
+    scene_base = np.asarray(background_scalar, dtype=np.float32) if background_scalar is not None else real_farm_background_scalar(image)
     scalar_sum = np.zeros((height, width), dtype=np.float32)
     weight_sum = np.zeros((height, width), dtype=np.float32)
     union_mask = real_farm_module_mask(image.size, modules, active=True)
@@ -700,6 +950,7 @@ def real_farm_module_scalar_layer(image, modules):
         roi_points = points - np.asarray([x1, y1], dtype=np.float32)
         to_roi = cv2.getPerspectiveTransform(destination, roi_points)
         local_gray = cv2.warpPerspective(gray, to_local, (local_width, local_height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
+        local_scene_base = cv2.warpPerspective(scene_base, to_local, (local_width, local_height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
         local_low = cv2.GaussianBlur(local_gray, (0, 0), max(1.2, min(local_width, local_height) * 0.055))
         local_detail = local_gray - cv2.GaussianBlur(local_gray, (0, 0), 1.1)
         yy, xx = np.mgrid[0:local_height, 0:local_width].astype(np.float32)
@@ -707,12 +958,12 @@ def real_farm_module_scalar_layer(image, modules):
         v = yy / max(1, local_height - 1)
         module_seed = seed_for(module.get("module_id", module_index), "real-farm-pv-layer")
         rng = np.random.default_rng(module_seed)
-        module_bias = float(rng.normal(0, 3.4))
-        gradient = (u - 0.5) * float(rng.uniform(-7.0, 7.0)) + (v - 0.5) * float(rng.uniform(-6.0, 6.0))
+        module_bias = float(rng.normal(6.5, 1.4))
+        gradient = (u - 0.5) * float(rng.uniform(-3.2, 3.2)) + (v - 0.5) * float(rng.uniform(-2.8, 2.8))
         mottle = smooth_unit_field((local_height, local_width), module_seed, max(2.0, min(local_width, local_height) * 0.10), octaves=3)
-        row_bias = np.sin(v * math.pi * max(2, min(14, int(local_height / 24))) + float(rng.uniform(-1, 1))) * 1.35
-        pv_local = 151.0 + module_bias + gradient + (local_low - float(np.median(local_low))) * 0.055 + local_detail * 0.28
-        pv_local += (mottle - 0.5) * 7.0 + row_bias
+        row_bias = np.sin(v * math.pi * max(2, min(14, int(local_height / 24))) + float(rng.uniform(-1, 1))) * 0.7
+        pv_local = local_scene_base + module_bias + gradient + (local_low - float(np.median(local_low))) * 0.025 + local_detail * 0.12
+        pv_local += (mottle - 0.5) * 3.2 + row_bias
         local_support = np.ones((local_height, local_width), dtype=np.float32)
         roi_size = (x2 - x1, y2 - y1)
         warped_scalar = cv2.warpPerspective(pv_local.astype(np.float32), to_roi, roi_size, flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
@@ -749,7 +1000,7 @@ def real_farm_build_thermal_master(image, modules, real_thermal=None):
         mode = REAL_FARM_REAL_THERMAL
     else:
         background = real_farm_background_scalar(image)
-        pv_layer, mask = real_farm_module_scalar_layer(image, accepted)
+        pv_layer, mask = real_farm_module_scalar_layer(image, accepted, background)
         inside = (mask > 0).astype(np.uint8)
         distance_inside = cv2.distanceTransform(inside, cv2.DIST_L2, 3)
         alpha = np.clip(distance_inside / 1.35, 0, 1).astype(np.float32)
@@ -899,8 +1150,10 @@ def real_farm_fault_workflow(state, image, modules):
         st.warning("Module geometry changed, so the previous thermal mask and hotspots were cleared. Generate the mask again.")
 
     st.markdown('<div class="pv-card"><div class="pv-section-title">Real-image Thermal Mask & Fault Workflow</div>', unsafe_allow_html=True)
-    st.caption("The real RGB image supplies the scene and your active module polygons supply the exact PV mask. The result is a simulated thermal view for fault generation; it is not a radiometric temperature measurement.")
-    valid_geometry, invalid_geometry = real_farm_thermal_modules(image, modules) if modules else ([], [])
+    st.caption("The real RGB image supplies the scene. Only accepted refined PV support or an explicit manual final polygon supplies the thermal mask; a coarse search ROI is never thermalized.")
+    valid_geometry, excluded_geometry = real_farm_thermal_modules(image, modules) if modules else ([], [])
+    pending_geometry = [item for item in excluded_geometry if item.get("mechanically_valid") and not item.get("refinement_ready")]
+    invalid_geometry = [item for item in excluded_geometry if not item.get("mechanically_valid")]
     if valid_geometry:
         st.success(f"{len(valid_geometry)} mechanically valid module polygon(s) available. Thermal mask can be generated.")
         weak_ids = [item.get("module_id", "unknown") for item in valid_geometry if not item.get("visually_supported")]
@@ -909,6 +1162,9 @@ def real_farm_fault_workflow(state, image, modules):
     if invalid_geometry:
         blocked_ids = ", ".join(item.get("module_id", "unknown") for item in invalid_geometry)
         st.error(f"Mechanically invalid polygon(s) are blocked: {blocked_ids}. Fix duplicate points, self-intersection, insufficient area, image coverage, or homography stability.")
+    if pending_geometry:
+        pending_ids = ", ".join(item.get("module_id", "unknown") for item in pending_geometry)
+        st.info(f"Refinement required for coarse ROI(s): {pending_ids}. Preview and accept a refined mask, or explicitly use the manual polygon override.")
     button_label = "Regenerate Real Thermal Mask" if thermal_ready else "Generate Real Thermal Mask"
     if st.button(button_label, type="primary", use_container_width=True, disabled=not valid_geometry):
         layers = real_farm_build_thermal_master(image, modules)
@@ -1163,6 +1419,13 @@ def real_farm_main():
         return
 
     modules = state.setdefault("modules", [])
+    for module in modules:
+        if "mask_source" not in module:
+            module["coarse_roi_polygon_rgb"] = module.get("outer_polygon_rgb", [])
+            module["mask_source"] = "SEARCH_ROI"
+            module["refinement_status"] = "pending"
+            module["refined_mask_contours_rgb"] = []
+            module["refined_pv_polygon_rgb"] = None
     image_size = (int(state["image"]["width"]), int(state["image"]["height"]))
     selected_id = st.session_state.get("real_farm_selected_module")
     if selected_id not in {item.get("module_id") for item in modules}:
@@ -1319,6 +1582,7 @@ def real_farm_main():
                 st.success("Selected module geometry passes RF-1 mechanical checks.")
         st.markdown("</div>", unsafe_allow_html=True)
 
+    real_farm_refinement_workflow(state, image, modules, st.session_state.get("real_farm_selected_module"))
     real_farm_fault_workflow(state, image, modules)
 
     export_col, data_col = st.columns([0.46, 0.54])
@@ -1342,6 +1606,8 @@ def real_farm_main():
                 {
                     "module_id": item.get("module_id"),
                     "array_id": item.get("array_id") or "",
+                    "mask_source": item.get("mask_source", "SEARCH_ROI"),
+                    "refinement": item.get("refinement_status", "pending"),
                     "orientation": item.get("orientation"),
                     "warnings": len(item.get("confidence", {}).get("quality_warnings", [])),
                     "confidence": item.get("confidence", {}).get("label"),
