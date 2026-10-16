@@ -292,6 +292,7 @@ def real_farm_module_record(module_id, points, image_size, array_id="", inset_ra
         "manual_final_polygon_rgb": None if starter_roi else active,
         "refined_pv_polygon_rgb": None,
         "refined_mask_contours_rgb": [],
+        "refined_mask_holes_rgb": [],
         "mask_source": "SEARCH_ROI" if starter_roi else "MANUAL_FINAL_POLYGON",
         "refinement_status": "pending" if starter_roi else "accepted",
         "active_inset_ratio": round(float(inset_ratio), 4),
@@ -362,7 +363,7 @@ def real_farm_load_project(path_or_file):
 def real_farm_modules_csv(state):
     output = BytesIO()
     text = io.StringIO()
-    fieldnames = ["module_id", "array_id", "mask_source", "refinement_status", "orientation_label", "orientation_confidence", "geometry_confidence", "mechanically_valid", "visually_supported", "canonical_size", "warnings", "coarse_roi_polygon_rgb", "refined_pv_polygon_rgb", "refined_mask_contours_rgb", "outer_polygon_rgb", "active_polygon_rgb"]
+    fieldnames = ["module_id", "array_id", "mask_source", "refinement_status", "orientation_label", "orientation_confidence", "geometry_confidence", "mechanically_valid", "visually_supported", "canonical_size", "warnings", "coarse_roi_polygon_rgb", "refined_pv_polygon_rgb", "refined_mask_contours_rgb", "refined_mask_holes_rgb", "outer_polygon_rgb", "active_polygon_rgb"]
     writer = csv.DictWriter(text, fieldnames=fieldnames)
     writer.writeheader()
     for module in state.get("modules", []):
@@ -381,6 +382,7 @@ def real_farm_modules_csv(state):
             "coarse_roi_polygon_rgb": json.dumps(module.get("coarse_roi_polygon_rgb")),
             "refined_pv_polygon_rgb": json.dumps(module.get("refined_pv_polygon_rgb")),
             "refined_mask_contours_rgb": json.dumps(module.get("refined_mask_contours_rgb", [])),
+            "refined_mask_holes_rgb": json.dumps(module.get("refined_mask_holes_rgb", [])),
             "outer_polygon_rgb": json.dumps(module.get("outer_polygon_rgb")),
             "active_polygon_rgb": json.dumps(module.get("active_polygon_rgb")),
         })
@@ -492,6 +494,7 @@ def real_farm_geometry_signature(modules):
             "active_polygon_rgb": item.get("active_polygon_rgb", []),
             "mask_source": item.get("mask_source", "MANUAL_FINAL_POLYGON"),
             "refined_mask_contours_rgb": item.get("refined_mask_contours_rgb", []),
+            "refined_mask_holes_rgb": item.get("refined_mask_holes_rgb", []),
         }
         for item in modules
     ]
@@ -530,6 +533,10 @@ def real_farm_module_mask(image_size, modules, active=True):
                 points = np.rint(np.asarray(contour, dtype=np.float32)).astype(np.int32)
                 if len(points) >= 3:
                     cv2.fillPoly(mask, [points], 255, lineType=cv2.LINE_AA)
+            for contour in module.get("refined_mask_holes_rgb", []):
+                points = np.rint(np.asarray(contour, dtype=np.float32)).astype(np.int32)
+                if len(points) >= 3:
+                    cv2.fillPoly(mask, [points], 0, lineType=cv2.LINE_AA)
             continue
         points = np.rint(np.asarray(module.get(polygon_key, []), dtype=np.float32)).astype(np.int32)
         if points.shape == (4, 2):
@@ -559,11 +566,16 @@ def real_farm_refined_overlay(image, module, result=None):
         points = [tuple(map(float, point)) for point in contour]
         if len(points) >= 3:
             draw.line(points + [points[0]], fill=(34, 197, 94, 255), width=max(3, image.width // 650))
+    holes = (result or {}).get("refined_mask_holes_rgb") or module.get("refined_mask_holes_rgb", [])
+    for contour in holes:
+        points = [tuple(map(float, point)) for point in contour]
+        if len(points) >= 3:
+            draw.line(points + [points[0]], fill=(250, 204, 21, 240), width=max(2, image.width // 1000))
     return overlay.convert("RGB")
 
 
 def real_farm_refine_pv_support(image, module):
-    """Refine a coarse search ROI into orientation-independent PV support."""
+    """Refine a coarse ROI while preserving aligned PV components and frame gaps."""
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     height, width = rgb.shape[:2]
     roi_mask = real_farm_roi_mask(image.size, module)
@@ -584,62 +596,112 @@ def real_farm_refine_pv_support(image, module):
     candidate_local = ((blue_surface | cool_dark_surface) & ~vegetation).astype(np.uint8) * 255
     raw_mask = np.zeros((height, width), dtype=np.uint8)
     raw_mask[y1:y2, x1:x2] = candidate_local
-    scale = max(1, int(round(max(crop.shape[:2]) / 900)))
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(5, 7 * scale) | 1, max(5, 7 * scale) | 1))
-    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, 3 * scale) | 1, max(3, 3 * scale) | 1))
-    cleaned_local = cv2.morphologyEx(candidate_local, cv2.MORPH_CLOSE, close_kernel, iterations=2)
-    cleaned_local = cv2.morphologyEx(cleaned_local, cv2.MORPH_OPEN, open_kernel, iterations=1)
+
+    # Small, single-pass cleanup keeps the actual table outline and meaningful
+    # module/frame gaps. The former scale-dependent 15x15 close (twice) fused
+    # separate evidence into the smooth bar reported in the live UI.
+    cleaned_local = cv2.morphologyEx(
+        candidate_local, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1
+    )
+    cleaned_local = cv2.morphologyEx(
+        cleaned_local, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1
+    )
     roi_local = roi_mask[y1:y2, x1:x2]
     count, labels, stats, _ = cv2.connectedComponentsWithStats(cleaned_local, connectivity=8)
-    selections = []
     roi_area = max(1, int(np.count_nonzero(roi_local)))
+    components = []
+    seeds = []
     for label in range(1, count):
         area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < max(64, roi_area * 0.0015):
+            continue
         component = labels == label
         overlap = int(np.count_nonzero(component & (roi_local > 0)))
-        if area < max(80, roi_area * 0.015) or overlap < max(12, roi_area * 0.002):
-            continue
-        component_values = value[component]
         component_hue = hue[component]
         panel_fraction = float(np.mean((component_hue >= 78) & (component_hue <= 132)))
-        score = overlap / max(1.0, roi_area) + min(1.0, area / max(1.0, roi_area)) * 0.25 + panel_fraction * 0.5
-        selections.append((score, label, area, overlap))
-    if not selections:
+        if panel_fraction < 0.10:
+            continue
+        left, top, comp_width, comp_height = [int(stats[label, key]) for key in (
+            cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP, cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT
+        )]
+        component_points = cv2.findNonZero(component.astype(np.uint8))
+        component_box = cv2.boxPoints(cv2.minAreaRect(component_points)).astype(np.float32)
+        component_edges = [component_box[(index + 1) % 4] - component_box[index] for index in range(4)]
+        component_lengths = [float(np.linalg.norm(edge)) for edge in component_edges]
+        long_edge_index = int(np.argmax(component_lengths))
+        long_axis = component_edges[long_edge_index] / max(1e-6, component_lengths[long_edge_index])
+        data = {
+            "label": label,
+            "area": area,
+            "overlap": overlap,
+            "panel_fraction": panel_fraction,
+            "centroid": np.asarray([left + comp_width * 0.5, top + comp_height * 0.5], dtype=np.float32),
+            "long_axis": long_axis.astype(np.float32),
+            "short_extent": float(min(component_lengths)),
+        }
+        components.append(data)
+        if overlap >= max(12, roi_area * 0.0015):
+            score = overlap / float(roi_area) + min(1.0, area / float(roi_area)) * 0.25 + panel_fraction * 0.5
+            seeds.append((score, data))
+    if not seeds:
         return {
             "success": False, "message": "No connected PV-material candidate intersects the coarse ROI.",
             "roi_bbox": [x1, y1, x2, y2], "raw_mask": raw_mask,
             "cleaned_mask": np.zeros_like(raw_mask), "final_mask": np.zeros_like(raw_mask),
-            "refined_mask_contours_rgb": [], "refined_pv_polygon_rgb": None,
+            "refined_mask_contours_rgb": [], "refined_mask_holes_rgb": [], "refined_pv_polygon_rgb": None,
         }
-    selections.sort(reverse=True)
-    best_score = selections[0][0]
-    selected_labels = [label for score, label, _, _ in selections if score >= max(0.18, best_score * 0.62)]
-    selected_local = np.isin(labels, selected_labels).astype(np.uint8) * 255
-    contours, _ = cv2.findContours(selected_local, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    final_local = np.zeros_like(selected_local)
-    stored_contours = []
-    largest_contour = None
-    largest_area = 0.0
-    for contour in contours:
-        if cv2.contourArea(contour) < max(80, roi_area * 0.015):
+
+    seeds.sort(key=lambda item: item[0], reverse=True)
+    best_score = seeds[0][0]
+    seeds = [data for score, data in seeds if score >= max(0.12, best_score * 0.52)]
+    selected_labels = set(seed["label"] for seed in seeds)
+    # Include disconnected modules aligned with each ROI seed's dominant axis.
+    # This recovers the intended row extent without admitting neighboring rows.
+    for candidate in components:
+        for seed in seeds:
+            axis = seed["long_axis"]
+            normal = np.asarray([-axis[1], axis[0]], dtype=np.float32)
+            cross_distance = abs(float(np.dot(candidate["centroid"] - seed["centroid"], normal)))
+            corridor = max(18.0, 0.36 * (seed["short_extent"] + candidate["short_extent"]))
+            same_orientation = abs(float(np.dot(axis, candidate["long_axis"]))) >= 0.70
+            if same_orientation and cross_distance <= corridor:
+                selected_labels.add(candidate["label"])
+                break
+    selected_local = np.isin(labels, list(selected_labels)).astype(np.uint8) * 255
+
+    # Fill only tiny pinholes. Long grid/frame separations remain in the final mask.
+    final_local = selected_local.copy()
+    inverse = cv2.bitwise_not(final_local)
+    hole_count, hole_labels, hole_stats, _ = cv2.connectedComponentsWithStats(inverse, connectivity=8)
+    tiny_hole_limit = max(20, int(roi_area * 0.00035))
+    for hole_label in range(1, hole_count):
+        if int(hole_stats[hole_label, cv2.CC_STAT_AREA]) <= tiny_hole_limit:
+            final_local[hole_labels == hole_label] = 255
+
+    contours, hierarchy = cv2.findContours(final_local, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    hierarchy = hierarchy[0] if hierarchy is not None else []
+    stored_contours, stored_holes, exterior_points = [], [], []
+    for contour_index, contour in enumerate(contours):
+        if abs(float(cv2.contourArea(contour))) < max(16, roi_area * 0.00015):
             continue
-        cv2.fillPoly(final_local, [contour], 255, lineType=cv2.LINE_AA)
         global_contour = contour.reshape(-1, 2).astype(np.float32) + np.asarray([x1, y1], dtype=np.float32)
-        epsilon = max(1.5, cv2.arcLength(global_contour.reshape(-1, 1, 2), True) * 0.003)
+        epsilon = max(0.8, cv2.arcLength(global_contour.reshape(-1, 1, 2), True) * 0.0012)
         simplified = cv2.approxPolyDP(global_contour.reshape(-1, 1, 2), epsilon, True).reshape(-1, 2)
-        stored_contours.append([[round(float(x), 2), round(float(y), 2)] for x, y in simplified])
-        contour_area = float(cv2.contourArea(contour))
-        if contour_area > largest_area:
-            largest_area, largest_contour = contour_area, global_contour
-    if largest_contour is None:
+        points_json = [[round(float(x), 2), round(float(y), 2)] for x, y in simplified]
+        if len(hierarchy) and int(hierarchy[contour_index][3]) >= 0:
+            stored_holes.append(points_json)
+        else:
+            stored_contours.append(points_json)
+            exterior_points.append(global_contour)
+    if not exterior_points:
         return {
             "success": False, "message": "PV candidates were too small after cleanup.",
             "roi_bbox": [x1, y1, x2, y2], "raw_mask": raw_mask,
             "cleaned_mask": np.zeros_like(raw_mask), "final_mask": np.zeros_like(raw_mask),
-            "refined_mask_contours_rgb": [], "refined_pv_polygon_rgb": None,
+            "refined_mask_contours_rgb": [], "refined_mask_holes_rgb": [], "refined_pv_polygon_rgb": None,
         }
-    rect = cv2.minAreaRect(largest_contour.reshape(-1, 1, 2))
-    quad = real_farm_order_quad(cv2.boxPoints(rect))
+
+    quad = real_farm_order_quad(cv2.boxPoints(cv2.minAreaRect(np.concatenate(exterior_points).reshape(-1, 1, 2))))
     cleaned_mask = np.zeros((height, width), dtype=np.uint8)
     cleaned_mask[y1:y2, x1:x2] = selected_local
     final_mask = np.zeros((height, width), dtype=np.uint8)
@@ -648,15 +710,19 @@ def real_farm_refine_pv_support(image, module):
     refined_fraction = float(np.mean(roi_pixels > 0)) if roi_pixels.size else 0.0
     return {
         "success": True,
-        "message": f"Refined PV support covers {refined_fraction:.1%} of the coarse ROI; non-PV pixels remain background.",
+        "message": f"Refined PV support covers {refined_fraction:.1%} of the coarse ROI; module/frame gaps remain separate.",
         "roi_bbox": [x1, y1, x2, y2],
+        "processing_crop_rgb": crop,
         "raw_mask": raw_mask,
         "cleaned_mask": cleaned_mask,
         "final_mask": final_mask,
+        "connected_component_labels": labels.astype(np.int32),
         "refined_mask_contours_rgb": stored_contours,
+        "refined_mask_holes_rgb": stored_holes,
         "refined_pv_polygon_rgb": quad,
         "refined_roi_fraction": round(refined_fraction, 6),
-        "candidate_component_count": len(stored_contours),
+        "candidate_component_count": len(components),
+        "selected_component_count": len(selected_labels),
     }
 
 
@@ -669,6 +735,7 @@ def real_farm_accept_refinement(module, result):
     module["coarse_roi_polygon_rgb"] = module.get("coarse_roi_polygon_rgb") or module.get("outer_polygon_rgb")
     module["refined_pv_polygon_rgb"] = quad
     module["refined_mask_contours_rgb"] = result["refined_mask_contours_rgb"]
+    module["refined_mask_holes_rgb"] = result.get("refined_mask_holes_rgb", [])
     module["active_polygon_rgb"] = quad
     module["mask_source"] = "AUTO_REFINED_RGB"
     module["refinement_status"] = "accepted"
@@ -693,6 +760,7 @@ def real_farm_use_manual_final_polygon(module):
     module["active_polygon_rgb"] = final_polygon
     module["refined_pv_polygon_rgb"] = None
     module["refined_mask_contours_rgb"] = []
+    module["refined_mask_holes_rgb"] = []
     module["mask_source"] = "MANUAL_FINAL_POLYGON"
     module["refinement_status"] = "accepted"
     module["canonical_size"] = real_farm_canonical_size(final_polygon)
@@ -1046,7 +1114,46 @@ def real_farm_production_cell(module, observation, width, height):
     }
 
 
-def real_farm_apply_production_fault(master_scalar, module, observation, fault_type):
+def real_farm_fault_realism_compositor(base_local, production_delta, fault_type, severity, seed):
+    """Blend an unchanged production signal into the local Real Farm thermal field."""
+    delta = np.asarray(production_delta, dtype=np.float32)
+    if not np.any(np.abs(delta) > 1e-5):
+        return delta
+    minimum_extent = max(8, min(delta.shape))
+    if fault_type == "SingleHotSpot":
+        core_sigma = max(0.75, minimum_extent * 0.0045)
+        halo_sigma = max(2.0, minimum_extent * 0.026)
+        core_weight, halo_weight = 0.78, 0.22
+    else:
+        core_sigma = max(0.55, minimum_extent * 0.0025)
+        halo_sigma = max(1.4, minimum_extent * 0.014)
+        core_weight, halo_weight = 0.88, 0.12
+    core = cv2.GaussianBlur(delta, (0, 0), core_sigma)
+    halo = cv2.GaussianBlur(delta, (0, 0), halo_sigma)
+    blended = core * core_weight + halo * halo_weight
+
+    # A deterministic low-frequency field breaks the digitally perfect edge while
+    # retaining the engine's diagnostic morphology and module-local coordinates.
+    rng = np.random.default_rng(int(seed))
+    irregular = rng.normal(0, 1, delta.shape).astype(np.float32)
+    irregular = cv2.GaussianBlur(irregular, (0, 0), max(1.2, minimum_extent * 0.035))
+    irregular /= max(1e-5, float(np.std(irregular)))
+    local_detail = np.asarray(base_local, dtype=np.float32) - cv2.GaussianBlur(
+        np.asarray(base_local, dtype=np.float32), (0, 0), max(0.8, minimum_extent * 0.006)
+    )
+    texture_factor = 1.0 + np.clip(local_detail / 18.0, -0.08, 0.08)
+    blended *= np.clip(1.0 + irregular * 0.075, 0.78, 1.18) * texture_factor
+
+    # The soft knee avoids flat white clipping at ordinary severities. Very high
+    # severity can still reach a hot core without becoming a pasted uniform blob.
+    if fault_type == "SingleHotSpot":
+        soft_limit = 21.0 + float(np.clip(severity, 1, 10)) * 3.2
+    else:
+        soft_limit = 25.0 + float(np.clip(severity, 1, 10)) * 3.6
+    return (soft_limit * np.tanh(blended / max(1.0, soft_limit))).astype(np.float32)
+
+
+def real_farm_apply_production_fault(master_scalar, module, observation, fault_type, realism=True):
     """Run the unchanged production engine in module-local space, then homography-warp its scalar delta."""
     output = np.asarray(master_scalar, dtype=np.float32).copy()
     points = np.asarray(module.get("active_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
@@ -1062,6 +1169,14 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
     cell = real_farm_production_cell(module, observation, width, height)
     apply_thermal_fault(faulted_local, cell, fault_type, int(observation.get("severity", 7)))
     delta_local = faulted_local - base_local
+    if realism:
+        realism_seed = seed_for(
+            module.get("module_id"), observation.get("observation_id"), fault_type,
+            int(observation.get("severity", 7)), "real-farm-fault-realism"
+        )
+        delta_local = real_farm_fault_realism_compositor(
+            base_local, delta_local, fault_type, int(observation.get("severity", 7)), realism_seed
+        )
     height_rgb, width_rgb = output.shape
     delta_rgb = cv2.warpPerspective(delta_local, to_rgb, (width_rgb, height_rgb), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     support_local = np.ones((height, width), dtype=np.float32)
@@ -1425,6 +1540,7 @@ def real_farm_main():
             module["mask_source"] = "SEARCH_ROI"
             module["refinement_status"] = "pending"
             module["refined_mask_contours_rgb"] = []
+            module["refined_mask_holes_rgb"] = []
             module["refined_pv_polygon_rgb"] = None
     image_size = (int(state["image"]["width"]), int(state["image"]["height"]))
     selected_id = st.session_state.get("real_farm_selected_module")
