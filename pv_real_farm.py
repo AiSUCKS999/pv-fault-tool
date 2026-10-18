@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import shutil
+import time
 import plotly.graph_objects as go
 
 
@@ -14,6 +15,17 @@ REAL_FARM_EXPORT_DIR = REAL_FARM_ROOT / "exports"
 REAL_FARM_VERSION = "RF-1"
 REAL_FARM_SOURCE_MODE = "REAL_FARM_IMAGE"
 REAL_FARM_CONFIDENCE_LEVEL = "LEVEL_1_MODULE_ONLY"
+REAL_FARM_WORKFLOW_SECTIONS = ["Farm Setup", "Thermal", "Faults", "Review", "Export"]
+
+REAL_FARM_GEOMETRY_NOTICE_EXPLANATIONS = {
+    "near_boundary_or_partial_crop": "One or more corners touch or extend past the image edge; the visible portion remains usable.",
+    "unusual_aspect_ratio": "The recovered quadrilateral has an uncommon width-to-height ratio but remains mechanically valid.",
+    "heavy_perspective": "The module has strong perspective distortion; canonical rectification is still available.",
+    "duplicate_polygon": "Another recovered polygon has nearly identical corners and may need review.",
+    "low_instance_support": "RGB refinement found incomplete PV support inside the recovered module.",
+    "unsplit_recovered_region": "The region could not be split confidently into smaller module instances.",
+    "weak_pv_texture_confidence": "RGB texture confidence is low, but the mechanically valid recovered geometry remains usable.",
+}
 
 
 def real_farm_now():
@@ -482,19 +494,57 @@ def real_farm_module_selection_chart(image, modules, selected_id=None):
 def real_farm_geometry_qa_summary(image, modules):
     accepted_parents, excluded = real_farm_thermal_modules(image, modules) if modules else ([], [])
     accepted = real_farm_recovered_modules(accepted_parents, image_size=image.size)
-    detected_modules = real_farm_recovered_modules(modules, include_unaccepted=True, image_size=image.size)
-    warning_count = sum(
-        1 for item in detected_modules
-        if any(notice.get("level") == "warning" for notice in item.get("warnings", []))
+    # Use the assessed copies so mechanical validation notices are represented,
+    # rather than counting only notices already persisted on source records.
+    detected_modules = real_farm_recovered_modules(
+        accepted_parents + excluded, include_unaccepted=True, image_size=image.size
     )
+    notice_groups = {}
+    modules_with_notices = set()
+    for item in detected_modules:
+        module_id = item.get("module_id", "unknown")
+        for notice in item.get("warnings", []):
+            if notice.get("level") != "warning":
+                continue
+            modules_with_notices.add(module_id)
+            code = notice.get("code") or "geometry_notice"
+            group = notice_groups.setdefault(code, {
+                "code": code,
+                "module_ids": [],
+                "explanation": REAL_FARM_GEOMETRY_NOTICE_EXPLANATIONS.get(
+                    code, notice.get("message") or "Non-blocking geometry review notice."
+                ),
+            })
+            if module_id not in group["module_ids"]:
+                group["module_ids"].append(module_id)
     rejected = sum(
         max(1, len(item.get("module_instances") or []))
         for item in excluded if not item.get("mechanically_valid", False)
     )
     return {
         "detected": len(detected_modules), "accepted": len(accepted),
-        "warnings": int(warning_count), "rejected": int(rejected),
+        "warnings": len(modules_with_notices), "rejected": int(rejected),
+        "notice_modules": len(modules_with_notices),
+        "notice_details": sorted(notice_groups.values(), key=lambda item: item["code"]),
     }
+
+
+def real_farm_render_geometry_summary(summary, key_prefix="real_farm_geometry"):
+    columns = st.columns(4)
+    columns[0].metric("Detected modules", summary["detected"])
+    columns[1].metric("Accepted modules", summary["accepted"])
+    columns[2].metric("Geometry notices", f"{summary['notice_modules']} modules")
+    columns[3].metric("Rejected geometry", summary["rejected"])
+    details = summary.get("notice_details", [])
+    if details:
+        with st.expander(f"Geometry notice details · {len(details)} type(s)", expanded=False):
+            for detail in details:
+                ids = detail.get("module_ids", [])
+                st.markdown(f"**{detail['code']} — {len(ids)} module(s)**")
+                st.caption(detail.get("explanation", "Non-blocking geometry review notice."))
+                st.code(", ".join(ids), language=None)
+    elif summary.get("detected"):
+        st.caption("No non-blocking geometry notices. Blocking/rejected geometry is reported separately.")
 
 
 def real_farm_rectified_crop(image, module, output_size=None):
@@ -662,8 +712,10 @@ def real_farm_instance_overlay(image, module, result=None):
     return overlay.convert("RGB")
 
 
-def real_farm_refine_pv_support(image, module):
+def real_farm_refine_pv_support(image, module, progress_callback=None):
     """Refine a coarse ROI while preserving aligned PV components and frame gaps."""
+    if progress_callback:
+        progress_callback("Detecting PV support")
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     height, width = rgb.shape[:2]
     roi_mask = real_farm_roi_mask(image.size, module)
@@ -812,8 +864,12 @@ def real_farm_refine_pv_support(image, module):
         "candidate_component_count": len(components),
         "selected_component_count": len(selected_labels),
     }
+    if progress_callback:
+        progress_callback("Recovering and splitting module instances")
     result["module_instances"] = real_farm_detect_module_instances(image, module, final_mask, quad)
     result["module_instance_count"] = len(result["module_instances"])
+    if progress_callback:
+        progress_callback("Refining module masks")
     return result
 
 
@@ -859,13 +915,67 @@ def real_farm_attach_instance_support(record, source_mask, confidence=None):
     return record
 
 
-def real_farm_detect_module_instances(image, parent_module, union_mask, parent_quad):
+def real_farm_module_grid_texture_score(image, module):
+    """Measure internal repeated edge evidence without using module orientation."""
+    points = np.asarray(module.get("active_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
+    x1 = max(0, int(np.floor(points[:, 0].min())))
+    y1 = max(0, int(np.floor(points[:, 1].min())))
+    x2 = min(image.width, int(np.ceil(points[:, 0].max())) + 1)
+    y2 = min(image.height, int(np.ceil(points[:, 1].max())) + 1)
+    if x2 - x1 < 6 or y2 - y1 < 6:
+        return 0.0
+    local = points - np.asarray([x1, y1], dtype=np.float32)
+    mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, np.rint(local).astype(np.int32), 255)
+    erosion = max(1, int(round(min(mask.shape) * 0.045)))
+    interior = cv2.erode(mask, np.ones((erosion * 2 + 1, erosion * 2 + 1), np.uint8)) > 0
+    if np.count_nonzero(interior) < 20:
+        interior = mask > 0
+    gray = cv2.cvtColor(np.asarray(image.convert("RGB"))[y1:y2, x1:x2], cv2.COLOR_RGB2GRAY)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = cv2.magnitude(gx, gy)
+    edge_density = float(np.mean(magnitude[interior] >= 48.0))
+    texture = float(np.std(gray[interior])) / 64.0
+    return float(np.clip(edge_density * 0.78 + min(1.0, texture) * 0.22, 0.0, 1.0))
+
+
+def real_farm_detect_module_instances(image, parent_module, union_mask, parent_quad, recovery_mode="auto"):
     """Split each disconnected PV table with rectified RGB frame evidence."""
+    if recovery_mode == "auto":
+        conservative = real_farm_detect_module_instances(
+            image, parent_module, union_mask, parent_quad, recovery_mode="conservative"
+        )
+        # Preserve the validated dense-farm behavior exactly. Adaptive recovery
+        # is reserved for scenes where the conservative pass under-recovers.
+        if len(conservative) >= 80:
+            return conservative
+        adaptive = real_farm_detect_module_instances(
+            image, parent_module, union_mask, parent_quad, recovery_mode="adaptive"
+        )
+        return adaptive if len(adaptive) > len(conservative) else conservative
     source_mask = (np.asarray(union_mask) > 0).astype(np.uint8) * 255
     contours, _ = cv2.findContours(source_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    minimum_area = max(120.0, float(np.count_nonzero(source_mask)) * 0.035)
-    table_contours = [contour for contour in contours if cv2.contourArea(contour) >= minimum_area]
+    # A percentage of the entire farm mask discarded legitimate separated rows
+    # whenever a scene contained many components. Use an image-scale noise floor
+    # so every visible module/table can enter instance recovery.
+    support_area = float(np.count_nonzero(source_mask))
+    minimum_area = (
+        max(120.0, support_area * 0.035)
+        if recovery_mode == "conservative"
+        else max(48.0, support_area * 0.00012)
+    )
+    table_contours = []
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        _, _, contour_width, contour_height = cv2.boundingRect(contour)
+        if area >= minimum_area and min(contour_width, contour_height) >= 4:
+            table_contours.append(contour)
     table_contours.sort(key=lambda contour: cv2.boundingRect(contour)[1])
+    contour_areas = [float(cv2.contourArea(contour)) for contour in table_contours]
+    adaptive_area_reference = (
+        float(np.percentile(contour_areas, 35)) if contour_areas else 0.0
+    )
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     parent_id = parent_module.get("module_id", "M")
     instances = []
@@ -891,6 +1001,29 @@ def real_farm_detect_module_instances(image, parent_module, union_mask, parent_q
                 selected.append(index)
         return sorted(selected)
 
+    def guided_periodic_separators(score, axis_length, cross_length, existing):
+        """Split oversized connected tables without assuming image orientation."""
+        if axis_length < max(54, cross_length * 2.35):
+            return existing
+        expected_segments = max(2, int(round(axis_length / max(18.0, cross_length * 1.35))))
+        if len(existing) + 1 >= max(2, int(expected_segments * 0.72)):
+            return existing
+        vector = np.asarray(score, dtype=np.float32)
+        smooth = cv2.GaussianBlur(vector.reshape(-1, 1), (0, 0), max(1.0, axis_length * 0.003)).ravel()
+        spacing = axis_length / float(expected_segments)
+        guided = list(existing)
+        for boundary_index in range(1, expected_segments):
+            expected = boundary_index * spacing
+            radius = max(5, int(spacing * 0.30))
+            lo = max(3, int(round(expected)) - radius)
+            hi = min(axis_length - 3, int(round(expected)) + radius + 1)
+            if hi <= lo:
+                continue
+            candidate = lo + int(np.argmax(smooth[lo:hi]))
+            if all(abs(candidate - previous) >= max(7, spacing * 0.38) for previous in guided):
+                guided.append(candidate)
+        return sorted(guided)
+
     for contour in table_contours:
         table_quad = np.asarray(real_farm_order_quad(cv2.boxPoints(cv2.minAreaRect(contour)).tolist()), dtype=np.float32)
         size = real_farm_canonical_size(table_quad)
@@ -911,8 +1044,23 @@ def real_farm_detect_module_instances(image, parent_module, union_mask, parent_q
         support_f = support.astype(np.float32)
         x_score = (sobel_x * support_f).sum(axis=0) / np.maximum(1.0, support_f.sum(axis=0)) + bright.mean(axis=0) * 85.0
         y_score = (sobel_y * support_f).sum(axis=1) / np.maximum(1.0, support_f.sum(axis=1)) + bright.mean(axis=1) * 85.0
-        x_separators = peak_separators(x_score, max(16, int(local_w * 0.28)), max(8, int(local_w * 0.10)))
-        y_separators = peak_separators(y_score, max(12, int(local_w * 0.21)), max(8, int(local_w * 0.10)))
+        # The expanded component pass often isolates one physical module per
+        # contour. Do not split those contours again on their internal cell grid.
+        # Only large connected regions (or a scene with very few components)
+        # receive separator-based module recovery.
+        split_connected_region = (
+            recovery_mode != "adaptive"
+            or len(table_contours) <= 3
+            or float(cv2.contourArea(contour)) >= adaptive_area_reference * 2.0
+        )
+        if split_connected_region:
+            x_separators = peak_separators(x_score, max(16, int(local_w * 0.28)), max(8, int(local_w * 0.10)))
+            y_separators = peak_separators(y_score, max(12, int(local_w * 0.21)), max(8, int(local_w * 0.10)))
+        else:
+            x_separators, y_separators = [], []
+        if recovery_mode == "adaptive" and split_connected_region:
+            x_separators = guided_periodic_separators(x_score, local_w, local_h, x_separators)
+            y_separators = guided_periodic_separators(y_score, local_h, local_w, y_separators)
         x_bounds = sorted(set([0, local_w - 1] + x_separators))
         y_bounds = sorted(set([0, local_h - 1] + y_separators))
         for y_index in range(len(y_bounds) - 1):
@@ -940,6 +1088,11 @@ def real_farm_detect_module_instances(image, parent_module, union_mask, parent_q
                     "parent_module_id": parent_id,
                 })
                 attach_refined_support(record, coverage)
+                if recovery_mode == "adaptive":
+                    record["visual_pv_score"] = round(real_farm_module_visual_score(image, record), 4)
+                    record["grid_texture_score"] = round(real_farm_module_grid_texture_score(image, record), 4)
+                    if record["visual_pv_score"] < 0.16 or record["grid_texture_score"] < 0.35:
+                        continue
                 record["warnings"] = [] if coverage >= 0.78 else [{
                     "level": "warning", "code": "low_instance_support",
                     "message": f"{module_id} has incomplete PV support and may need manual adjustment.",
@@ -987,7 +1140,7 @@ def real_farm_accept_refinement(module, result):
     return module
 
 
-def real_farm_recover_full_farm(state, image):
+def real_farm_recover_full_farm(state, image, progress_callback=None):
     """Recover the complete farm and promote child instances to canonical geometry.
 
     The full-image region is retained only as search provenance.  It must never
@@ -1004,7 +1157,7 @@ def real_farm_recover_full_farm(state, image):
     search_region = real_farm_module_record(
         "SEARCH001", search_polygon, image.size, "FULL_FARM", 0.0, "automatic_full_farm_search"
     )
-    result = real_farm_refine_pv_support(image, search_region)
+    result = real_farm_refine_pv_support(image, search_region, progress_callback=progress_callback)
     if not result.get("success"):
         return result
     real_farm_accept_refinement(search_region, result)
@@ -1015,6 +1168,8 @@ def real_farm_recover_full_farm(state, image):
     # This is the one authoritative downstream geometry collection.  The
     # SEARCH001 parent is deliberately excluded: it is a search hint, not a PV
     # module and not thermal support.
+    if progress_callback:
+        progress_callback("Validating recovered geometry")
     state["modules"] = recovered
     search_provenance = {
         key: value for key, value in search_region.items()
@@ -1031,6 +1186,12 @@ def real_farm_recover_full_farm(state, image):
         "search_roi_is_thermal_support": False,
     })
     state["updated_at"] = real_farm_now()
+    if progress_callback:
+        progress_callback("Building the full-farm union mask")
+    accepted = real_farm_recovered_modules(recovered, image_size=image.size)
+    result["final_pv_mask"] = real_farm_module_mask(image.size, accepted, active=True)
+    result["accepted_count"] = len(accepted)
+    result["rejected_count"] = len(recovered) - len(accepted)
     result["search_region"] = search_provenance
     result["module_instances"] = recovered
     result["module_instance_count"] = len(recovered)
@@ -1832,11 +1993,66 @@ def real_farm_faulted_master(master_layers, observations):
             continue
         observation_type = observation.get("observation_type", "SingleHotSpot")
         if observation_type:
+            if observation_type != "SingleHotSpot":
+                failure = {
+                    "fault_type": observation_type,
+                    "production_fault_render_failed": True,
+                    "fallback_used": False,
+                    "failure_reason": "real_farm_observation_renderer_unavailable",
+                }
+                observation.setdefault("production_fault_debug_by_type", {})[observation_type] = failure
+                observation["production_fault_debug"] = failure
+                raise FaultGeometryError(f"Production fault reference unavailable for {observation_type}")
             output = real_farm_apply_production_fault(output, module, observation, observation_type)
         diagnostic = observation.get("diagnostic_fault_type")
         if diagnostic:
+            if diagnostic not in {"SingleDiode", "SingleByPassed"}:
+                failure = {
+                    "fault_type": diagnostic,
+                    "production_fault_render_failed": True,
+                    "fallback_used": False,
+                    "failure_reason": "real_farm_diagnostic_renderer_unavailable",
+                }
+                observation.setdefault("production_fault_debug_by_type", {})[diagnostic] = failure
+                observation["production_fault_debug"] = failure
+                raise FaultGeometryError(f"Production fault reference unavailable for {diagnostic}")
             output = real_farm_apply_production_fault(output, module, observation, diagnostic)
     return output
+
+
+def real_farm_observation_master(master_layers, observations):
+    """Render Far View observations only, without diagnostic fault state."""
+    output = np.asarray(master_layers["master_scalar"], dtype=np.float32).copy()
+    module_lookup = {item.get("module_id"): item for item in master_layers.get("accepted_modules", [])}
+    for source in observations or []:
+        module = module_lookup.get(source.get("module_id"))
+        observation_type = source.get("observation_type")
+        if module is None or not observation_type:
+            continue
+        observation = json.loads(json.dumps(source))
+        output = real_farm_apply_production_fault(output, module, observation, observation_type)
+    return output
+
+
+def real_farm_diagnostic_master(master_layers, observation, diagnostic_fault=None, severity=None):
+    """Render one diagnosis from the healthy scalar master; never retain its hotspot."""
+    output = np.asarray(master_layers["master_scalar"], dtype=np.float32).copy()
+    if not observation:
+        return output
+    fault_type = diagnostic_fault or observation.get("diagnostic_fault_type")
+    if fault_type not in {"SingleDiode", "SingleByPassed"}:
+        return output
+    module = next(
+        (item for item in master_layers.get("accepted_modules", []) if item.get("module_id") == observation.get("module_id")),
+        None,
+    )
+    if module is None:
+        return output
+    diagnostic = json.loads(json.dumps(observation))
+    diagnostic["diagnostic_fault_type"] = fault_type
+    if severity is not None:
+        diagnostic["severity"] = int(severity)
+    return real_farm_apply_production_fault(output, module, diagnostic, fault_type)
 
 
 def real_farm_thermal_image(image, modules, observations=None, master_layers=None):
@@ -1863,6 +2079,41 @@ def real_farm_close_thermal_image(faulted_master_scalar, module):
     )
     sensor = apply_sensor_model(scalar, "real_farm", "close")
     return thermal_display_rgb_from_scalar(sensor, "real_farm", "close")
+
+
+def real_farm_close_context_image(master_scalar, selected_module, modules, margin_ratio=0.16):
+    """Crop a native-resolution local PV group around the selected module."""
+    selected_points = np.asarray(selected_module.get("outer_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
+    selected_center = selected_points.mean(axis=0)
+    selected_span = max(8.0, float(np.linalg.norm(selected_points.max(axis=0) - selected_points.min(axis=0))))
+    ranked = []
+    for module in modules:
+        points = np.asarray(module.get("outer_polygon_rgb", []), dtype=np.float32)
+        if points.shape != (4, 2):
+            continue
+        distance = float(np.linalg.norm(points.mean(axis=0) - selected_center))
+        ranked.append((distance, module, points))
+    ranked.sort(key=lambda item: item[0])
+    nearby = [entry for entry in ranked[:12] if entry[0] <= selected_span * 6.5]
+    if len(nearby) < min(5, len(ranked)):
+        nearby = ranked[:min(8, len(ranked))]
+    context_points = np.concatenate([entry[2] for entry in nearby], axis=0) if nearby else selected_points
+    x_min, y_min = context_points.min(axis=0)
+    x_max, y_max = context_points.max(axis=0)
+    span_x = max(1.0, float(x_max - x_min))
+    span_y = max(1.0, float(y_max - y_min))
+    height, width = np.asarray(master_scalar).shape[:2]
+    x1 = max(0, int(math.floor(x_min - span_x * margin_ratio)))
+    y1 = max(0, int(math.floor(y_min - span_y * margin_ratio)))
+    x2 = min(width, int(math.ceil(x_max + span_x * margin_ratio)))
+    y2 = min(height, int(math.ceil(y_max + span_y * margin_ratio)))
+    crop = np.asarray(master_scalar, dtype=np.float32)[y1:y2, x1:x2]
+    sensor = apply_sensor_model(crop, "real_farm", "close")
+    display = thermal_display_rgb_from_scalar(sensor, "real_farm", "close").convert("RGB")
+    draw = ImageDraw.Draw(display)
+    outline = [(float(x - x1), float(y - y1)) for x, y in selected_points]
+    draw.line(outline + [outline[0]], fill=(56, 189, 248), width=max(2, min(display.size) // 240))
+    return display
 
 
 def real_farm_mask_preview(image_size, modules):
@@ -1936,7 +2187,7 @@ def real_farm_get_thermal_master(state, image, modules):
     return cached
 
 
-def real_farm_review_panel(state, image, healthy_thermal, faulted_thermal, faulted_master_scalar, thermal_modules, selected_module_id):
+def real_farm_review_panel(state, image, healthy_thermal, far_observation_thermal, master_layers, thermal_modules, selected_module_id):
     observations = state.get("observations", [])
     selected_observation_id = st.session_state.get("real_farm_selected_observation")
     selected_observation = next((item for item in observations if item.get("observation_id") == selected_observation_id), None)
@@ -1946,16 +2197,17 @@ def real_farm_review_panel(state, image, healthy_thermal, faulted_thermal, fault
     columns = st.columns(3)
     columns[0].image(image, caption="Clean Real RGB", use_container_width=True)
     columns[1].image(healthy_thermal, caption="Healthy Real V2 Thermal", use_container_width=True)
-    columns[2].image(faulted_thermal, caption="Faulted Real Thermal", use_container_width=True)
+    columns[2].image(far_observation_thermal, caption="Far View Observation Thermal", use_container_width=True)
     if selected_module is None:
         st.info("Select a recovered module in Workspace to inspect its Review record.")
         return
+    diagnostic = selected_observation.get("diagnostic_fault_type") if selected_observation else None
+    diagnostic_master = real_farm_diagnostic_master(master_layers, selected_observation, diagnostic)
     detail_columns = st.columns([0.58, 0.42])
     detail_columns[0].image(
-        real_farm_close_thermal_image(faulted_master_scalar, selected_module),
-        caption=f"Selected-module Close View · {selected_module_id}", use_container_width=True,
+        real_farm_close_context_image(diagnostic_master, selected_module, thermal_modules),
+        caption=f"Diagnostic Close View · {selected_module_id}",
     )
-    diagnostic = selected_observation.get("diagnostic_fault_type") if selected_observation else None
     active_fault = diagnostic or (selected_observation.get("observation_type") if selected_observation else None)
     reference_ids = (selected_observation or {}).get("production_reference_ids", {})
     reference_id = reference_ids.get(active_fault) if active_fault else None
@@ -1983,6 +2235,14 @@ def real_farm_export_panel(state, image, healthy_thermal, faulted_thermal, therm
     row_b[0].download_button("Download Annotated Thermal", export_current_view_bytes(annotated), file_name=f"{project_name}_faulted_annotated.png", mime="image/png", use_container_width=True)
     row_b[1].download_button("Download Module Geometry JSON", json.dumps(thermal_modules, indent=2), file_name=f"{project_name}_module_geometry.json", mime="application/json", use_container_width=True)
     row_b[2].download_button("Download Fault Metadata JSON", json.dumps(real_farm_fault_metadata(state.get("observations", [])), indent=2), file_name=f"{project_name}_fault_metadata.json", mime="application/json", use_container_width=True)
+    row_c = st.columns(3)
+    row_c[0].download_button("Download Geometry JSON", real_farm_project_json(state), file_name=f"{project_name}_rf1_geometry.json", mime="application/json", use_container_width=True)
+    row_c[1].download_button("Download Module CSV", real_farm_modules_csv(state), file_name=f"{project_name}_rf1_modules.csv", mime="text/csv", use_container_width=True)
+    row_c[2].download_button(
+        "Download PV Union Mask",
+        export_current_view_bytes(Image.fromarray(real_farm_module_mask(image.size, thermal_modules, active=True), "L")),
+        file_name=f"{project_name}_pv_union_mask.png", mime="image/png", use_container_width=True,
+    )
     st.download_button(
         "Export Complete Real Farm Dataset ZIP",
         real_farm_dataset_zip(state, image, faulted_thermal, healthy_thermal, annotated),
@@ -1991,7 +2251,7 @@ def real_farm_export_panel(state, image, healthy_thermal, faulted_thermal, therm
     st.caption("Clean exports contain no debug masks, selection outlines, labels, or support overlays. The annotated image is provided separately.")
 
 
-def real_farm_fault_workflow(state, image, modules):
+def real_farm_fault_workflow(state, image, modules, section="Faults"):
     canonical_modules = st.session_state.get("real_farm_modules", modules)
     canonical_mask = st.session_state.get("real_farm_final_pv_mask")
     modules = canonical_modules
@@ -2008,17 +2268,14 @@ def real_farm_fault_workflow(state, image, modules):
     pending_geometry = [item for item in excluded_geometry if item.get("mechanically_valid") and not item.get("refinement_ready")]
     invalid_geometry = [item for item in excluded_geometry if not item.get("mechanically_valid")]
     geometry_summary = real_farm_geometry_qa_summary(image, modules)
-    summary_columns = st.columns(4)
-    summary_columns[0].metric("Detected modules", geometry_summary["detected"])
-    summary_columns[1].metric("Accepted modules", geometry_summary["accepted"])
-    summary_columns[2].metric("Warnings", geometry_summary["warnings"])
-    summary_columns[3].metric("Rejected geometry", geometry_summary["rejected"])
+    if section == "Thermal":
+        real_farm_render_geometry_summary(geometry_summary, "real_farm_thermal_geometry")
     recovered_geometry = real_farm_recovered_modules(valid_geometry, image_size=image.size)
     if recovered_geometry:
         st.success(f"{len(recovered_geometry)} accepted recovered module(s) available. The full-farm union mask can be generated.")
         weak_ids = [item.get("module_id", "unknown") for item in valid_geometry if not item.get("visually_supported")]
         if weak_ids:
-            st.warning(f"Weak PV-texture confidence for {', '.join(weak_ids)}. Manual geometry is authoritative, so mask generation remains allowed.")
+            st.warning(f"Weak PV-texture confidence for {', '.join(weak_ids)}. Mechanically valid recovered geometry remains eligible for the full-farm mask.")
     if invalid_geometry:
         blocked_ids = ", ".join(item.get("module_id", "unknown") for item in invalid_geometry)
         st.error(f"Mechanically invalid polygon(s) are blocked: {blocked_ids}. Fix duplicate points, self-intersection, insufficient area, image coverage, or homography stability.")
@@ -2026,7 +2283,7 @@ def real_farm_fault_workflow(state, image, modules):
         pending_ids = ", ".join(item.get("module_id", "unknown") for item in pending_geometry)
         st.info(f"Refinement required for coarse ROI(s): {pending_ids}. Preview and accept a refined mask, or explicitly use the manual polygon override.")
     button_label = "Regenerate Real Thermal Mask" if thermal_ready else "Generate Real Thermal Mask"
-    if st.button(button_label, type="primary", use_container_width=True, disabled=not valid_geometry):
+    if section == "Thermal" and st.button(button_label, type="primary", use_container_width=True, disabled=not valid_geometry):
         layers = real_farm_build_thermal_master(image, modules, final_pv_mask=canonical_mask)
         if not layers.get("accepted_modules"):
             st.error("No mechanically valid module polygon is available. Correct the polygon geometry, then generate again.")
@@ -2084,29 +2341,44 @@ def real_farm_fault_workflow(state, image, modules):
     healthy_sensor = apply_sensor_model(healthy_master_scalar, "real_farm", "far")
     healthy_thermal = thermal_display_rgb_from_scalar(healthy_sensor, "real_farm", "far")
     try:
+        # This combined scalar remains the authoritative export state and populates
+        # active-only production metadata. Interactive Far and Close views below
+        # intentionally use separate render masters.
         faulted_master_scalar = real_farm_faulted_master(master_layers, observations)
+        far_observation_master = real_farm_observation_master(master_layers, observations)
         state.pop("production_fault_error", None)
     except FaultGeometryError as exc:
         faulted_master_scalar = healthy_master_scalar.copy()
+        far_observation_master = healthy_master_scalar.copy()
         state["production_fault_error"] = str(exc)
         st.error("Production fault reference unavailable.")
         with st.expander("Developer production failure"):
             st.code(str(exc))
-    thermal_sensor = apply_sensor_model(faulted_master_scalar, "real_farm", "far")
+    thermal_sensor = apply_sensor_model(far_observation_master, "real_farm", "far")
     thermal = thermal_display_rgb_from_scalar(thermal_sensor, "real_farm", "far")
+    combined_sensor = apply_sensor_model(faulted_master_scalar, "real_farm", "far")
+    combined_thermal = thermal_display_rgb_from_scalar(combined_sensor, "real_farm", "far")
     module_ids = [item.get("module_id") for item in thermal_modules]
     selected_module_id = st.session_state.get("real_farm_target_module")
     if selected_module_id not in module_ids:
         selected_module_id = module_ids[0] if module_ids else None
         st.session_state["real_farm_target_module"] = selected_module_id
 
-    stage = st.radio("Real Farm workflow", ["Workspace", "Review", "Export"], horizontal=True, key="real_farm_workflow_stage")
-    if stage == "Review":
-        real_farm_review_panel(state, image, healthy_thermal, thermal, faulted_master_scalar, thermal_modules, selected_module_id)
+    if section == "Review":
+        real_farm_review_panel(state, image, healthy_thermal, thermal, master_layers, thermal_modules, selected_module_id)
         st.markdown("</div>", unsafe_allow_html=True)
         return
-    if stage == "Export":
-        real_farm_export_panel(state, image, healthy_thermal, thermal, thermal_modules, selected_module_id)
+    if section == "Export":
+        real_farm_export_panel(state, image, healthy_thermal, combined_thermal, thermal_modules, selected_module_id)
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    if section == "Thermal":
+        st.markdown("#### Healthy Full-Farm Thermal")
+        st.image(healthy_thermal, use_container_width=True)
+        st.caption(
+            f"{len(thermal_modules)} accepted module masks feed the canonical full-farm thermal master. "
+            "Selected-module state does not alter this scene."
+        )
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
@@ -2134,7 +2406,7 @@ def real_farm_fault_workflow(state, image, modules):
         st.session_state["real_farm_target_module"] = selected_module_id
         st.rerun()
 
-    view = st.radio("Full-scene view", ["Faulted Thermal", "Healthy Thermal", "RGB + Accepted Modules"], horizontal=True, key="real_farm_thermal_view")
+    view = st.radio("Full-scene view", ["Observation Thermal", "Healthy Thermal", "RGB + Accepted Modules"], horizontal=True, key="real_farm_thermal_view")
     if view == "RGB + Accepted Modules":
         st.image(real_farm_annotated_preview(image, thermal_modules, selected_module_id), use_container_width=True)
     elif view == "Healthy Thermal":
@@ -2163,7 +2435,10 @@ def real_farm_fault_workflow(state, image, modules):
     st.caption("Thermal Hotspot uses the frozen production bank. Partial Shading remains unavailable in Real Farm production mode.")
     target_col, severity_col, seed_col = st.columns([0.42, 0.28, 0.30])
     target_col.metric("Target module", selected_module_id or "—")
-    selected_hotspot_severity = severity_col.slider("Hotspot severity", 1, 10, 7, key="real_farm_selected_hotspot_severity")
+    selected_hotspot_severity = severity_col.number_input(
+        "Hotspot severity", min_value=1, max_value=10, value=7, step=1,
+        key="real_farm_selected_hotspot_severity",
+    )
     selected_hotspot_seed = seed_col.number_input("Fault seed", min_value=0, max_value=999999, value=42, step=1, key="real_farm_selected_hotspot_seed")
     if st.button("Add Thermal Hotspot To Selected Module", type="primary", use_container_width=True, disabled=not selected_module_id):
         observation = real_farm_add_module_observation(
@@ -2238,7 +2513,6 @@ def real_farm_fault_workflow(state, image, modules):
         selected_module = next(item for item in thermal_modules if item.get("module_id") == selected.get("module_id"))
         if st.session_state.get("real_farm_close_view"):
             st.markdown(f"#### Close View — {selected['observation_id']} on {selected['module_id']}")
-            st.image(real_farm_close_thermal_image(faulted_master_scalar, selected_module), use_container_width=True)
             diagnosis_col, severity_col = st.columns([0.72, 0.28])
             fault_options = list(CLOSE_DIAGNOSTIC_FAULT_TYPES)
             supported_real_farm_diagnostics = {"SingleDiode", "SingleByPassed"}
@@ -2248,11 +2522,39 @@ def real_farm_fault_workflow(state, image, modules):
                 "Actual fault for this hotspot",
                 fault_options,
                 index=default_index,
-                format_func=fault_display_name,
+                format_func=lambda value: (
+                    fault_display_name(value)
+                    if value in supported_real_farm_diagnostics
+                    else f"{fault_display_name(value)} — Unavailable"
+                ),
                 key=f"real_farm_diagnosis_{selected['observation_id']}",
             )
-            severity = severity_col.slider("Severity", 1, 10, int(selected.get("severity", 7)), key=f"real_farm_severity_{selected['observation_id']}")
+            severity = severity_col.number_input(
+                "Severity", min_value=1, max_value=10, value=int(selected.get("severity", 7)), step=1,
+                key=f"real_farm_severity_{selected['observation_id']}",
+            )
             unsupported_diagnostic = chosen_fault not in supported_real_farm_diagnostics
+            try:
+                diagnostic_master = real_farm_diagnostic_master(
+                    master_layers, selected, chosen_fault, int(severity)
+                )
+                close_image = real_farm_close_context_image(
+                    diagnostic_master, selected_module, thermal_modules
+                )
+                st.image(
+                    close_image,
+                    caption=(
+                        f"Local PV context · {selected['module_id']} · {fault_display_name(chosen_fault)}"
+                        if not unsupported_diagnostic
+                        else f"Healthy local PV context · {selected['module_id']}"
+                    ),
+                    width=min(close_image.width, 1000),
+                )
+            except FaultGeometryError as exc:
+                unsupported_diagnostic = True
+                st.error("Production fault reference unavailable.")
+                with st.expander("Developer production failure"):
+                    st.code(str(exc))
             if unsupported_diagnostic:
                 if chosen_fault == "StringOpenCircuit":
                     st.warning(
@@ -2263,12 +2565,22 @@ def real_farm_fault_workflow(state, image, modules):
                     )
                 else:
                     st.warning(f"{fault_display_name(chosen_fault)} is visible for production-status transparency but is not supported in Real Farm mode.")
-            if st.button("Apply Fault To This Hotspot", type="primary", use_container_width=True, disabled=unsupported_diagnostic):
+            apply_col, clear_diagnosis_col = st.columns([0.7, 0.3])
+            if apply_col.button("Apply Diagnosis", type="primary", use_container_width=True, disabled=unsupported_diagnostic):
                 selected["diagnostic_fault_type"] = chosen_fault
                 selected["severity"] = int(severity)
                 selected["diagnosed_at"] = real_farm_now()
                 state["updated_at"] = real_farm_now()
                 st.success(f"{fault_display_name(chosen_fault)} assigned to {selected['observation_id']}. All other hotspots were preserved.")
+                st.rerun()
+            if clear_diagnosis_col.button(
+                "Clear Diagnosis", use_container_width=True,
+                disabled=not selected.get("diagnostic_fault_type"),
+            ):
+                selected.pop("diagnostic_fault_type", None)
+                selected.pop("diagnosed_at", None)
+                selected.pop("applied_faults", None)
+                state["updated_at"] = real_farm_now()
                 st.rerun()
 
         st.markdown("#### Review / Report")
@@ -2299,6 +2611,12 @@ def real_farm_main():
     with st.sidebar:
         st.divider()
         st.caption("RF-1 Geometry")
+        section = st.radio(
+            "Real Farm workflow",
+            REAL_FARM_WORKFLOW_SECTIONS,
+            key="real_farm_section",
+            label_visibility="collapsed",
+        )
         if st.button("New Real Farm Project", use_container_width=True):
             for key in (
                 "real_farm_state", "real_farm_image", "real_farm_image_path", "real_farm_selected_module",
@@ -2325,11 +2643,14 @@ def real_farm_main():
                 real_farm_restore(st.session_state["real_farm_redo_stack"].pop())
                 st.rerun()
 
-    upload_col, load_col = st.columns([0.62, 0.38])
-    with upload_col:
-        uploaded = st.file_uploader("Upload one real RGB aerial/drone image", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=False)
-    with load_col:
-        project_upload = st.file_uploader("Load RF-1 geometry JSON", type=["json"], accept_multiple_files=False)
+    uploaded = None
+    project_upload = None
+    if section == "Farm Setup":
+        upload_col, load_col = st.columns([0.62, 0.38])
+        with upload_col:
+            uploaded = st.file_uploader("Upload one real RGB aerial/drone image", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=False)
+        with load_col:
+            project_upload = st.file_uploader("Load RF-1 geometry JSON", type=["json"], accept_multiple_files=False)
 
     if uploaded is not None and ("real_farm_uploaded_name" not in st.session_state or st.session_state["real_farm_uploaded_name"] != uploaded.name):
         try:
@@ -2384,6 +2705,11 @@ def real_farm_main():
             module["module_instances"] = []
             module["refined_pv_polygon_rgb"] = None
     image_size = (int(state["image"]["width"]), int(state["image"]["height"]))
+    if section != "Farm Setup":
+        real_farm_sync_live_geometry(state, image)
+        real_farm_fault_workflow(state, image, modules, section=section)
+        return
+
     recovered_for_ui = real_farm_recovered_modules(modules, include_unaccepted=True, image_size=image.size)
     recovery_columns = st.columns([0.72, 0.28])
     recovery_columns[0].caption(
@@ -2395,7 +2721,22 @@ def real_farm_main():
         real_farm_invalidate_thermal(state)
         # Always start the primary workflow from the complete source image.
         # Existing manual M001/ROI state must never divert automatic recovery.
-        recovery = real_farm_recover_full_farm(state, image)
+        started = time.perf_counter()
+        with st.status("Detecting PV support", expanded=True) as recovery_status:
+            recovery = real_farm_recover_full_farm(
+                state, image, progress_callback=lambda message: recovery_status.write(message)
+            )
+            elapsed = time.perf_counter() - started
+            if recovery.get("success"):
+                summary_text = (
+                    f"{recovery.get('module_instance_count', 0)} modules recovered · "
+                    f"{recovery.get('accepted_count', 0)} accepted · "
+                    f"{recovery.get('rejected_count', 0)} rejected · completed in {elapsed:.1f} s"
+                )
+                state["last_recovery_summary"] = summary_text
+                recovery_status.update(label=summary_text, state="complete", expanded=False)
+            else:
+                recovery_status.update(label="PV module recovery did not complete", state="error", expanded=True)
         if recovery.get("success"):
             recovered = recovery.get("module_instances", [])
             st.session_state["real_farm_selected_module"] = recovered[0].get("module_id") if recovered else None
@@ -2404,6 +2745,8 @@ def real_farm_main():
         st.session_state["real_farm_recovery_error"] = recovery.get("message", "Full-farm recovery failed.")
     if st.session_state.get("real_farm_recovery_error"):
         st.error(st.session_state["real_farm_recovery_error"])
+    if state.get("last_recovery_summary"):
+        st.success(state["last_recovery_summary"])
 
     modules = state.setdefault("modules", [])
     recovered_for_ui, accepted_for_ui, final_pv_mask, nonzero_masks = real_farm_sync_live_geometry(state, image)
@@ -2419,6 +2762,7 @@ def real_farm_main():
     stats[2].metric("Modules", geometry_summary["detected"])
     stats[3].metric("Thermal", "Mask ready" if state.get("thermal_mask_ready") else "Not generated")
     stats[4].metric("Detection", "Recovered" if recovered_for_ui else "Pending")
+    real_farm_render_geometry_summary(geometry_summary, "real_farm_setup_geometry")
 
     st.markdown('<div class="pv-card"><div class="pv-section-title">Full-Farm PV Support Review</div>', unsafe_allow_html=True)
     if recovered_for_ui:
@@ -2451,10 +2795,10 @@ def real_farm_main():
         with editor_col:
             st.markdown('<div class="pv-card"><div class="pv-section-title">Recovered Module Review</div>', unsafe_allow_html=True)
             view_mode = st.radio("Preview", ["Annotated Geometry", "Clean Original", "Rectified Crops"], horizontal=True)
-            zoom = st.slider("Zoom", 1.0, 8.0, 1.0, 0.25)
+            zoom = st.selectbox("Zoom", [1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0], index=0)
             pan_cols = st.columns(2)
-            pan_x = pan_cols[0].slider("Pan X", 0.0, 1.0, 0.5, 0.01)
-            pan_y = pan_cols[1].slider("Pan Y", 0.0, 1.0, 0.5, 0.01)
+            pan_x = pan_cols[0].number_input("Pan X", 0.0, 1.0, 0.5, 0.05, format="%.2f")
+            pan_y = pan_cols[1].number_input("Pan Y", 0.0, 1.0, 0.5, 0.05, format="%.2f")
             if view_mode == "Clean Original":
                 st.image(real_farm_viewport_image(image, zoom, pan_x, pan_y), use_container_width=True)
             elif view_mode == "Rectified Crops":
@@ -2468,7 +2812,7 @@ def real_farm_main():
             st.markdown('<div class="pv-card"><div class="pv-section-title">Advanced / Manual Geometry Correction</div>', unsafe_allow_html=True)
             st.caption("Optional tools for missed modules, failed refinement, or explicit geometry overrides.")
             action = st.selectbox("Action", ["Add polygon", "Edit selected", "Duplicate", "Repeat row", "Repeat grid", "Delete selected"])
-            inset = st.slider("Active inset", 0.0, 0.16, 0.035, 0.005)
+            inset = st.number_input("Active inset", min_value=0.0, max_value=0.16, value=0.035, step=0.005, format="%.3f")
             array_id = st.text_input("Array/group ID optional", value="")
 
             if action == "Add polygon":
@@ -2593,42 +2937,4 @@ def real_farm_main():
             st.markdown("</div>", unsafe_allow_html=True)
 
         real_farm_refinement_workflow(state, image, modules, st.session_state.get("real_farm_selected_module"))
-    real_farm_fault_workflow(state, image, modules)
-
-    export_col, data_col = st.columns([0.46, 0.54])
-    project_name = real_farm_safe_name(state.get("original_rgb_filename") or "real_farm_rf1")
-    with export_col:
-        st.markdown('<div class="pv-card"><div class="pv-section-title">Project & Geometry Export</div>', unsafe_allow_html=True)
-        project_json = real_farm_project_json(state)
-        st.download_button("Download Geometry JSON", project_json, file_name=f"{project_name}_rf1_geometry.json", mime="application/json", use_container_width=True)
-        st.download_button("Download Module CSV", real_farm_modules_csv(state), file_name=f"{project_name}_rf1_modules.csv", mime="text/csv", use_container_width=True)
-        annotated = real_farm_annotated_preview(image, recovered_for_ui, selected_id, max_width=2400)
-        st.download_button("Download Annotated Preview", export_current_view_bytes(annotated), file_name=f"{project_name}_rf1_annotated.png", mime="image/png", use_container_width=True)
-        st.download_button("Download Clean Original Preview", export_current_view_bytes(image), file_name=f"{project_name}_clean_original.png", mime="image/png", use_container_width=True)
-        if st.button("Save Project JSON Locally", use_container_width=True):
-            path = real_farm_save_project(state, project_name)
-            st.success(f"Saved: {path}")
-        st.markdown("</div>", unsafe_allow_html=True)
-    with data_col:
-        st.markdown('<div class="pv-card"><div class="pv-section-title">ModuleGeometry Records</div>', unsafe_allow_html=True)
-        st.dataframe(
-            [
-                {
-                    "module_id": item.get("module_id"),
-                    "array_id": item.get("array_id") or "",
-                    "mask_source": item.get("mask_source", "SEARCH_ROI"),
-                    "refinement": item.get("refinement_status", "pending"),
-                    "orientation": item.get("orientation"),
-                    "warnings": sum(
-                        notice.get("level") == "warning" for notice in item.get("warnings", [])
-                    ),
-                    "confidence": item.get("geometry_confidence"),
-                }
-                for item in recovered_for_ui
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
-        with st.expander("Project provenance"):
-            st.json(state.get("provenance", {}))
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.caption("Geometry is stored in the canonical Real Farm state. Use the Export section for images, masks, module records, and metadata.")

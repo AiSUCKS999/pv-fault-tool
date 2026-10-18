@@ -49,9 +49,8 @@ def main():
     state["thermal_source"] = namespace["REAL_FARM_SYNTHETIC_THERMAL"]
     state["thermal_geometry_signature"] = namespace["real_farm_geometry_signature"](modules)
     observations = namespace["real_farm_generate_observations"](modules, 10, 42)
-    observations[0]["diagnostic_fault_type"] = "SoilingDust"
-    observations[1]["diagnostic_fault_type"] = "CellCracking"
-    observations[2]["diagnostic_fault_type"] = "SurfaceObstruction"
+    observations[0]["diagnostic_fault_type"] = "SingleDiode"
+    observations[1]["diagnostic_fault_type"] = "SingleByPassed"
     state["observations"] = observations
 
     mask = namespace["real_farm_module_mask"](image.size, modules)
@@ -110,6 +109,41 @@ def main():
     assert set(switched["applied_faults"]) == {"SingleHotSpot", "SingleDiode"}
     assert np.array_equal(healthy_before, layers["master_scalar"])
     assert np.count_nonzero(layers["pv_scalar"][mask == 0]) == 0
+    # Far View and diagnostic Close View must be independent scalar compositions.
+    separated = {
+        "observation_id": "VIEW_SEPARATION_REGRESSION",
+        "module_id": modules[0]["module_id"],
+        "local_uv": [0.53, 0.50], "severity": 7,
+        "observation_type": "SingleHotSpot",
+        "diagnostic_fault_type": "SingleDiode",
+    }
+    far_only = namespace["real_farm_observation_master"](layers, [separated])
+    diagnostic_only = namespace["real_farm_diagnostic_master"](layers, separated)
+    assert np.any(far_only != layers["master_scalar"])
+    assert np.any(diagnostic_only != layers["master_scalar"])
+    assert not np.array_equal(far_only, diagnostic_only)
+    close_context = namespace["real_farm_close_context_image"](
+        diagnostic_only, modules[0], modules
+    )
+    assert close_context.width <= image.width and close_context.height <= image.height
+
+    # Unsupported diagnoses remain unavailable and can never enter the generic
+    # fault path or appear as a hotspot substitute.
+    unsupported = json.loads(json.dumps(separated))
+    unsupported["diagnostic_fault_type"] = "SurfaceObstruction"
+    unsupported_preview = namespace["real_farm_diagnostic_master"](
+        layers, unsupported
+    )
+    assert np.array_equal(unsupported_preview, layers["master_scalar"])
+    try:
+        namespace["real_farm_faulted_master"](layers, [unsupported])
+    except namespace["FaultGeometryError"]:
+        pass
+    else:
+        raise AssertionError("Unsupported Real Farm diagnosis did not fail explicitly")
+    unsupported_debug = unsupported["production_fault_debug_by_type"]["SurfaceObstruction"]
+    assert unsupported_debug["production_fault_render_failed"] is True
+    assert unsupported_debug["fallback_used"] is False
     low_texture = Image.new("RGB", (320, 220), (110, 140, 110))
     low_texture_module = namespace["real_farm_module_record"](
         "MLOW", [[42, 44], [276, 62], [251, 184], [29, 169]], low_texture.size, "QA", 0.02, "low_texture_regression"
@@ -144,7 +178,8 @@ def main():
     assert len(observations) == 10
     assert len({item["observation_id"] for item in observations}) == 10
     assert len(report) == 10
-    assert report[1]["diagnostic_fault_type"] == "CellCracking"
+    assert report[0]["diagnostic_fault_type"] == "SingleDiode"
+    assert report[1]["diagnostic_fault_type"] == "SingleByPassed"
     assert {
         "project.json",
         "modules.csv",
