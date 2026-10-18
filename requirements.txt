@@ -3,4 +3,5 @@ opencv-python
 numpy
 pillow
 pandas
+plotly
 scikit-image

@@ -1311,6 +1311,22 @@ def apply_thermal_fault(temp, cell, fault_type, scale, production_reference_id=N
             production_trace["production_fault_render_failed"] = True
             production_trace["fallback_used"] = False
         raise FaultGeometryError(f"Production {fault_type} rendering failed for {cell.get('id', 'unknown')}")
+    if fault_type == "StringOpenCircuit" and require_production:
+        if production_trace is not None:
+            production_trace.update({
+                "production_fault_render_failed": True,
+                "fallback_used": False,
+                "failure_reason": "insufficient_production_references",
+                "production_model": "open_circuit_offline_module_pattern",
+                "reference_bank_path": "assets/fault_reference_bank/open_circuit_offline_module_pattern/semantic_production_approved",
+                "reference_quality_status": "PARTIALLY_SUPPORTED",
+                "approved_reference_count": 5,
+                "required_action": "collect_and_semantically_qualify_additional_independent_real_references",
+            })
+        raise FaultGeometryError(
+            "Production Open-Circuit / Offline Module Pattern is unavailable: "
+            "only 5 semantically approved real references exist, which is insufficient for production integration."
+        )
     if apply_real_thermal_fault_patch(temp, cell, fault_type, scale):
         return temp
     x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, fault_type)
