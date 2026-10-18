@@ -4553,7 +4553,10 @@ def main():
                         if fault_type not in far_observation_types
                     ]
                     fault_type = st.selectbox("Diagnostic Fault Type", available_fault_types, format_func=fault_display_name, key="new_fault_type")
-                    severity = st.slider("Severity", 1, 10, DEFAULT_FAULT_SCALE)
+                    severity = st.number_input(
+                        "Severity", min_value=1, max_value=10,
+                        value=int(DEFAULT_FAULT_SCALE), step=1, key="generated_fault_severity",
+                    )
                     add_col, clear_col = st.columns(2)
                     with add_col:
                         if st.button("Apply Fault", type="primary", use_container_width=True):
