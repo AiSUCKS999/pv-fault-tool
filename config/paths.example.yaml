@@ -1,0 +1,20 @@
+﻿# Shared path configuration template
+# Copy this file to paths.yaml on each computer and edit ONLY local dataset locations.
+
+project_root: AUTO
+
+project_paths:
+  fault_reference_bank: assets/fault_reference_bank
+  artifacts: artifacts
+  assets: assets
+  tools: tools
+
+datasets:
+  - D:/pv_training/datasets
+  - D:/pv_thermal_generator
+  - D:/pv_training
+  - D:/capstone2_final
+  - D:/capstone2_yolov11
+  - C:/Users/ammar.AMMAR/OneDrive/Documents/Design/datasets
+  - C:/Users/ammar.AMMAR/OneDrive/Documents/Design/local_pv_tool
+  - C:/Users/ammar.AMMAR/OneDrive/Documents/Design/TEAM_PV_TOOL
