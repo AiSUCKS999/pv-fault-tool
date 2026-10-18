@@ -1825,6 +1825,8 @@ def real_farm_faulted_master(master_layers, observations):
     output = np.asarray(master_layers["master_scalar"], dtype=np.float32).copy()
     module_lookup = {item.get("module_id"): item for item in master_layers.get("accepted_modules", [])}
     for observation in observations or []:
+        # Export only faults rendered this pass; keep reference IDs pinned for reuse.
+        observation["applied_faults"] = {}
         module = module_lookup.get(observation.get("module_id"))
         if not module:
             continue

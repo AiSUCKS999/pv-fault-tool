@@ -87,6 +87,28 @@ def main():
         assert observation["production_reference_ids"][fault_type] == first_reference
         assert observation["production_fault_debug"]["fallback_used"] is False
         assert np.array_equal(original, layers["master_scalar"])
+    # Replacing a diagnosis must replace its export records, while retaining
+    # pinned references so switching back preserves the production morphology.
+    switched = {
+        "observation_id": "DIAGNOSIS_REPLACEMENT_REGRESSION",
+        "module_id": modules[0]["module_id"],
+        "local_uv": [0.53, 0.50], "severity": 7,
+        "diagnostic_fault_type": "SingleDiode",
+    }
+    healthy_before = layers["master_scalar"].copy()
+    diode_first = namespace["real_farm_faulted_master"](layers, [switched])
+    diode_reference = switched["production_reference_ids"]["SingleDiode"]
+    switched["diagnostic_fault_type"] = "SingleByPassed"
+    namespace["real_farm_faulted_master"](layers, [switched])
+    expected_types = {"SingleHotSpot", "SingleByPassed"}
+    assert set(switched["applied_faults"]) == expected_types
+    assert {item["fault_type"] for item in namespace["real_farm_fault_metadata"]([switched])} == expected_types
+    assert switched["production_reference_ids"]["SingleDiode"] == diode_reference
+    switched["diagnostic_fault_type"] = "SingleDiode"
+    diode_return = namespace["real_farm_faulted_master"](layers, [switched])
+    assert np.array_equal(diode_first, diode_return)
+    assert set(switched["applied_faults"]) == {"SingleHotSpot", "SingleDiode"}
+    assert np.array_equal(healthy_before, layers["master_scalar"])
     assert np.count_nonzero(layers["pv_scalar"][mask == 0]) == 0
     low_texture = Image.new("RGB", (320, 220), (110, 140, 110))
     low_texture_module = namespace["real_farm_module_record"](
