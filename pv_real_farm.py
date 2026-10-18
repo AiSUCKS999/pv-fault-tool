@@ -1321,7 +1321,7 @@ def real_farm_fault_realism_compositor(base_local, production_delta, fault_type,
     return (soft_limit * np.tanh(blended / max(1.0, soft_limit))).astype(np.float32)
 
 
-def real_farm_apply_production_fault(master_scalar, module, observation, fault_type, realism=False):
+def real_farm_apply_production_fault(master_scalar, module, observation, fault_type, realism=False, return_debug=False):
     """Run the unchanged production engine in module-local space, then homography-warp its scalar delta."""
     output = np.asarray(master_scalar, dtype=np.float32).copy()
     points = np.asarray(module.get("active_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
@@ -1345,7 +1345,24 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
     base_local = cv2.warpPerspective(output, to_local, canonical_size, flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
     faulted_local = base_local.copy()
     cell = real_farm_production_cell(module, observation, width, height)
-    apply_thermal_fault(faulted_local, cell, fault_type, int(observation.get("severity", 7)))
+    trace = {}
+    reference_ids = observation.setdefault("production_reference_ids", {})
+    production_reference_id = reference_ids.get(fault_type)
+    if production_reference_id is None:
+        # QA and imported records may explicitly request one reference. Do not
+        # overwrite this compatibility field: one observation can contain both
+        # a hotspot and a diagnostic fault from different production banks.
+        production_reference_id = observation.get("production_reference_id")
+    production_only = fault_type in {"SingleHotSpot", "SingleDiode", "SingleByPassed"}
+    apply_thermal_fault(
+        faulted_local,
+        cell,
+        fault_type,
+        int(observation.get("severity", 7)),
+        production_reference_id=production_reference_id,
+        production_trace=trace,
+        require_production=production_only,
+    )
     delta_local = faulted_local - base_local
     if realism:
         realism_seed = seed_for(
@@ -1362,7 +1379,51 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
     module_mask = real_farm_module_mask((width_rgb, height_rgb), [module], active=True).astype(np.float32) / 255.0
     support = np.clip(support_rgb * module_mask, 0, 1)
     output += delta_rgb * support
-    return np.clip(output, 0, 255).astype(np.float32)
+    output = np.clip(output, 0, 255).astype(np.float32)
+    production_support_local = np.asarray(trace.get("canonical_support", np.abs(delta_local) > 1e-5), dtype=np.float32)
+    production_support_rgb = cv2.warpPerspective(
+        production_support_local, to_rgb, (width_rgb, height_rgb),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+    )
+    production_support_rgb *= module_mask
+    reference_id = trace.get("reference_id")
+    debug_metadata = {
+        "fault_type": fault_type,
+        "production_model": trace.get("production_model"),
+        "reference_id": reference_id,
+        "reference_bank_path": trace.get("reference_bank_path"),
+        "reference_quality_status": trace.get("reference_quality_status"),
+        "canonical_residual_shape": list(delta_local.shape),
+        "canonical_support_shape": list(production_support_local.shape),
+        "target_module_id": module.get("module_id"),
+        "target_orientation": module.get("orientation_label") or module.get("orientation"),
+        "module_polygon": module.get("active_polygon_rgb"),
+        "homography": np.round(to_rgb, 8).tolist(),
+        "warped_residual_shape": list(delta_rgb.shape),
+        "warped_support_shape": list(production_support_rgb.shape),
+        "scalar_peak_before_warp": round(float(np.max(np.abs(delta_local), initial=0.0)), 6),
+        "scalar_peak_after_warp": round(float(np.max(np.abs(delta_rgb * module_mask), initial=0.0)), 6),
+        "support_area_before_warp": int(np.count_nonzero(production_support_local > 0.05)),
+        "support_area_after_warp": int(np.count_nonzero(production_support_rgb > 0.05)),
+        "fallback_used": bool(trace.get("fallback_used", False)),
+        "production_fault_render_failed": bool(trace.get("production_fault_render_failed", False)),
+    }
+    reference_ids[fault_type] = reference_id
+    observation.setdefault("production_fault_debug_by_type", {})[fault_type] = debug_metadata
+    observation["production_fault_debug"] = debug_metadata
+    if return_debug:
+        return output, {
+            "metadata": debug_metadata,
+            "source_field": trace.get("source_field"),
+            "source_support": trace.get("source_support"),
+            "canonical_residual": delta_local,
+            "canonical_support": production_support_local,
+            "warped_residual": delta_rgb * module_mask,
+            "warped_support": production_support_rgb,
+            "healthy_canonical": base_local,
+            "faulted_canonical": faulted_local,
+        }
+    return output
 
 
 def real_farm_faulted_master(master_layers, observations):
@@ -1386,6 +1447,25 @@ def real_farm_thermal_image(image, modules, observations=None, master_layers=Non
     faulted = real_farm_faulted_master(layers, observations or [])
     sensor = apply_sensor_model(faulted, "real_farm", "far")
     return thermal_display_rgb_from_scalar(sensor, "real_farm", "far")
+
+
+def real_farm_close_thermal_image(faulted_master_scalar, module):
+    """Rectify scalar data first so the close-view sensor retains production morphology."""
+    points = np.asarray(module.get("active_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
+    stored_size = module.get("canonical_size") or real_farm_canonical_size(points)
+    source_width = max(1, int(stored_size["width"]))
+    source_height = max(1, int(stored_size["height"]))
+    scale = min(1024.0 / max(source_width, source_height), max(1.0, 512.0 / min(source_width, source_height)))
+    width = max(96, int(round(source_width * scale)))
+    height = max(96, int(round(source_height * scale)))
+    canonical = np.asarray([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype=np.float32)
+    to_local = cv2.getPerspectiveTransform(points, canonical)
+    scalar = cv2.warpPerspective(
+        np.asarray(faulted_master_scalar, dtype=np.float32), to_local, (width, height),
+        flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101,
+    )
+    sensor = apply_sensor_model(scalar, "real_farm", "close")
+    return thermal_display_rgb_from_scalar(sensor, "real_farm", "close")
 
 
 def real_farm_mask_preview(image_size, modules):
@@ -1514,7 +1594,9 @@ def real_farm_fault_workflow(state, image, modules):
     rejected_modules = master_layers.get("rejected_modules", [])
     if thermal_modules:
         st.caption(f"{len(thermal_modules)} recovered module instance(s) drive PV variation, hotspot placement, close view, and exports.")
-    thermal = real_farm_thermal_image(image, thermal_modules, observations, master_layers=master_layers)
+    faulted_master_scalar = real_farm_faulted_master(master_layers, observations)
+    thermal_sensor = apply_sensor_model(faulted_master_scalar, "real_farm", "far")
+    thermal = thermal_display_rgb_from_scalar(thermal_sensor, "real_farm", "far")
     view = st.radio("Thermal workspace", ["Thermal", "RGB"], horizontal=True, key="real_farm_thermal_view")
     if view == "RGB":
         st.image(real_farm_annotated_preview(image, modules), use_container_width=True)
@@ -1599,7 +1681,7 @@ def real_farm_fault_workflow(state, image, modules):
         selected_module = next(item for item in thermal_modules if item.get("module_id") == selected.get("module_id"))
         if st.session_state.get("real_farm_close_view"):
             st.markdown(f"#### Close View — {selected['observation_id']} on {selected['module_id']}")
-            st.image(real_farm_rectified_crop(thermal, selected_module), use_container_width=True)
+            st.image(real_farm_close_thermal_image(faulted_master_scalar, selected_module), use_container_width=True)
             diagnosis_col, severity_col = st.columns([0.72, 0.28])
             fault_options = list(CLOSE_DIAGNOSTIC_FAULT_TYPES)
             current_fault = selected.get("diagnostic_fault_type")

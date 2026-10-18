@@ -142,14 +142,22 @@ def production_hotspot_residuals():
     return _PRODUCTION_HOTSPOT_RESIDUALS
 
 
-def apply_production_hotspot_residual(temp, cell, fault_type, scale):
+def apply_production_hotspot_residual(temp, cell, fault_type, scale, reference_id=None, trace=None):
     fault_type = canonical_fault_type(fault_type)
     if fault_type not in HOTSPOT_FAULTS:
         return False
 
     residuals = production_hotspot_residuals()
     if not residuals:
+        if trace is not None:
+            trace["failure_reason"] = "hotspot_production_bank_empty"
         return False
+    if reference_id:
+        residuals = [item for item in residuals if item.get("reference_id") == reference_id]
+        if not residuals:
+            if trace is not None:
+                trace["failure_reason"] = f"hotspot_reference_not_found:{reference_id}"
+            return False
 
     x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, fault_type)
     x1, y1, x2, y2 = clamp_bbox_to_field(temp, (x1, y1, x2, y2))
@@ -183,6 +191,11 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale):
     spot_count = 1 if fault_type == "SingleHotSpot" else int(rng.integers(2, 6))
     used = set()
     applied = False
+    trace_residual = np.zeros_like(temp, dtype=np.float32) if trace is not None else None
+    trace_support = np.zeros_like(temp, dtype=np.float32) if trace is not None else None
+    trace_references = []
+    trace_source_field = None
+    trace_source_support = None
 
     for spot_idx in range(spot_count):
         candidates = [item for item in residuals if item["reference_id"] not in used] or residuals
@@ -190,6 +203,8 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale):
         used.add(ref["reference_id"])
         field = np.array(ref["residual"], dtype=np.float32, copy=True)
         support = np.array(ref["support"], dtype=np.float32, copy=True)
+        trace_source_field = field.copy()
+        trace_source_support = support.copy()
         if field.size == 0 or support.size == 0:
             continue
 
@@ -237,11 +252,28 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale):
         anomaly = np.clip(np.maximum(local_field * 0.88, halo * 0.72), 0, 1)
         alpha = np.clip(np.maximum.reduce((local_support, support_halo * 0.68, anomaly * 0.82)), 0, 0.98)
         region = temp[py1:py2, px1:px2]
+        before = region.copy()
         target = region + anomaly * strength
         target = np.maximum(target, 212 + anomaly * (34 + 44 * severity))
         temp[py1:py2, px1:px2] = region * (1.0 - alpha * 0.88) + target * (alpha * 0.88)
+        if trace is not None:
+            trace_residual[py1:py2, px1:px2] += temp[py1:py2, px1:px2] - before
+            trace_support[py1:py2, px1:px2] = np.maximum(trace_support[py1:py2, px1:px2], local_support)
+            trace_references.append(ref.get("reference_id"))
         applied = True
 
+    if trace is not None and applied:
+        trace.update({
+            "production_model": "thermal_hotspot_production_bank",
+            "reference_id": trace_references[0] if len(trace_references) == 1 else trace_references,
+            "reference_bank_path": str(HOTSPOT_PRODUCTION_BANK_DIR),
+            "reference_quality_status": "PRODUCTION_APPROVED",
+            "canonical_residual": trace_residual,
+            "canonical_support": trace_support,
+            "source_field": trace_source_field,
+            "source_support": trace_source_support,
+            "fallback_used": False,
+        })
     return applied
 
 
@@ -362,14 +394,21 @@ def submodule_target_bbox(cell, fault_type, ref, rng):
     return x1, y1, x1 + target_w, y1 + target_h
 
 
-def apply_production_submodule_fault_signal(temp, cell, fault_type, scale):
+def apply_production_submodule_fault_signal(temp, cell, fault_type, scale, reference_id=None, trace=None):
     fault_type = canonical_fault_type(fault_type)
     if fault_type not in {"SingleDiode", "SingleByPassed"}:
         return False
     if not production_submodule_enabled(fault_type):
+        if trace is not None:
+            trace["failure_reason"] = f"production_model_disabled:{fault_type}"
         return False
-    ref = selected_production_submodule_signal(fault_type, cell, scale)
+    if reference_id:
+        ref = next((item for item in production_submodule_signals(fault_type) if item.get("reference_id") == reference_id), None)
+    else:
+        ref = selected_production_submodule_signal(fault_type, cell, scale)
     if not ref:
+        if trace is not None:
+            trace["failure_reason"] = f"production_reference_not_found:{reference_id or fault_type}"
         return False
 
     rng = np.random.default_rng(seed_for(cell.get("id", "submodule"), fault_type, scale, ref.get("reference_id", "ref")))
@@ -402,8 +441,25 @@ def apply_production_submodule_fault_signal(temp, cell, fault_type, scale):
         adjacent_lift = 0
 
     region = temp[y1:y2, x1:x2]
+    before = region.copy()
     target = region + anomaly * strength + adjacent_lift
     temp[y1:y2, x1:x2] = region * (1.0 - alpha) + target * alpha
+    if trace is not None:
+        trace_residual = np.zeros_like(temp, dtype=np.float32)
+        trace_support = np.zeros_like(temp, dtype=np.float32)
+        trace_residual[y1:y2, x1:x2] = temp[y1:y2, x1:x2] - before
+        trace_support[y1:y2, x1:x2] = support
+        trace.update({
+            "production_model": "bypass_diode_v3_robust" if fault_type == "SingleDiode" else "bypassed_substring_live_filtered",
+            "reference_id": ref.get("reference_id"),
+            "reference_bank_path": str(SUBMODULE_FAULT_BANKS[fault_type]),
+            "reference_quality_status": ref.get("production_quality_status", "PRODUCTION_APPROVED"),
+            "canonical_residual": trace_residual,
+            "canonical_support": trace_support,
+            "source_field": np.array(ref["field_array"], dtype=np.float32, copy=True),
+            "source_support": np.array(ref["support_array"], dtype=np.float32, copy=True),
+            "fallback_used": False,
+        })
     return True
 
 
@@ -1237,14 +1293,24 @@ def apply_thermal_fault_tints(thermal_rgb, tint_items):
     return np.clip(output, 0, 255).astype(np.uint8)
 
 
-def apply_thermal_fault(temp, cell, fault_type, scale):
+def apply_thermal_fault(temp, cell, fault_type, scale, production_reference_id=None, production_trace=None, require_production=False):
     if cell is None:
         return temp
     fault_type = canonical_fault_type(fault_type)
-    if apply_production_hotspot_residual(temp, cell, fault_type, scale):
+    if apply_production_hotspot_residual(temp, cell, fault_type, scale, production_reference_id, production_trace):
         return temp
-    if apply_production_submodule_fault_signal(temp, cell, fault_type, scale):
+    if fault_type in HOTSPOT_FAULTS and require_production:
+        if production_trace is not None:
+            production_trace["production_fault_render_failed"] = True
+            production_trace["fallback_used"] = False
+        raise FaultGeometryError(f"Production hotspot rendering failed for {cell.get('id', 'unknown')}")
+    if apply_production_submodule_fault_signal(temp, cell, fault_type, scale, production_reference_id, production_trace):
         return temp
+    if fault_type in {"SingleDiode", "SingleByPassed"} and require_production:
+        if production_trace is not None:
+            production_trace["production_fault_render_failed"] = True
+            production_trace["fallback_used"] = False
+        raise FaultGeometryError(f"Production {fault_type} rendering failed for {cell.get('id', 'unknown')}")
     if apply_real_thermal_fault_patch(temp, cell, fault_type, scale):
         return temp
     x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, fault_type)
