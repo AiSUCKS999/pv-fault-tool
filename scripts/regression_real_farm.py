@@ -66,6 +66,27 @@ def main():
     assert thermal.size == image.size
     assert len(layers["accepted_modules"]) == len(modules)
     assert not layers["rejected_modules"]
+    # Review/Export reruns must retain the very first displayed morphology,
+    # including the transition from automatic to pinned production reference.
+    for fault_type in ("SingleHotSpot", "SingleDiode", "SingleByPassed"):
+        observation = {
+            "observation_id": "REFERENCE_PINNING_REGRESSION",
+            "module_id": modules[0]["module_id"],
+            "local_uv": [0.53, 0.50], "severity": 8,
+        }
+        original = layers["master_scalar"].copy()
+        first = namespace["real_farm_apply_production_fault"](
+            original, modules[0], observation, fault_type,
+        )
+        first_reference = observation["production_reference_ids"][fault_type]
+        second = namespace["real_farm_apply_production_fault"](
+            original, modules[0], observation, fault_type,
+        )
+        assert np.array_equal(first, second), f"{fault_type}: reference pinning changed morphology"
+        assert np.any(first != original), f"{fault_type}: no visible scalar fault"
+        assert observation["production_reference_ids"][fault_type] == first_reference
+        assert observation["production_fault_debug"]["fallback_used"] is False
+        assert np.array_equal(original, layers["master_scalar"])
     assert np.count_nonzero(layers["pv_scalar"][mask == 0]) == 0
     low_texture = Image.new("RGB", (320, 220), (110, 140, 110))
     low_texture_module = namespace["real_farm_module_record"](

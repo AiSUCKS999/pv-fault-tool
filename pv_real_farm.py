@@ -1699,6 +1699,21 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
             production_trace=trace,
             require_production=production_only,
         )
+        if fault_type == "SingleHotSpot" and production_reference_id is None:
+            # Resolve the bank choice before displaying the first render.
+            # A later pinned-reference call skips the bank-selection RNG draw,
+            # so displaying the unpinned probe would change hotspot morphology
+            # on the next UI rerun. Keep the production engine unchanged.
+            resolved_reference = trace.get("reference_id")
+            if resolved_reference:
+                faulted_local = base_local.copy()
+                trace = {}
+                apply_thermal_fault(
+                    faulted_local, cell, fault_type,
+                    int(observation.get("severity", 7)),
+                    production_reference_id=resolved_reference,
+                    production_trace=trace, require_production=production_only,
+                )
     except FaultGeometryError:
         failure = {
             "fault_type": fault_type,
