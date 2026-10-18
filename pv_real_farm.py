@@ -293,6 +293,7 @@ def real_farm_module_record(module_id, points, image_size, array_id="", inset_ra
         "refined_pv_polygon_rgb": None,
         "refined_mask_contours_rgb": [],
         "refined_mask_holes_rgb": [],
+        "module_instances": [],
         "mask_source": "SEARCH_ROI" if starter_roi else "MANUAL_FINAL_POLYGON",
         "refinement_status": "pending" if starter_roi else "accepted",
         "active_inset_ratio": round(float(inset_ratio), 4),
@@ -495,6 +496,7 @@ def real_farm_geometry_signature(modules):
             "mask_source": item.get("mask_source", "MANUAL_FINAL_POLYGON"),
             "refined_mask_contours_rgb": item.get("refined_mask_contours_rgb", []),
             "refined_mask_holes_rgb": item.get("refined_mask_holes_rgb", []),
+            "module_instances": item.get("module_instances", []),
         }
         for item in modules
     ]
@@ -571,6 +573,20 @@ def real_farm_refined_overlay(image, module, result=None):
         points = [tuple(map(float, point)) for point in contour]
         if len(points) >= 3:
             draw.line(points + [points[0]], fill=(250, 204, 21, 240), width=max(2, image.width // 1000))
+    return overlay.convert("RGB")
+
+
+def real_farm_instance_overlay(image, module, result=None):
+    overlay = image.convert("RGBA")
+    draw = ImageDraw.Draw(overlay)
+    instances = (result or {}).get("module_instances") or module.get("module_instances", [])
+    line_width = max(2, image.width // 1200)
+    for instance in instances:
+        points = [tuple(map(float, point)) for point in instance.get("outer_polygon_rgb", [])]
+        if len(points) != 4:
+            continue
+        draw.line(points + [points[0]], fill=(34, 211, 238, 235), width=line_width)
+        draw.text(points[0], instance.get("module_id", "M"), fill=(255, 255, 255, 245))
     return overlay.convert("RGB")
 
 
@@ -708,7 +724,7 @@ def real_farm_refine_pv_support(image, module):
     final_mask[y1:y2, x1:x2] = final_local
     roi_pixels = final_mask[roi_mask > 0]
     refined_fraction = float(np.mean(roi_pixels > 0)) if roi_pixels.size else 0.0
-    return {
+    result = {
         "success": True,
         "message": f"Refined PV support covers {refined_fraction:.1%} of the coarse ROI; module/frame gaps remain separate.",
         "roi_bbox": [x1, y1, x2, y2],
@@ -724,6 +740,99 @@ def real_farm_refine_pv_support(image, module):
         "candidate_component_count": len(components),
         "selected_component_count": len(selected_labels),
     }
+    result["module_instances"] = real_farm_detect_module_instances(image, module, final_mask, quad)
+    result["module_instance_count"] = len(result["module_instances"])
+    return result
+
+
+def real_farm_detect_module_instances(image, parent_module, union_mask, parent_quad):
+    """Split each disconnected PV table with rectified RGB frame evidence."""
+    source_mask = (np.asarray(union_mask) > 0).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(source_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    minimum_area = max(120.0, float(np.count_nonzero(source_mask)) * 0.035)
+    table_contours = [contour for contour in contours if cv2.contourArea(contour) >= minimum_area]
+    table_contours.sort(key=lambda contour: cv2.boundingRect(contour)[1])
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    parent_id = parent_module.get("module_id", "M")
+    instances = []
+
+    def peak_separators(score, minimum_spacing, edge_margin):
+        vector = np.asarray(score, dtype=np.float32).reshape(-1, 1)
+        sigma = max(1.0, minimum_spacing * 0.055)
+        smooth = cv2.GaussianBlur(vector, (0, 0), sigma).ravel()
+        if smooth.size < 7:
+            return []
+        threshold = max(float(np.percentile(smooth, 74)), float(np.median(smooth) + np.std(smooth) * 0.50))
+        candidates = [
+            index for index in range(2, len(smooth) - 2)
+            if smooth[index] >= threshold and smooth[index] == max(smooth[index - 2:index + 3])
+            and edge_margin <= index <= len(smooth) - edge_margin
+        ]
+        selected = []
+        for index in sorted(candidates, key=lambda item: float(smooth[item]), reverse=True):
+            if all(abs(index - previous) >= minimum_spacing for previous in selected):
+                selected.append(index)
+        return sorted(selected)
+
+    for contour in table_contours:
+        table_quad = np.asarray(real_farm_order_quad(cv2.boxPoints(cv2.minAreaRect(contour)).tolist()), dtype=np.float32)
+        size = real_farm_canonical_size(table_quad)
+        local_w = int(np.clip(size["width"], 80, 720))
+        local_h = int(np.clip(size["height"], 80, 1800))
+        destination = np.asarray([[0, 0], [local_w - 1, 0], [local_w - 1, local_h - 1], [0, local_h - 1]], dtype=np.float32)
+        to_local = cv2.getPerspectiveTransform(table_quad, destination)
+        to_rgb = cv2.getPerspectiveTransform(destination, table_quad)
+        local_rgb = cv2.warpPerspective(rgb, to_local, (local_w, local_h), flags=cv2.INTER_CUBIC)
+        local_mask = cv2.warpPerspective(source_mask, to_local, (local_w, local_h), flags=cv2.INTER_NEAREST)
+        support = local_mask > 0
+        if not np.any(support):
+            continue
+        gray = cv2.cvtColor(local_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        sobel_x = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
+        sobel_y = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
+        bright = np.clip((gray - 120.0) / 100.0, 0, 1)
+        support_f = support.astype(np.float32)
+        x_score = (sobel_x * support_f).sum(axis=0) / np.maximum(1.0, support_f.sum(axis=0)) + bright.mean(axis=0) * 85.0
+        y_score = (sobel_y * support_f).sum(axis=1) / np.maximum(1.0, support_f.sum(axis=1)) + bright.mean(axis=1) * 85.0
+        x_separators = peak_separators(x_score, max(16, int(local_w * 0.28)), max(8, int(local_w * 0.10)))
+        y_separators = peak_separators(y_score, max(12, int(local_w * 0.21)), max(8, int(local_w * 0.10)))
+        x_bounds = sorted(set([0, local_w - 1] + x_separators))
+        y_bounds = sorted(set([0, local_h - 1] + y_separators))
+        for y_index in range(len(y_bounds) - 1):
+            for x_index in range(len(x_bounds) - 1):
+                lx1, lx2 = x_bounds[x_index], x_bounds[x_index + 1]
+                ly1, ly2 = y_bounds[y_index], y_bounds[y_index + 1]
+                if lx2 - lx1 < max(12, local_w * 0.20) or ly2 - ly1 < max(10, local_w * 0.13):
+                    continue
+                cell_support = support[ly1:ly2 + 1, lx1:lx2 + 1]
+                coverage = float(np.mean(cell_support)) if cell_support.size else 0.0
+                if coverage < 0.62:
+                    continue
+                inset_x = max(1.0, (lx2 - lx1) * 0.018)
+                inset_y = max(1.0, (ly2 - ly1) * 0.025)
+                local_quad = np.asarray([
+                    [lx1 + inset_x, ly1 + inset_y], [lx2 - inset_x, ly1 + inset_y],
+                    [lx2 - inset_x, ly2 - inset_y], [lx1 + inset_x, ly2 - inset_y],
+                ], dtype=np.float32)
+                rgb_quad = cv2.perspectiveTransform(local_quad.reshape(1, -1, 2), to_rgb)[0]
+                module_id = f"{parent_id}.{len(instances) + 1:03d}"
+                record = real_farm_module_record(module_id, rgb_quad.tolist(), image.size, parent_module.get("array_id") or parent_id, 0.018, "auto_instance")
+                record.update({
+                    "source_mode": REAL_FARM_SOURCE_MODE, "source": "REAL_FARM",
+                    "parent_module_id": parent_id, "mask_source": "AUTO_MODULE_INSTANCE",
+                    "refinement_status": "accepted", "instance_confidence": round(float(np.clip(coverage, 0, 1)), 4),
+                })
+                record["warnings"] = [] if coverage >= 0.78 else [{
+                    "level": "warning", "code": "low_instance_support",
+                    "message": f"{module_id} has incomplete PV support and may need manual adjustment.",
+                }]
+                instances.append(record)
+    if not instances:
+        quad = np.asarray(real_farm_order_quad(parent_quad), dtype=np.float32)
+        fallback = real_farm_module_record(f"{parent_id}.001", quad.tolist(), image.size, parent_id, 0.02, "auto_instance")
+        fallback.update({"source": "REAL_FARM", "parent_module_id": parent_id, "mask_source": "AUTO_MODULE_INSTANCE", "refinement_status": "accepted", "instance_confidence": 0.35})
+        instances = [fallback]
+    return instances
 
 
 def real_farm_accept_refinement(module, result):
@@ -736,6 +845,7 @@ def real_farm_accept_refinement(module, result):
     module["refined_pv_polygon_rgb"] = quad
     module["refined_mask_contours_rgb"] = result["refined_mask_contours_rgb"]
     module["refined_mask_holes_rgb"] = result.get("refined_mask_holes_rgb", [])
+    module["module_instances"] = result.get("module_instances", [])
     module["active_polygon_rgb"] = quad
     module["mask_source"] = "AUTO_REFINED_RGB"
     module["refinement_status"] = "accepted"
@@ -761,6 +871,7 @@ def real_farm_use_manual_final_polygon(module):
     module["refined_pv_polygon_rgb"] = None
     module["refined_mask_contours_rgb"] = []
     module["refined_mask_holes_rgb"] = []
+    module["module_instances"] = []
     module["mask_source"] = "MANUAL_FINAL_POLYGON"
     module["refinement_status"] = "accepted"
     module["canonical_size"] = real_farm_canonical_size(final_polygon)
@@ -921,6 +1032,21 @@ def real_farm_thermal_modules(image, modules):
     return accepted, rejected
 
 
+def real_farm_expand_module_instances(modules):
+    expanded = []
+    for parent in modules:
+        instances = parent.get("module_instances") or []
+        if instances:
+            for instance in instances:
+                item = dict(instance)
+                item["visually_supported"] = parent.get("visually_supported")
+                item["thermal_geometry_score"] = parent.get("thermal_geometry_score")
+                expanded.append(item)
+        else:
+            expanded.append(dict(parent))
+    return expanded
+
+
 def real_farm_refinement_workflow(state, image, modules, selected_id):
     st.markdown('<div class="pv-card"><div class="pv-section-title">Refined PV Area</div>', unsafe_allow_html=True)
     st.caption("The blue polygon is only a coarse search ROI. Auto-Refine finds visible PV material; review the green result before accepting it as thermal support.")
@@ -940,9 +1066,10 @@ def real_farm_refinement_workflow(state, image, modules, selected_id):
     if preview:
         if preview.get("success"):
             st.success(preview.get("message"))
-            preview_cols = st.columns(2)
+            preview_cols = st.columns(3)
             preview_cols[0].image(real_farm_refined_overlay(image, selected, preview), caption="Blue: coarse ROI · Green: refined PV support", use_container_width=True)
             preview_cols[1].image(Image.fromarray(preview["final_mask"], "L"), caption="Proposed final binary PV mask", use_container_width=True, clamp=True)
+            preview_cols[2].image(real_farm_instance_overlay(image, selected, preview), caption=f"{preview.get('module_instance_count', 0)} recovered module instances", use_container_width=True)
             if action_cols[1].button("Accept Mask", type="primary", use_container_width=True, key=f"rf_accept_{selected.get('module_id')}"):
                 real_farm_push_history()
                 real_farm_invalidate_thermal(state)
@@ -963,9 +1090,10 @@ def real_farm_refinement_workflow(state, image, modules, selected_id):
         st.session_state.pop(preview_key, None)
         st.rerun()
     if source == "AUTO_REFINED_RGB" and status == "accepted":
-        accepted_cols = st.columns(2)
+        accepted_cols = st.columns(3)
         accepted_cols[0].image(real_farm_refined_overlay(image, selected), caption="Accepted refined outline", use_container_width=True)
         accepted_cols[1].image(real_farm_mask_preview(image.size, [selected]), caption="Accepted final binary PV mask", use_container_width=True, clamp=True)
+        accepted_cols[2].image(real_farm_instance_overlay(image, selected), caption=f"{len(selected.get('module_instances', []))} module instances", use_container_width=True)
     elif source == "MANUAL_FINAL_POLYGON" and status == "accepted":
         st.warning("Manual override is active. The edited polygon is final thermal support; use Auto-Refine to derive support from RGB material instead.")
     else:
@@ -973,24 +1101,70 @@ def real_farm_refinement_workflow(state, image, modules, selected_id):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def real_farm_material_masks(image):
+    """Infer relative material classes; RGB guides class/structure, never final color."""
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    red, green, blue = [rgb[:, :, index].astype(np.int16) for index in range(3)]
+    hue, saturation, value = [hsv[:, :, index] for index in range(3)]
+    pv_candidate = (blue > green + 7) & (blue > red + 13) & (value > 44) & (value < 205)
+    pv_candidate = cv2.morphologyEx(pv_candidate.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
+    vegetation = (green > red + 8) & (green > blue + 5) & (saturation > 34)
+    soil = (((hue < 34) | (hue > 168)) & (saturation > 28) & ~vegetation)
+    concrete = (saturation < 48) & (value > 82)
+    shadow = value < 58
+    edges = np.abs(cv2.Laplacian(cv2.GaussianBlur(gray, (0, 0), 1.1), cv2.CV_32F))
+    metal = (edges > np.percentile(edges, 91)) & (saturation < 82) & ~vegetation
+    unknown = ~(vegetation | soil | concrete | shadow | metal)
+    return {
+        "pv_scene_candidate": pv_candidate.astype(np.uint8) * 255,
+        "vegetation": vegetation.astype(np.uint8) * 255,
+        "soil": soil.astype(np.uint8) * 255,
+        "roof_concrete": concrete.astype(np.uint8) * 255,
+        "metal_infrastructure": metal.astype(np.uint8) * 255,
+        "shadow": shadow.astype(np.uint8) * 255,
+        "unknown": unknown.astype(np.uint8) * 255,
+    }
+
+
 def real_farm_background_scalar(image):
-    """Build a full-scene relative thermal background while retaining RGB structure."""
-    rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
-    luminance = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32)
-    height, width = luminance.shape
-    low_sigma = max(10.0, max(width, height) / 65.0)
-    mid_sigma = max(2.0, max(width, height) / 420.0)
-    low = cv2.GaussianBlur(luminance, (0, 0), low_sigma)
-    mid = cv2.GaussianBlur(luminance, (0, 0), mid_sigma)
-    detail = luminance - mid
-    red, green, blue = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-    vegetation = np.clip(green - (red + blue) * 0.5, 0, 80)
-    base = 101.0 + (low - float(np.median(low))) * 0.27 + (mid - low) * 0.34 + detail * 0.22
-    base -= vegetation * 0.13
-    seed = seed_for(width, height, float(np.mean(luminance)), "real-farm-background")
-    texture = smooth_unit_field((height, width), seed, max(5.0, max(width, height) / 300.0), octaves=3)
-    base += (texture - 0.5) * 7.0
-    return np.clip(base, 34, 190).astype(np.float32)
+    """Build a new material-relative thermal scalar scene from RGB structure."""
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    height, width = gray.shape
+    masks = real_farm_material_masks(image)
+    base = np.full((height, width), 84.0, dtype=np.float32)
+    class_values = {
+        "vegetation": 67.0, "soil": 109.0, "roof_concrete": 96.0,
+        "metal_infrastructure": 102.0, "shadow": 48.0, "unknown": 82.0,
+        "pv_scene_candidate": 158.0,
+    }
+    for name, scalar_value in class_values.items():
+        base[masks[name] > 0] = scalar_value
+
+    seed = seed_for(width, height, "real-farm-common-thermal-base-v2")
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    scene_gradient = (xx / max(1, width - 1) - 0.5) * 7.0 + (0.5 - yy / max(1, height - 1)) * 5.0
+    broad = thermal_noise(base.shape, np.random.default_rng(seed), 8.5, max(12.0, max(width, height) / 95.0))
+    mottle = thermal_noise(base.shape, np.random.default_rng(seed_for(seed, "mottle")), 3.4, max(2.2, max(width, height) / 720.0))
+    structure = gray - cv2.GaussianBlur(gray, (0, 0), max(3.0, max(width, height) / 430.0))
+    edge = np.abs(cv2.Laplacian(cv2.GaussianBlur(gray, (0, 0), 1.2), cv2.CV_32F))
+    base += scene_gradient + broad + mottle + np.clip(structure, -32, 32) * 0.09 + np.clip(edge, 0, 24) * 0.10
+    # The generated-farm multiplier is intentionally reused, but its Gaussian
+    # working set grows sharply on multi-megapixel uploads. Evaluate the same
+    # model on a bounded scalar grid and restore it to the thermal-master size.
+    environment_seed = seed_for(seed, "thermal-cloud-sun")
+    maximum_axis = max(height, width)
+    if maximum_axis > 1280:
+        scale = 1280.0 / maximum_axis
+        working_shape = (max(32, int(round(height * scale))), max(32, int(round(width * scale))))
+        environment = pv_environment_multiplier(working_shape, environment_seed, strength=0.055)
+        environment = cv2.resize(environment, (width, height), interpolation=cv2.INTER_CUBIC)
+    else:
+        environment = pv_environment_multiplier(base.shape, environment_seed, strength=0.055)
+    base *= environment
+    return np.clip(base, 24, 148).astype(np.float32)
 
 
 def real_farm_module_scalar_layer(image, modules, background_scalar=None):
@@ -1017,21 +1191,13 @@ def real_farm_module_scalar_layer(image, modules, background_scalar=None):
             continue
         roi_points = points - np.asarray([x1, y1], dtype=np.float32)
         to_roi = cv2.getPerspectiveTransform(destination, roi_points)
-        local_gray = cv2.warpPerspective(gray, to_local, (local_width, local_height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
-        local_scene_base = cv2.warpPerspective(scene_base, to_local, (local_width, local_height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
-        local_low = cv2.GaussianBlur(local_gray, (0, 0), max(1.2, min(local_width, local_height) * 0.055))
-        local_detail = local_gray - cv2.GaussianBlur(local_gray, (0, 0), 1.1)
-        yy, xx = np.mgrid[0:local_height, 0:local_width].astype(np.float32)
-        u = xx / max(1, local_width - 1)
-        v = yy / max(1, local_height - 1)
         module_seed = seed_for(module.get("module_id", module_index), "real-farm-pv-layer")
-        rng = np.random.default_rng(module_seed)
-        module_bias = float(rng.normal(6.5, 1.4))
-        gradient = (u - 0.5) * float(rng.uniform(-3.2, 3.2)) + (v - 0.5) * float(rng.uniform(-2.8, 2.8))
-        mottle = smooth_unit_field((local_height, local_width), module_seed, max(2.0, min(local_width, local_height) * 0.10), octaves=3)
-        row_bias = np.sin(v * math.pi * max(2, min(14, int(local_height / 24))) + float(rng.uniform(-1, 1))) * 0.7
-        pv_local = local_scene_base + module_bias + gradient + (local_low - float(np.median(local_low))) * 0.025 + local_detail * 0.12
-        pv_local += (mottle - 0.5) * 3.2 + row_bias
+        pv_local = smooth_thermal_array_field((local_width, local_height), module_seed, 164, 196)
+        pv_local += pv_cell_temperature_field((local_height, local_width), seed_for(module_seed, "cell-field"), 1, strength=2.6)
+        local_gray = cv2.warpPerspective(gray, to_local, (local_width, local_height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
+        seam = np.abs(cv2.Laplacian(cv2.GaussianBlur(local_gray, (0, 0), 0.8), cv2.CV_32F))
+        seam /= max(1.0, float(np.percentile(seam, 96)))
+        pv_local -= np.clip(seam, 0, 1) * 5.5
         local_support = np.ones((local_height, local_width), dtype=np.float32)
         roi_size = (x2 - x1, y2 - y1)
         warped_scalar = cv2.warpPerspective(pv_local.astype(np.float32), to_roi, roi_size, flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
@@ -1058,7 +1224,8 @@ def real_farm_display_range(master_scalar):
 
 
 def real_farm_build_thermal_master(image, modules, real_thermal=None):
-    accepted, rejected = real_farm_thermal_modules(image, modules)
+    accepted_parents, rejected = real_farm_thermal_modules(image, modules)
+    accepted = real_farm_expand_module_instances(accepted_parents)
     mask = real_farm_module_mask(image.size, accepted, active=True)
     if real_thermal is not None:
         registered = real_thermal.convert("L").resize(image.size, Image.Resampling.BICUBIC)
@@ -1073,11 +1240,7 @@ def real_farm_build_thermal_master(image, modules, real_thermal=None):
         distance_inside = cv2.distanceTransform(inside, cv2.DIST_L2, 3)
         alpha = np.clip(distance_inside / 1.35, 0, 1).astype(np.float32)
         combined = background * (1.0 - alpha) + pv_layer * alpha
-        sensor_seed = seed_for(image.width, image.height, real_farm_geometry_signature(accepted), "real-farm-sensor")
-        sensor_rng = np.random.default_rng(sensor_seed)
-        sensor_noise = sensor_rng.normal(0, 0.72, combined.shape).astype(np.float32)
-        column_bias = sensor_rng.normal(0, 0.28, image.width).astype(np.float32)[None, :]
-        combined = np.clip(combined + sensor_noise + column_bias, 0, 255).astype(np.float32)
+        combined = np.clip(combined, 0, 255).astype(np.float32)
         mode = REAL_FARM_SYNTHETIC_THERMAL
     return {
         "mode": mode,
@@ -1087,30 +1250,35 @@ def real_farm_build_thermal_master(image, modules, real_thermal=None):
         "master_scalar": combined.astype(np.float32),
         "display_range": real_farm_display_range(combined),
         "accepted_modules": accepted,
+        "accepted_parent_regions": accepted_parents,
         "rejected_modules": rejected,
+        "material_masks": real_farm_material_masks(image),
     }
 
 
-def real_farm_palette_image(scalar, display_range):
-    low, high = map(float, display_range)
-    normalized = np.clip((np.asarray(scalar, dtype=np.float32) - low) / max(1e-6, high - low), 0, 1)
-    sensor = np.clip(normalized * 255.0, 0, 255).astype(np.uint8)
-    return temperature_to_rgb(Image.fromarray(sensor, "L"))
+def real_farm_palette_image(scalar, display_range=None, scene_distance="far"):
+    return thermal_display_rgb_from_scalar(np.asarray(scalar, dtype=np.float32), "real_farm", scene_distance)
 
 
 def real_farm_production_cell(module, observation, width, height):
     u, v = observation.get("local_uv", (0.5, 0.5))
+    column_index = int(np.clip(math.floor(float(u) * CUSTOM_MODULE_CELL_COLS), 0, CUSTOM_MODULE_CELL_COLS - 1))
+    row_index = int(np.clip(math.floor(float(v) * CUSTOM_MODULE_CELL_ROWS), 0, CUSTOM_MODULE_CELL_ROWS - 1))
+    cell_x1 = int(round(column_index * width / CUSTOM_MODULE_CELL_COLS))
+    cell_y1 = int(round(row_index * height / CUSTOM_MODULE_CELL_ROWS))
+    cell_x2 = int(round((column_index + 1) * width / CUSTOM_MODULE_CELL_COLS))
+    cell_y2 = int(round((row_index + 1) * height / CUSTOM_MODULE_CELL_ROWS))
     return {
         "id": f"{module.get('module_id')}:{observation.get('observation_id')}",
-        "x1": 0,
-        "y1": 0,
-        "x2": int(width),
-        "y2": int(height),
+        "x1": cell_x1,
+        "y1": cell_y1,
+        "x2": max(cell_x1 + 1, cell_x2),
+        "y2": max(cell_y1 + 1, cell_y2),
         "module_bbox_px": {"x1": 0, "y1": 0, "x2": int(width), "y2": int(height)},
         "active_module_bbox_px": {"x1": 1, "y1": 1, "x2": max(2, int(width) - 1), "y2": max(2, int(height) - 1)},
         "fault_origin_px": {"x": float(u) * width, "y": float(v) * height},
-        "module_cell_col": int(np.clip(math.floor(float(u) * CUSTOM_MODULE_CELL_COLS) + 1, 1, CUSTOM_MODULE_CELL_COLS)),
-        "module_cell_row": int(np.clip(math.floor(float(v) * CUSTOM_MODULE_CELL_ROWS) + 1, 1, CUSTOM_MODULE_CELL_ROWS)),
+        "module_cell_col": column_index + 1,
+        "module_cell_row": row_index + 1,
     }
 
 
@@ -1153,13 +1321,23 @@ def real_farm_fault_realism_compositor(base_local, production_delta, fault_type,
     return (soft_limit * np.tanh(blended / max(1.0, soft_limit))).astype(np.float32)
 
 
-def real_farm_apply_production_fault(master_scalar, module, observation, fault_type, realism=True):
+def real_farm_apply_production_fault(master_scalar, module, observation, fault_type, realism=False):
     """Run the unchanged production engine in module-local space, then homography-warp its scalar delta."""
     output = np.asarray(master_scalar, dtype=np.float32).copy()
     points = np.asarray(module.get("active_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
     stored_size = module.get("canonical_size") or real_farm_canonical_size(points)
     width = int(stored_size["width"])
     height = int(stored_size["height"])
+    # Production residual banks were approved on a resolved canonical module
+    # plane. Drone pixels can make a real module only tens of pixels wide;
+    # upsample the canonical plane before running the unchanged engine, then
+    # homography-warp the scalar residual back to the original module.
+    short_side = max(1, min(width, height))
+    canonical_scale = max(1.0, 256.0 / short_side)
+    if max(width, height) * canonical_scale > 720.0:
+        canonical_scale = 720.0 / max(width, height)
+    width = max(24, int(round(width * canonical_scale)))
+    height = max(24, int(round(height * canonical_scale)))
     canonical_size = (width, height)
     canonical = np.asarray([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype=np.float32)
     to_local = cv2.getPerspectiveTransform(points, canonical)
@@ -1206,11 +1384,12 @@ def real_farm_faulted_master(master_layers, observations):
 def real_farm_thermal_image(image, modules, observations=None, master_layers=None):
     layers = master_layers or real_farm_build_thermal_master(image, modules)
     faulted = real_farm_faulted_master(layers, observations or [])
-    return real_farm_palette_image(faulted, layers["display_range"])
+    sensor = apply_sensor_model(faulted, "real_farm", "far")
+    return thermal_display_rgb_from_scalar(sensor, "real_farm", "far")
 
 
 def real_farm_mask_preview(image_size, modules):
-    mask = real_farm_module_mask(image_size, modules, active=True)
+    mask = real_farm_module_mask(image_size, real_farm_expand_module_instances(modules), active=True)
     return Image.fromarray(mask, "L")
 
 
@@ -1287,7 +1466,7 @@ def real_farm_fault_workflow(state, image, modules):
             st.error("No mechanically valid module polygon is available. Correct the polygon geometry, then generate again.")
             st.markdown("</div>", unsafe_allow_html=True)
             return
-        assessed = {item.get("module_id"): item for item in layers.get("accepted_modules", []) + layers.get("rejected_modules", [])}
+        assessed = {item.get("module_id"): item for item in layers.get("accepted_parent_regions", []) + layers.get("rejected_modules", [])}
         for stored in state.get("modules", []):
             result = assessed.get(stored.get("module_id"))
             if result:
@@ -1333,6 +1512,8 @@ def real_farm_fault_workflow(state, image, modules):
     master_layers = real_farm_get_thermal_master(state, image, modules)
     thermal_modules = master_layers.get("accepted_modules", [])
     rejected_modules = master_layers.get("rejected_modules", [])
+    if thermal_modules:
+        st.caption(f"{len(thermal_modules)} recovered module instance(s) drive PV variation, hotspot placement, close view, and exports.")
     thermal = real_farm_thermal_image(image, thermal_modules, observations, master_layers=master_layers)
     view = st.radio("Thermal workspace", ["Thermal", "RGB"], horizontal=True, key="real_farm_thermal_view")
     if view == "RGB":
@@ -1415,7 +1596,7 @@ def real_farm_fault_workflow(state, image, modules):
             st.rerun()
 
         selected = observation_lookup[st.session_state.get("real_farm_selected_observation", selected_id)]
-        selected_module = next(item for item in modules if item.get("module_id") == selected.get("module_id"))
+        selected_module = next(item for item in thermal_modules if item.get("module_id") == selected.get("module_id"))
         if st.session_state.get("real_farm_close_view"):
             st.markdown(f"#### Close View — {selected['observation_id']} on {selected['module_id']}")
             st.image(real_farm_rectified_crop(thermal, selected_module), use_container_width=True)
@@ -1541,6 +1722,7 @@ def real_farm_main():
             module["refinement_status"] = "pending"
             module["refined_mask_contours_rgb"] = []
             module["refined_mask_holes_rgb"] = []
+            module["module_instances"] = []
             module["refined_pv_polygon_rgb"] = None
     image_size = (int(state["image"]["width"]), int(state["image"]["height"]))
     selected_id = st.session_state.get("real_farm_selected_module")

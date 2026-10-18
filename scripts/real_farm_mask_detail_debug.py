@@ -52,6 +52,34 @@ def outline_overlay(image, mask, color):
     return Image.fromarray(result, "RGB")
 
 
+def instance_mask_preview(image_size, instances):
+    width, height = image_size
+    preview = np.zeros((height, width, 3), dtype=np.uint8)
+    for index, module in enumerate(instances):
+        polygon = np.rint(np.asarray(module["active_polygon_rgb"], dtype=np.float32)).astype(np.int32)
+        rng = np.random.default_rng(1709 + index * 7919)
+        color = tuple(int(value) for value in rng.integers(58, 246, size=3))
+        cv2.fillConvexPoly(preview, polygon, color, lineType=cv2.LINE_AA)
+    return Image.fromarray(preview, "RGB")
+
+
+def rectified_sheet(ns, image, instances, limit=12):
+    tiles = []
+    for module in instances[:limit]:
+        crop = ns["real_farm_rectified_crop"](image, module).convert("RGB")
+        crop.thumbnail((260, 260), Image.Resampling.LANCZOS)
+        tile = Image.new("RGB", (280, 300), (7, 12, 20))
+        tile.paste(crop, ((280 - crop.width) // 2, 28))
+        ImageDraw.Draw(tile).text((10, 8), module["module_id"], fill="white", font=ImageFont.load_default())
+        tiles.append(tile)
+    columns = 4
+    rows = max(1, int(np.ceil(len(tiles) / columns)))
+    sheet = Image.new("RGB", (columns * 280, rows * 300), (3, 7, 13))
+    for index, tile in enumerate(tiles):
+        sheet.paste(tile, ((index % columns) * 280, (index // columns) * 300))
+    return sheet
+
+
 def main():
     if not SOURCE.exists():
         raise FileNotFoundError(SOURCE)
@@ -64,7 +92,8 @@ def main():
     if not result.get("success"):
         raise AssertionError(result.get("message"))
     ns["real_farm_accept_refinement"](module, result)
-    improved_mask = ns["real_farm_module_mask"](image.size, [module], active=True)
+    instances = module.get("module_instances", [])
+    improved_mask = ns["real_farm_module_mask"](image.size, instances or [module], active=True)
     old_path = OUTPUT / "current_mask_before.png"
     if not old_path.exists():
         raise FileNotFoundError(f"Preserved pre-change mask is required: {old_path}")
@@ -80,6 +109,9 @@ def main():
     refined_overlay = ns["real_farm_refined_overlay"](image, module)
     refined_overlay.save(OUTPUT / "refined_outline_overlay.png")
     Image.fromarray(improved_mask, "L").save(OUTPUT / "final_binary_pv_mask.png")
+    ns["real_farm_instance_overlay"](image, module).save(OUTPUT / "module_instance_overlay.png")
+    instance_mask_preview(image.size, instances).save(OUTPUT / "module_instance_masks.png")
+    rectified_sheet(ns, image, instances).save(OUTPUT / "rectified_example_modules.png")
 
     old_outline = outline_overlay(image, current_mask, (235, 65, 54))
     new_outline = outline_overlay(image, improved_mask, (34, 197, 94))
@@ -114,6 +146,7 @@ def main():
         "processing_bbox": [int(value) for value in result["roi_bbox"]],
         "candidate_components": result.get("candidate_component_count"),
         "selected_components": result.get("selected_component_count"),
+        "module_instance_count": len(instances),
         "exterior_contours": len(result.get("refined_mask_contours_rgb", [])),
         "preserved_gap_contours": len(result.get("refined_mask_holes_rgb", [])),
         "old_mask_pixels": old_pixels,
