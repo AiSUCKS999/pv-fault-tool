@@ -2476,8 +2476,8 @@ def real_farm_close_thermal_image(faulted_master_scalar, module):
     return thermal_display_rgb_from_scalar(sensor, "real_farm", "close")
 
 
-def real_farm_close_context_image(master_scalar, selected_module, modules, display_range=None, margin_ratio=0.16):
-    """Crop a native-resolution local PV group around the selected module."""
+def real_farm_close_context_bounds(selected_module, modules, image_shape, margin_ratio=0.16):
+    """Return native-resolution bounds for a useful local PV group."""
     selected_points = np.asarray(selected_module.get("outer_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
     selected_center = selected_points.mean(axis=0)
     selected_span = max(8.0, float(np.linalg.norm(selected_points.max(axis=0) - selected_points.min(axis=0))))
@@ -2497,14 +2497,32 @@ def real_farm_close_context_image(master_scalar, selected_module, modules, displ
     x_max, y_max = context_points.max(axis=0)
     span_x = max(1.0, float(x_max - x_min))
     span_y = max(1.0, float(y_max - y_min))
-    height, width = np.asarray(master_scalar).shape[:2]
+    height, width = image_shape[:2]
     x1 = max(0, int(math.floor(x_min - span_x * margin_ratio)))
     y1 = max(0, int(math.floor(y_min - span_y * margin_ratio)))
     x2 = min(width, int(math.ceil(x_max + span_x * margin_ratio)))
     y2 = min(height, int(math.ceil(y_max + span_y * margin_ratio)))
-    crop = np.asarray(master_scalar, dtype=np.float32)[y1:y2, x1:x2]
-    sensor = apply_sensor_model(crop, "real_farm", "close")
-    display = real_farm_palette_image(sensor, display_range, "close").convert("RGB")
+    return x1, y1, x2, y2
+
+
+def real_farm_close_context_image(master_scalar, selected_module, modules, display_range=None, margin_ratio=0.16):
+    """Sensor-process the authoritative scene, then crop a native local PV group."""
+    source = np.asarray(master_scalar, dtype=np.float32)
+    x1, y1, x2, y2 = real_farm_close_context_bounds(
+        selected_module, modules, source.shape, margin_ratio
+    )
+    # Close View is a spatial crop of the same calibrated scalar scene. Running
+    # the sensor after cropping re-centered vignette, resampling and noise on
+    # every crop, which made healthy module colors depend on the crop bounds.
+    sensor_scene = apply_sensor_model(source, "real_farm", "close")
+    sensor_crop = sensor_scene[y1:y2, x1:x2]
+    scene_range = (
+        display_range
+        if display_range is not None and len(display_range) == 2
+        else real_farm_display_range(source)
+    )
+    display = real_farm_palette_image(sensor_crop, scene_range, "close").convert("RGB")
+    selected_points = np.asarray(selected_module.get("outer_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
     draw = ImageDraw.Draw(display)
     outline = [(float(x - x1), float(y - y1)) for x, y in selected_points]
     draw.line(outline + [outline[0]], fill=(56, 189, 248), width=max(2, min(display.size) // 240))

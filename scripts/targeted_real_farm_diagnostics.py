@@ -76,6 +76,23 @@ def main():
     healthy_close = namespace["real_farm_close_context_image"](
         healthy_scalar, selected, modules, display_range=layers["display_range"]
     )
+    x1, y1, x2, y2 = namespace["real_farm_close_context_bounds"](
+        selected, modules, healthy_scalar.shape
+    )
+    expected_close_sensor = namespace["apply_sensor_model"](
+        healthy_scalar, "real_farm", "close"
+    )[y1:y2, x1:x2]
+    expected_close = namespace["real_farm_palette_image"](
+        expected_close_sensor, layers["display_range"], "close"
+    )
+    context_calibration_error = np.abs(
+        np.asarray(healthy_close, dtype=np.int16)
+        - np.asarray(expected_close, dtype=np.int16)
+    )
+    # The cyan selected-module outline is the only intended pixel difference.
+    assert float(np.percentile(context_calibration_error, 95)) <= 1.0, (
+        "Close View applied crop-relative camera processing"
+    )
     # With a fixed scene range, identical scalar samples map to the same palette
     # neighborhood even when rendered as a crop. Only deterministic sub-pixel
     # dither may differ.
@@ -122,15 +139,47 @@ def main():
             "image": path.name,
         })
 
-    # A -> B -> A must be deterministic, with no stale B residual retained.
-    first_surface = outputs["SurfaceObstruction"]
-    namespace["real_farm_diagnostic_master"](layers, observation, "SingleDiode", 7)
-    returned_surface = namespace["real_farm_diagnostic_master"](
-        layers, observation, "SurfaceObstruction", 7
-    )
-    assert np.array_equal(first_surface, returned_surface), "diagnosis switching retained stale state"
+    # Exercise the actual selector order. Each preview and committed metadata
+    # rebuilds from the healthy master and retains only the active observation
+    # plus the currently selected diagnosis.
+    switch_sequence = [
+        "SurfaceObstruction", "SoilingDust", "CellCracking", "SingleDiode",
+        "SingleByPassed", "StringOpenCircuit", "StringReversedPolarity", "SingleDiode",
+    ]
+    switching_record = json.loads(json.dumps(observation))
+    diode_reference_id = None
+    switching_results = []
+    for fault_type in switch_sequence:
+        switching_record["diagnostic_fault_type"] = fault_type
+        switched = namespace["real_farm_diagnostic_master"](
+            layers, switching_record, fault_type, 7
+        )
+        assert np.array_equal(switched, outputs[fault_type]), (
+            f"{fault_type}: previous morphology remained under the active diagnosis"
+        )
+        namespace["real_farm_faulted_master"](layers, [switching_record])
+        active_metadata = namespace["real_farm_fault_metadata"]([switching_record])
+        active_types = {record["fault_type"] for record in active_metadata}
+        assert active_types == {"SingleHotSpot", fault_type}, (
+            f"{fault_type}: stale export metadata remained active"
+        )
+        metadata = switching_record["production_fault_debug_by_type"][fault_type]
+        if fault_type == "SingleDiode":
+            current_reference_id = metadata.get("reference_id")
+            if diode_reference_id is None:
+                diode_reference_id = current_reference_id
+            else:
+                assert current_reference_id == diode_reference_id, (
+                    "Bypass Diode production reference changed after switching back"
+                )
+        switching_results.append({
+            "fault_type": fault_type,
+            "active_metadata_types": sorted(active_types),
+            "reference_id": metadata.get("reference_id"),
+        })
     hashes = {np.asarray(value, dtype=np.float32).tobytes() for value in outputs.values()}
     assert len(hashes) == len(outputs), "two diagnoses collapsed to identical scalar morphology"
+    assert np.array_equal(healthy_scalar, layers["master_scalar"]), "healthy master mutated during switching"
 
     columns = 3
     rows = (len(tiles) + columns - 1) // columns
@@ -141,6 +190,8 @@ def main():
     (OUT / "diagnostic_metadata.json").write_text(json.dumps({
         "display_range": layers["display_range"],
         "palette_calibration_error_p95": float(np.percentile(calibration_error, 95)),
+        "context_calibration_error_p95": float(np.percentile(context_calibration_error, 95)),
+        "switching_sequence": switching_results,
         "diagnostics": records,
     }, indent=2), encoding="utf-8")
     print(f"real-farm targeted diagnostics: PASS ({len(outputs)} diagnoses)")
