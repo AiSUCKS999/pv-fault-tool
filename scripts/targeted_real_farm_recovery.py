@@ -10,31 +10,13 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
 UPLOADS = ROOT / "artifacts" / "real_farm" / "uploads"
 OUTPUT = ROOT / "artifacts" / "real_farm" / "targeted_tightening"
 DENSE_REFERENCE = "daniel-miksha-PNX3H9jkT4c-unsplash_c6a4eafd73c3f79d.jpg"
-
-
-def clean_module_overlay(image, modules, max_width=1800):
-    """Draw one uncluttered cyan quadrilateral per recovered module."""
-    scale = min(1.0, max_width / float(max(1, image.width)))
-    preview = image.resize(
-        (max(1, int(round(image.width * scale))), max(1, int(round(image.height * scale)))),
-        Image.Resampling.LANCZOS,
-    )
-    draw = ImageDraw.Draw(preview)
-    for module in modules:
-        polygon = [
-            (round(float(x) * scale), round(float(y) * scale))
-            for x, y in module.get("outer_polygon_rgb", [])
-        ]
-        if len(polygon) >= 3:
-            draw.line(polygon + [polygon[0]], fill=(0, 235, 255), width=2, joint="curve")
-    return preview
 
 
 def main():
@@ -59,6 +41,24 @@ def main():
         recovered = namespace["real_farm_recovered_modules"](
             state["modules"], image_size=image.size
         )
+        search_polygon = [
+            [image.width * 0.005, image.height * 0.005],
+            [image.width * 0.995, image.height * 0.005],
+            [image.width * 0.995, image.height * 0.995],
+            [image.width * 0.005, image.height * 0.995],
+        ]
+        search_record = namespace["real_farm_module_record"](
+            "SEARCH001", search_polygon, image.size, "FULL_FARM", 0.0,
+            "automatic_full_farm_search",
+        )
+        conservative_count = len(namespace["real_farm_detect_module_instances"](
+            image, search_record, result["final_mask"], result["refined_pv_polygon_rgb"],
+            recovery_mode="conservative",
+        ))
+        adaptive_count = len(namespace["real_farm_detect_module_instances"](
+            image, search_record, result["final_mask"], result["refined_pv_polygon_rgb"],
+            recovery_mode="adaptive",
+        ))
         union = namespace["real_farm_module_mask"](image.size, recovered, active=True)
         if len(recovered) != result.get("accepted_count"):
             raise AssertionError(f"{path.name}: accepted count differs from canonical collection")
@@ -69,9 +69,6 @@ def main():
         namespace["real_farm_annotated_preview"](
             image, recovered, max_width=1800
         ).save(OUTPUT / f"{path.stem}_modules.jpg", quality=90)
-        clean_module_overlay(image, recovered).save(
-            OUTPUT / f"{path.stem}_module_instances.jpg", quality=92
-        )
         Image.fromarray(union, "L").save(OUTPUT / f"{path.stem}_mask.png")
         areas = []
         for module in recovered:
@@ -87,24 +84,16 @@ def main():
             (module.get("module_id"), module.get("grid_texture_score"))
             for module in recovered if module.get("grid_texture_score") is not None
         ]
-        unsplit_ids = [
-            module.get("module_id")
-            for module in recovered
-            if any(
-                notice.get("code") == "unsplit_recovered_region"
-                for notice in module.get("warnings", [])
-            )
-        ]
         report.append({
             "image": path.name,
             "size": list(image.size),
             "modules": len(recovered),
+            "conservative_modules": conservative_count,
+            "adaptive_modules": adaptive_count,
             "accepted": result.get("accepted_count"),
             "rejected": result.get("rejected_count"),
             "mask_pixels": int(np.count_nonzero(union)),
             "oversized_vs_median": oversized,
-            "unsplit_recovered_regions": len(unsplit_ids),
-            "unsplit_module_ids": unsplit_ids,
             "lowest_visual_scores": sorted(visual_scores, key=lambda item: item[1])[:8],
             "lowest_grid_scores": sorted(grid_scores, key=lambda item: item[1])[:8],
             "stages": stages,
