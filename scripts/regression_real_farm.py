@@ -123,27 +123,39 @@ def main():
     assert np.any(diagnostic_only != layers["master_scalar"])
     assert not np.array_equal(far_only, diagnostic_only)
     close_context = namespace["real_farm_close_context_image"](
-        diagnostic_only, modules[0], modules
+        diagnostic_only, modules[0], modules, display_range=layers["display_range"]
     )
     assert close_context.width <= image.width and close_context.height <= image.height
 
-    # Unsupported diagnoses remain unavailable and can never enter the generic
-    # fault path or appear as a hotspot substitute.
-    unsupported = json.loads(json.dumps(separated))
-    unsupported["diagnostic_fault_type"] = "SurfaceObstruction"
-    unsupported_preview = namespace["real_farm_diagnostic_master"](
-        layers, unsupported
+    # Every Close View diagnosis renders from the immutable healthy master.
+    # The five non-bank diagnoses use dedicated synthetic morphology and never
+    # substitute a hotspot or a production fallback.
+    diagnostic_types = list(namespace["CLOSE_DIAGNOSTIC_FAULT_TYPES"])
+    diagnostic_outputs = {}
+    for fault_type in diagnostic_types:
+        candidate = json.loads(json.dumps(separated))
+        candidate["diagnostic_fault_type"] = fault_type
+        rendered = namespace["real_farm_diagnostic_master"](layers, candidate)
+        assert np.any(rendered != layers["master_scalar"]), f"{fault_type}: no diagnostic delta"
+        assert not np.array_equal(rendered, far_only), f"{fault_type}: hotspot substitution"
+        diagnostic_outputs[fault_type] = rendered
+        committed = namespace["real_farm_faulted_master"](layers, [candidate])
+        metadata = candidate["production_fault_debug_by_type"][fault_type]
+        assert metadata["fallback_used"] is False
+        assert metadata["production_fault_render_failed"] is False
+        if fault_type in namespace["REAL_FARM_SYNTHETIC_DIAGNOSTIC_MODELS"]:
+            assert metadata["renderer_class"] == "SYNTHETIC_DIAGNOSTIC"
+            assert metadata["reference_id"] is None
+        else:
+            assert metadata["renderer_class"] == "PRODUCTION_REFERENCE"
+            assert metadata["reference_id"]
+        assert np.any(committed != layers["master_scalar"])
+    # Switching away and back cannot retain a stale diagnosis.
+    assert np.array_equal(
+        diagnostic_outputs["SurfaceObstruction"],
+        namespace["real_farm_diagnostic_master"](layers, separated, "SurfaceObstruction", 7),
     )
-    assert np.array_equal(unsupported_preview, layers["master_scalar"])
-    try:
-        namespace["real_farm_faulted_master"](layers, [unsupported])
-    except namespace["FaultGeometryError"]:
-        pass
-    else:
-        raise AssertionError("Unsupported Real Farm diagnosis did not fail explicitly")
-    unsupported_debug = unsupported["production_fault_debug_by_type"]["SurfaceObstruction"]
-    assert unsupported_debug["production_fault_render_failed"] is True
-    assert unsupported_debug["fallback_used"] is False
+    assert np.array_equal(healthy_before, layers["master_scalar"])
     low_texture = Image.new("RGB", (320, 220), (110, 140, 110))
     low_texture_module = namespace["real_farm_module_record"](
         "MLOW", [[42, 44], [276, 62], [251, 184], [29, 169]], low_texture.size, "QA", 0.02, "low_texture_regression"

@@ -27,6 +27,22 @@ REAL_FARM_GEOMETRY_NOTICE_EXPLANATIONS = {
     "weak_pv_texture_confidence": "RGB texture confidence is low, but the mechanically valid recovered geometry remains usable.",
 }
 
+REAL_FARM_PRODUCTION_DIAGNOSTICS = {"SingleDiode", "SingleByPassed"}
+REAL_FARM_SYNTHETIC_DIAGNOSTIC_MODELS = {
+    "SurfaceObstruction": "real_farm_synthetic_surface_obstruction_v1",
+    "SoilingDust": "real_farm_synthetic_soiling_v1",
+    "CellCracking": "real_farm_synthetic_cell_cracking_v1",
+    "StringOpenCircuit": "real_farm_synthetic_offline_module_v1",
+    "StringReversedPolarity": "real_farm_synthetic_reversed_polarity_v1",
+}
+
+
+def real_farm_diagnostic_label(fault_type):
+    label = fault_display_name(fault_type)
+    if fault_type in REAL_FARM_SYNTHETIC_DIAGNOSTIC_MODELS:
+        return f"{label} — Synthetic Diagnostic"
+    return label
+
 
 def real_farm_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -1753,7 +1769,10 @@ def real_farm_build_thermal_master(image, modules, real_thermal=None, final_pv_m
 
 
 def real_farm_palette_image(scalar, display_range=None, scene_distance="far"):
-    return thermal_display_rgb_from_scalar(np.asarray(scalar, dtype=np.float32), "real_farm", scene_distance)
+    return thermal_display_rgb_from_scalar(
+        np.asarray(scalar, dtype=np.float32), "real_farm", scene_distance,
+        display_range=display_range,
+    )
 
 
 def real_farm_production_cell(module, observation, width, height):
@@ -1817,6 +1836,55 @@ def real_farm_fault_realism_compositor(base_local, production_delta, fault_type,
     return (soft_limit * np.tanh(blended / max(1.0, soft_limit))).astype(np.float32)
 
 
+def real_farm_synthetic_string_delta(base_local, fault_type, severity, seed):
+    """Dedicated non-production string signatures in canonical module space."""
+    height, width = base_local.shape
+    signature = organic_fault_mask(width, height, fault_type, seed).astype(np.float32)
+    edge = cell_edge_feather(width, height, strength=7.0).astype(np.float32)
+    severity_fraction = float(np.clip(severity, 1, 10)) / 10.0
+    if fault_type == "StringOpenCircuit":
+        # An electrically offline module/section reads cooler than its healthy
+        # neighbors, with a coherent section-scale depression rather than a hot
+        # line or hotspot substitute.
+        delta = -(8.0 + 8.0 * severity_fraction) - signature * (13.0 + 17.0 * severity_fraction)
+        boundary = np.abs(cv2.Laplacian(signature, cv2.CV_32F))
+        delta += np.clip(boundary, 0, 1) * (2.0 + 3.0 * severity_fraction)
+    else:
+        # Reversed polarity keeps its crossed/electrically aligned signature,
+        # but stays inside the shared scene range instead of clipping to white.
+        delta = (signature - 0.30) * (18.0 + 18.0 * severity_fraction)
+    return (delta * edge).astype(np.float32)
+
+
+def real_farm_synthetic_cracking_delta(base_local, severity, seed):
+    """A branching line/network anomaly without hotspot-like circular nodes."""
+    height, width = base_local.shape
+    rng = np.random.default_rng(int(seed))
+    core = np.zeros((height, width), dtype=np.float32)
+    origin = (int(width * rng.uniform(0.42, 0.58)), int(height * rng.uniform(0.40, 0.60)))
+    for branch_index, angle in enumerate(rng.uniform(-2.7, 2.7, 4)):
+        length = rng.uniform(0.26, 0.46) * min(width, height)
+        points = [origin]
+        for step in range(1, 7):
+            fraction = step / 6.0
+            bend = rng.normal(0, 0.07)
+            x = origin[0] + math.cos(angle + bend) * length * fraction
+            y = origin[1] + math.sin(angle + bend) * length * fraction
+            points.append((int(np.clip(x, 1, width - 2)), int(np.clip(y, 1, height - 2))))
+        cv2.polylines(
+            core, [np.asarray(points, dtype=np.int32)], False, 1.0,
+            max(1, int(round(min(width, height) * (0.015 + branch_index * 0.002)))),
+            lineType=cv2.LINE_AA,
+        )
+    halo = cv2.GaussianBlur(core, (0, 0), max(0.8, min(width, height) * 0.028))
+    core = cv2.GaussianBlur(core, (0, 0), max(0.35, min(width, height) * 0.006))
+    severity_fraction = float(np.clip(severity, 1, 10)) / 10.0
+    return (
+        halo * (19.0 + 17.0 * severity_fraction)
+        - core * (9.0 + 9.0 * severity_fraction)
+    ).astype(np.float32)
+
+
 def real_farm_apply_production_fault(master_scalar, module, observation, fault_type, realism=False, return_debug=False):
     """Run the unchanged production engine in module-local space, then homography-warp its scalar delta."""
     output = np.asarray(master_scalar, dtype=np.float32).copy()
@@ -1841,6 +1909,18 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
     base_local = cv2.warpPerspective(output, to_local, canonical_size, flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
     faulted_local = base_local.copy()
     cell = real_farm_production_cell(module, observation, width, height)
+    if fault_type in {
+        "SurfaceObstruction", "SoilingDust", "CellCracking",
+        "StringOpenCircuit", "StringReversedPolarity",
+    }:
+        # These diagnostics describe module/section behavior rather than one
+        # cell. Keep their dedicated synthetic morphology in canonical module
+        # space so the inverse homography preserves real orientation.
+        cell.update({
+            "x1": 1, "y1": 1,
+            "x2": max(2, width - 1), "y2": max(2, height - 1),
+            "fault_origin_px": {"x": width * 0.5, "y": height * 0.5},
+        })
     trace = {}
     reference_ids = observation.setdefault("production_reference_ids", {})
     production_reference_id = reference_ids.get(fault_type)
@@ -1849,17 +1929,29 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
         # overwrite this compatibility field: one observation can contain both
         # a hotspot and a diagnostic fault from different production banks.
         production_reference_id = observation.get("production_reference_id")
-    production_only = fault_type in {"SingleHotSpot", "SingleDiode", "SingleByPassed", "StringOpenCircuit"}
+    production_only = fault_type in {"SingleHotSpot", "SingleDiode", "SingleByPassed"}
     try:
-        apply_thermal_fault(
-            faulted_local,
-            cell,
-            fault_type,
-            int(observation.get("severity", 7)),
-            production_reference_id=production_reference_id,
-            production_trace=trace,
-            require_production=production_only,
-        )
+        if fault_type in {"StringOpenCircuit", "StringReversedPolarity"} and not production_only:
+            faulted_local += real_farm_synthetic_string_delta(
+                base_local, fault_type, int(observation.get("severity", 7)),
+                seed_for(module.get("module_id"), observation.get("observation_id"), fault_type, "synthetic-string"),
+            )
+        elif fault_type == "CellCracking" and not production_only:
+            faulted_local += real_farm_synthetic_cracking_delta(
+                base_local, int(observation.get("severity", 7)),
+                seed_for(module.get("module_id"), observation.get("observation_id"), fault_type, "synthetic-cracking"),
+            )
+        else:
+            apply_thermal_fault(
+                faulted_local,
+                cell,
+                fault_type,
+                int(observation.get("severity", 7)),
+                production_reference_id=production_reference_id,
+                production_trace=trace,
+                require_production=production_only,
+                allow_reference_patch=production_only,
+            )
         if fault_type == "SingleHotSpot" and production_reference_id is None:
             # Resolve the bank choice before displaying the first render.
             # A later pinned-reference call skips the bank-selection RNG draw,
@@ -1874,6 +1966,7 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
                     int(observation.get("severity", 7)),
                     production_reference_id=resolved_reference,
                     production_trace=trace, require_production=production_only,
+                    allow_reference_patch=production_only,
                 )
     except FaultGeometryError:
         failure = {
@@ -1891,6 +1984,20 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
         observation.setdefault("production_fault_debug_by_type", {})[fault_type] = failure
         observation["production_fault_debug"] = failure
         raise
+    if not production_only:
+        trace.update({
+            "production_model": REAL_FARM_SYNTHETIC_DIAGNOSTIC_MODELS.get(
+                fault_type, f"real_farm_synthetic_{fault_type}_v1"
+            ),
+            "reference_id": None,
+            "reference_bank_path": None,
+            "reference_quality_status": "SYNTHETIC_DIAGNOSTIC",
+            "renderer_class": "SYNTHETIC_DIAGNOSTIC",
+            "fallback_used": False,
+            "production_fault_render_failed": False,
+        })
+    else:
+        trace.setdefault("renderer_class", "PRODUCTION_REFERENCE")
     delta_local = faulted_local - base_local
     if realism:
         realism_seed = seed_for(
@@ -1921,6 +2028,7 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
         "reference_id": reference_id,
         "reference_bank_path": trace.get("reference_bank_path"),
         "reference_quality_status": trace.get("reference_quality_status"),
+        "renderer_class": trace.get("renderer_class"),
         "canonical_residual_shape": list(delta_local.shape),
         "canonical_support_shape": list(production_support_local.shape),
         "target_module_id": module.get("module_id"),
@@ -1946,6 +2054,7 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
         "severity": int(observation.get("severity", 7)),
         "production_reference_id": reference_id,
         "production_model": debug_metadata["production_model"],
+        "renderer_class": debug_metadata["renderer_class"],
         "canonical_residual_provenance": {
             "reference_bank_path": debug_metadata["reference_bank_path"],
             "reference_quality_status": debug_metadata["reference_quality_status"],
@@ -2006,16 +2115,6 @@ def real_farm_faulted_master(master_layers, observations):
             output = real_farm_apply_production_fault(output, module, observation, observation_type)
         diagnostic = observation.get("diagnostic_fault_type")
         if diagnostic:
-            if diagnostic not in {"SingleDiode", "SingleByPassed"}:
-                failure = {
-                    "fault_type": diagnostic,
-                    "production_fault_render_failed": True,
-                    "fallback_used": False,
-                    "failure_reason": "real_farm_diagnostic_renderer_unavailable",
-                }
-                observation.setdefault("production_fault_debug_by_type", {})[diagnostic] = failure
-                observation["production_fault_debug"] = failure
-                raise FaultGeometryError(f"Production fault reference unavailable for {diagnostic}")
             output = real_farm_apply_production_fault(output, module, observation, diagnostic)
     return output
 
@@ -2040,7 +2139,7 @@ def real_farm_diagnostic_master(master_layers, observation, diagnostic_fault=Non
     if not observation:
         return output
     fault_type = diagnostic_fault or observation.get("diagnostic_fault_type")
-    if fault_type not in {"SingleDiode", "SingleByPassed"}:
+    if fault_type not in CLOSE_DIAGNOSTIC_FAULT_TYPES:
         return output
     module = next(
         (item for item in master_layers.get("accepted_modules", []) if item.get("module_id") == observation.get("module_id")),
@@ -2059,7 +2158,7 @@ def real_farm_thermal_image(image, modules, observations=None, master_layers=Non
     layers = master_layers or real_farm_build_thermal_master(image, modules)
     faulted = real_farm_faulted_master(layers, observations or [])
     sensor = apply_sensor_model(faulted, "real_farm", "far")
-    return thermal_display_rgb_from_scalar(sensor, "real_farm", "far")
+    return real_farm_palette_image(sensor, layers.get("display_range"), "far")
 
 
 def real_farm_close_thermal_image(faulted_master_scalar, module):
@@ -2081,7 +2180,7 @@ def real_farm_close_thermal_image(faulted_master_scalar, module):
     return thermal_display_rgb_from_scalar(sensor, "real_farm", "close")
 
 
-def real_farm_close_context_image(master_scalar, selected_module, modules, margin_ratio=0.16):
+def real_farm_close_context_image(master_scalar, selected_module, modules, display_range=None, margin_ratio=0.16):
     """Crop a native-resolution local PV group around the selected module."""
     selected_points = np.asarray(selected_module.get("outer_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
     selected_center = selected_points.mean(axis=0)
@@ -2109,7 +2208,7 @@ def real_farm_close_context_image(master_scalar, selected_module, modules, margi
     y2 = min(height, int(math.ceil(y_max + span_y * margin_ratio)))
     crop = np.asarray(master_scalar, dtype=np.float32)[y1:y2, x1:x2]
     sensor = apply_sensor_model(crop, "real_farm", "close")
-    display = thermal_display_rgb_from_scalar(sensor, "real_farm", "close").convert("RGB")
+    display = real_farm_palette_image(sensor, display_range, "close").convert("RGB")
     draw = ImageDraw.Draw(display)
     outline = [(float(x - x1), float(y - y1)) for x, y in selected_points]
     draw.line(outline + [outline[0]], fill=(56, 189, 248), width=max(2, min(display.size) // 240))
@@ -2205,16 +2304,27 @@ def real_farm_review_panel(state, image, healthy_thermal, far_observation_therma
     diagnostic_master = real_farm_diagnostic_master(master_layers, selected_observation, diagnostic)
     detail_columns = st.columns([0.58, 0.42])
     detail_columns[0].image(
-        real_farm_close_context_image(diagnostic_master, selected_module, thermal_modules),
+        real_farm_close_context_image(
+            diagnostic_master, selected_module, thermal_modules,
+            display_range=master_layers.get("display_range"),
+        ),
         caption=f"Diagnostic Close View · {selected_module_id}",
     )
     active_fault = diagnostic or (selected_observation.get("observation_type") if selected_observation else None)
     reference_ids = (selected_observation or {}).get("production_reference_ids", {})
     reference_id = reference_ids.get(active_fault) if active_fault else None
+    renderer_class = (
+        "Synthetic diagnostic"
+        if active_fault in REAL_FARM_SYNTHETIC_DIAGNOSTIC_MODELS
+        else "Production reference"
+        if active_fault
+        else "—"
+    )
     detail_columns[1].markdown(
         f"**Module ID:** `{selected_module_id}`  \n"
         f"**Fault:** {fault_display_name(active_fault) if active_fault else 'No applied fault'}  \n"
         f"**Severity:** {(selected_observation or {}).get('severity', '—')}  \n"
+        f"**Renderer:** `{renderer_class}`  \n"
         f"**Production reference:** `{reference_id or '—'}`  \n"
         f"**Orientation:** `{selected_module.get('orientation_label') or selected_module.get('orientation') or 'unknown'}`  \n"
         f"**Geometry confidence:** `{float(selected_module.get('geometry_confidence') or 0):.3f}`"
@@ -2339,7 +2449,9 @@ def real_farm_fault_workflow(state, image, modules, section="Faults"):
         st.caption(f"{len(thermal_modules)} recovered module instance(s) drive PV variation, hotspot placement, close view, and exports.")
     healthy_master_scalar = np.asarray(master_layers["master_scalar"], dtype=np.float32)
     healthy_sensor = apply_sensor_model(healthy_master_scalar, "real_farm", "far")
-    healthy_thermal = thermal_display_rgb_from_scalar(healthy_sensor, "real_farm", "far")
+    healthy_thermal = real_farm_palette_image(
+        healthy_sensor, master_layers.get("display_range"), "far"
+    )
     try:
         # This combined scalar remains the authoritative export state and populates
         # active-only production metadata. Interactive Far and Close views below
@@ -2355,9 +2467,13 @@ def real_farm_fault_workflow(state, image, modules, section="Faults"):
         with st.expander("Developer production failure"):
             st.code(str(exc))
     thermal_sensor = apply_sensor_model(far_observation_master, "real_farm", "far")
-    thermal = thermal_display_rgb_from_scalar(thermal_sensor, "real_farm", "far")
+    thermal = real_farm_palette_image(
+        thermal_sensor, master_layers.get("display_range"), "far"
+    )
     combined_sensor = apply_sensor_model(faulted_master_scalar, "real_farm", "far")
-    combined_thermal = thermal_display_rgb_from_scalar(combined_sensor, "real_farm", "far")
+    combined_thermal = real_farm_palette_image(
+        combined_sensor, master_layers.get("display_range"), "far"
+    )
     module_ids = [item.get("module_id") for item in thermal_modules]
     selected_module_id = st.session_state.get("real_farm_target_module")
     if selected_module_id not in module_ids:
@@ -2515,58 +2631,45 @@ def real_farm_fault_workflow(state, image, modules, section="Faults"):
             st.markdown(f"#### Close View — {selected['observation_id']} on {selected['module_id']}")
             diagnosis_col, severity_col = st.columns([0.72, 0.28])
             fault_options = list(CLOSE_DIAGNOSTIC_FAULT_TYPES)
-            supported_real_farm_diagnostics = {"SingleDiode", "SingleByPassed"}
             current_fault = selected.get("diagnostic_fault_type")
             default_index = fault_options.index(current_fault) if current_fault in fault_options else fault_options.index("SingleDiode")
             chosen_fault = diagnosis_col.selectbox(
                 "Actual fault for this hotspot",
                 fault_options,
                 index=default_index,
-                format_func=lambda value: (
-                    fault_display_name(value)
-                    if value in supported_real_farm_diagnostics
-                    else f"{fault_display_name(value)} — Unavailable"
-                ),
+                format_func=real_farm_diagnostic_label,
                 key=f"real_farm_diagnosis_{selected['observation_id']}",
             )
             severity = severity_col.number_input(
                 "Severity", min_value=1, max_value=10, value=int(selected.get("severity", 7)), step=1,
                 key=f"real_farm_severity_{selected['observation_id']}",
             )
-            unsupported_diagnostic = chosen_fault not in supported_real_farm_diagnostics
+            renderer_failed = False
             try:
                 diagnostic_master = real_farm_diagnostic_master(
                     master_layers, selected, chosen_fault, int(severity)
                 )
                 close_image = real_farm_close_context_image(
-                    diagnostic_master, selected_module, thermal_modules
+                    diagnostic_master, selected_module, thermal_modules,
+                    display_range=master_layers.get("display_range"),
                 )
                 st.image(
                     close_image,
-                    caption=(
-                        f"Local PV context · {selected['module_id']} · {fault_display_name(chosen_fault)}"
-                        if not unsupported_diagnostic
-                        else f"Healthy local PV context · {selected['module_id']}"
-                    ),
+                    caption=f"Local PV context · {selected['module_id']} · {real_farm_diagnostic_label(chosen_fault)}",
                     width=min(close_image.width, 1000),
                 )
             except FaultGeometryError as exc:
-                unsupported_diagnostic = True
-                st.error("Production fault reference unavailable.")
-                with st.expander("Developer production failure"):
+                renderer_failed = True
+                st.error("Diagnostic renderer unavailable.")
+                with st.expander("Developer renderer failure"):
                     st.code(str(exc))
-            if unsupported_diagnostic:
-                if chosen_fault == "StringOpenCircuit":
-                    st.warning(
-                        "Open-Circuit / Offline Module Pattern remains production-disabled. "
-                        "Five semantically approved real references establish the fault signature, "
-                        "but the qualified bank is too small for defensible production variation. "
-                        "No synthetic or cross-fault fallback will be used."
-                    )
-                else:
-                    st.warning(f"{fault_display_name(chosen_fault)} is visible for production-status transparency but is not supported in Real Farm mode.")
+            if chosen_fault in REAL_FARM_SYNTHETIC_DIAGNOSTIC_MODELS:
+                st.caption(
+                    "Synthetic relative diagnostic: dedicated fault-specific morphology; "
+                    "not a production reference or measured temperature."
+                )
             apply_col, clear_diagnosis_col = st.columns([0.7, 0.3])
-            if apply_col.button("Apply Diagnosis", type="primary", use_container_width=True, disabled=unsupported_diagnostic):
+            if apply_col.button("Apply Diagnosis", type="primary", use_container_width=True, disabled=renderer_failed):
                 selected["diagnostic_fault_type"] = chosen_fault
                 selected["severity"] = int(severity)
                 selected["diagnosed_at"] = real_farm_now()

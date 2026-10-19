@@ -2166,7 +2166,7 @@ def solar_render_thermal_base_field(location_id, rendered):
     return temp.astype(np.float32), array_geometries
 
 
-def thermal_display_rgb_from_scalar(temp, location_id, scene_distance="far"):
+def thermal_display_rgb_from_scalar(temp, location_id, scene_distance="far", display_range=None):
     """Map one scalar thermal master to the app palette with a stable robust range."""
     temp = np.asarray(temp, dtype=np.float32)
     if temp.size == 0:
@@ -2174,10 +2174,13 @@ def thermal_display_rgb_from_scalar(temp, location_id, scene_distance="far"):
     # Far-view hotspots occupy far less than one percent of the image. Keeping
     # the old 99.35 percentile clipped them to the same hue as healthy panels.
     low_pct, high_pct = (1.0, 99.995) if str(scene_distance).lower() == "far" else (1.0, 99.80)
-    low, high = np.percentile(temp, [low_pct, high_pct])
+    if display_range is not None and len(display_range) == 2:
+        low, high = (float(display_range[0]), float(display_range[1]))
+    else:
+        low, high = np.percentile(temp, [low_pct, high_pct])
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
         low, high = float(np.min(temp)), float(np.max(temp))
-    if str(scene_distance).lower() == "far":
+    if display_range is None and str(scene_distance).lower() == "far":
         # Reserve the yellow/cream end of the palette for actual anomalies.
         # Healthy panels normally occupy the orange range around 160-190.
         high = max(float(high), 238.0)

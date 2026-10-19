@@ -1293,7 +1293,10 @@ def apply_thermal_fault_tints(thermal_rgb, tint_items):
     return np.clip(output, 0, 255).astype(np.uint8)
 
 
-def apply_thermal_fault(temp, cell, fault_type, scale, production_reference_id=None, production_trace=None, require_production=False):
+def apply_thermal_fault(
+    temp, cell, fault_type, scale, production_reference_id=None,
+    production_trace=None, require_production=False, allow_reference_patch=True,
+):
     if cell is None:
         return temp
     fault_type = canonical_fault_type(fault_type)
@@ -1327,7 +1330,7 @@ def apply_thermal_fault(temp, cell, fault_type, scale, production_reference_id=N
             "Production Open-Circuit / Offline Module Pattern is unavailable: "
             "only 5 semantically approved real references exist, which is insufficient for production integration."
         )
-    if apply_real_thermal_fault_patch(temp, cell, fault_type, scale):
+    if allow_reference_patch and apply_real_thermal_fault_patch(temp, cell, fault_type, scale):
         return temp
     x1, y1, x2, y2 = fault_render_bounds_for_cell(cell, fault_type)
     w = max(4, x2 - x1)
