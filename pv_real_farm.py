@@ -989,6 +989,17 @@ def real_farm_detect_module_instances(image, parent_module, union_mask, parent_q
             table_contours.append(contour)
     table_contours.sort(key=lambda contour: cv2.boundingRect(contour)[1])
     contour_areas = [float(cv2.contourArea(contour)) for contour in table_contours]
+    contour_aspects = []
+    for contour in table_contours:
+        (_, _), (rect_width, rect_height), _ = cv2.minAreaRect(contour)
+        contour_aspects.append(
+            max(rect_width, rect_height) / max(1.0, min(rect_width, rect_height))
+        )
+    compact_component_mode = bool(
+        recovery_mode == "adaptive"
+        and len(table_contours) >= 12
+        and float(np.median(contour_aspects)) <= 3.2
+    )
     adaptive_area_reference = (
         float(np.percentile(contour_areas, 35)) if contour_areas else 0.0
     )
@@ -1040,50 +1051,314 @@ def real_farm_detect_module_instances(image, parent_module, union_mask, parent_q
                 guided.append(candidate)
         return sorted(guided)
 
-    for contour in table_contours:
-        table_quad = np.asarray(real_farm_order_quad(cv2.boxPoints(cv2.minAreaRect(contour)).tolist()), dtype=np.float32)
-        size = real_farm_canonical_size(table_quad)
-        local_w = int(np.clip(size["width"], 80, 720))
-        local_h = int(np.clip(size["height"], 80, 1800))
-        destination = np.asarray([[0, 0], [local_w - 1, 0], [local_w - 1, local_h - 1], [0, local_h - 1]], dtype=np.float32)
+    def rectified_table_data(contour):
+        table_quad = np.asarray(
+            real_farm_order_quad(cv2.boxPoints(cv2.minAreaRect(contour)).tolist()),
+            dtype=np.float32,
+        )
+        if recovery_mode == "adaptive" and not compact_component_mode:
+            # Preserve the rectified table aspect ratio. Independent axis caps
+            # squeezed long tables and made physical module pitch look like a
+            # cell-grid interval.
+            _, _, native_width, native_height = real_farm_orientation_metadata(table_quad)
+            uniform_scale = min(1.0, 1800.0 / max(1.0, native_width, native_height))
+            local_w = max(24, int(round(native_width * uniform_scale)))
+            local_h = max(24, int(round(native_height * uniform_scale)))
+        else:
+            uniform_scale = 1.0
+            size = real_farm_canonical_size(table_quad)
+            local_w = int(np.clip(size["width"], 80, 720))
+            local_h = int(np.clip(size["height"], 80, 1800))
+        destination = np.asarray(
+            [[0, 0], [local_w - 1, 0], [local_w - 1, local_h - 1], [0, local_h - 1]],
+            dtype=np.float32,
+        )
         to_local = cv2.getPerspectiveTransform(table_quad, destination)
         to_rgb = cv2.getPerspectiveTransform(destination, table_quad)
         local_rgb = cv2.warpPerspective(rgb, to_local, (local_w, local_h), flags=cv2.INTER_CUBIC)
         local_mask = cv2.warpPerspective(source_mask, to_local, (local_w, local_h), flags=cv2.INTER_NEAREST)
         support = local_mask > 0
-        if not np.any(support):
-            continue
         gray = cv2.cvtColor(local_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
         sobel_x = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
         sobel_y = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
         bright = np.clip((gray - 120.0) / 100.0, 0, 1)
         support_f = support.astype(np.float32)
-        x_score = (sobel_x * support_f).sum(axis=0) / np.maximum(1.0, support_f.sum(axis=0)) + bright.mean(axis=0) * 85.0
-        y_score = (sobel_y * support_f).sum(axis=1) / np.maximum(1.0, support_f.sum(axis=1)) + bright.mean(axis=1) * 85.0
-        # The expanded component pass often isolates one physical module per
-        # contour. Do not split those contours again on their internal cell grid.
-        # Only large connected regions (or a scene with very few components)
-        # receive separator-based module recovery.
-        split_connected_region = (
-            recovery_mode != "adaptive"
-            or len(table_contours) <= 3
-            or float(cv2.contourArea(contour)) >= adaptive_area_reference * 2.0
+        x_score = (
+            (sobel_x * support_f).sum(axis=0) / np.maximum(1.0, support_f.sum(axis=0))
+            + bright.mean(axis=0) * 85.0
         )
-        if split_connected_region:
+        y_score = (
+            (sobel_y * support_f).sum(axis=1) / np.maximum(1.0, support_f.sum(axis=1))
+            + bright.mean(axis=1) * 85.0
+        )
+        return {
+            "table_quad": table_quad, "local_w": local_w, "local_h": local_h,
+            "to_rgb": to_rgb, "support": support,
+            "x_score": x_score, "y_score": y_score,
+            "rectification_scale": float(uniform_scale),
+            "source_width": float(local_w) / max(1e-6, float(uniform_scale)),
+            "source_height": float(local_h) / max(1e-6, float(uniform_scale)),
+            "source_center": np.mean(table_quad, axis=0),
+        }
+
+    def strong_frame_anchors(score, axis_length, cross_length):
+        """Return broad, high-energy frame lines while suppressing cell-grid lines."""
+        vector = np.asarray(score, dtype=np.float32).reshape(-1, 1)
+        sigma = max(1.0, min(axis_length, cross_length) * 0.004)
+        smooth = cv2.GaussianBlur(vector, (0, 0), sigma).ravel()
+        radius = max(2, int(round(min(axis_length, cross_length) * 0.006)))
+        margin = max(radius + 1, int(round(axis_length * 0.018)))
+        candidates = [
+            index for index in range(margin, axis_length - margin)
+            if smooth[index] == max(smooth[index - radius:index + radius + 1])
+        ]
+        if len(candidates) < 2:
+            return [], smooth
+        values = np.asarray([smooth[index] for index in candidates], dtype=np.float32)
+        # Module frames are the high-energy tail of the projection. Cell-grid
+        # lines may also be periodic, but are narrower/weaker and remain near
+        # the median peak response.
+        peak_median = float(np.median(values))
+        peak_maximum = float(np.max(values))
+        threshold = max(
+            float(np.percentile(values, 72)),
+            peak_median + (peak_maximum - peak_median) * 0.62,
+        )
+        candidates = [index for index in candidates if smooth[index] >= threshold]
+        merge_distance = max(4, int(round(min(axis_length, cross_length) * 0.035)))
+        selected = []
+        for index in sorted(candidates, key=lambda item: float(smooth[item]), reverse=True):
+            if all(abs(index - previous) >= merge_distance for previous in selected):
+                selected.append(index)
+        return sorted(selected), smooth
+
+    def modal_frame_pitch(gaps):
+        """Find the strongest shared module-scale interval without fixed pixel sizes."""
+        values = [float(value) for value in gaps if np.isfinite(value) and value > 0]
+        if not values:
+            return None
+        best = None
+        for candidate in values:
+            tolerance = max(3.0, candidate * 0.16)
+            members = [value for value in values if abs(value - candidate) <= tolerance]
+            spread = float(np.std(members)) / max(1.0, candidate)
+            score = len(members) - spread
+            proposal = float(np.median(members))
+            if best is None or score > best[0] or (abs(score - best[0]) < 1e-6 and proposal > best[1]):
+                best = (score, proposal, len(members))
+        return best[1] if best and best[2] >= 2 else None
+
+    def farm_pitch_consensus(table_data, axis_name):
+        if not table_data:
+            return None
+        area_cut = float(np.percentile(contour_areas, 48)) if contour_areas else 0.0
+        gaps = []
+        for contour, data in zip(table_contours, table_data):
+            if float(cv2.contourArea(contour)) < area_cut:
+                continue
+            if axis_name == "x":
+                axis_length, cross_length, score = data["local_w"], data["local_h"], data["x_score"]
+            else:
+                axis_length, cross_length, score = data["local_h"], data["local_w"], data["y_score"]
+            anchors, _ = strong_frame_anchors(score, axis_length, cross_length)
+            minimum_module_interval = max(12.0, min(axis_length, cross_length) * 0.14)
+            for first, second in zip(anchors, anchors[1:]):
+                distance = float(second - first)
+                if minimum_module_interval <= distance <= axis_length * 0.46:
+                    # Tables are rectified with one uniform scale, but long
+                    # tables may be capped while shorter neighbors remain at
+                    # source resolution. Compare pitch in source-image units.
+                    gaps.append(distance / max(1e-6, data["rectification_scale"]))
+        return modal_frame_pitch(gaps)
+
+    def farm_component_module_size(table_data):
+        """Learn physical module dimensions from numerous compact components.
+
+        Some support maps already separate most physical modules. Their modal
+        geometry is stronger evidence than internal cell-grid projections. A
+        collection of similarly long table strips is deliberately excluded.
+        """
+        if len(table_data) < 12:
+            return None
+        widths = np.asarray([data["source_width"] for data in table_data], dtype=np.float32)
+        heights = np.asarray([data["source_height"] for data in table_data], dtype=np.float32)
+        areas = widths * heights
+        median_area = float(np.median(areas))
+        candidates = (
+            (areas >= median_area * 0.42)
+            & (areas <= median_area * 2.20)
+        )
+        if int(np.count_nonzero(candidates)) < max(8, int(len(table_data) * 0.45)):
+            return None
+        reference_width = float(np.median(widths[candidates]))
+        reference_height = float(np.median(heights[candidates]))
+        aspect = max(reference_width, reference_height) / max(1.0, min(reference_width, reference_height))
+        width_mad = float(np.median(np.abs(widths[candidates] - reference_width))) / max(1.0, reference_width)
+        height_mad = float(np.median(np.abs(heights[candidates] - reference_height))) / max(1.0, reference_height)
+        if aspect > 3.2 or width_mad > 0.38 or height_mad > 0.38:
+            return None
+        return reference_width, reference_height, width_mad, height_mad
+
+    def local_component_module_size(data, table_data, global_size):
+        """Estimate module dimensions from nearby compact components.
+
+        This keeps perspective-driven size changes from being interpreted as
+        multi-module tables while retaining a farm-wide modal fallback.
+        """
+        if global_size is None:
+            return None
+        global_area = max(1.0, global_size[0] * global_size[1])
+        candidates = []
+        center = np.asarray(data["source_center"], dtype=np.float32)
+        for neighbor in table_data:
+            width = float(neighbor["source_width"])
+            height = float(neighbor["source_height"])
+            area = width * height
+            aspect = max(width, height) / max(1.0, min(width, height))
+            if not (global_area * 0.28 <= area <= global_area * 3.2 and aspect <= 3.2):
+                continue
+            distance = float(np.linalg.norm(np.asarray(neighbor["source_center"]) - center))
+            candidates.append((distance, width, height))
+        if not candidates:
+            return global_size
+        nearest = sorted(candidates, key=lambda item: item[0])[: min(15, len(candidates))]
+        return (
+            float(np.median([item[1] for item in nearest])),
+            float(np.median([item[2] for item in nearest])),
+        )
+
+    def adaptive_module_separators(score, axis_length, cross_length, consensus_source_pitch, scale):
+        consensus_pitch = (
+            float(consensus_source_pitch) * float(scale)
+            if consensus_source_pitch is not None else None
+        )
+        if consensus_pitch is None or axis_length < consensus_pitch * 1.42:
+            return [], consensus_pitch, False
+        anchors, smooth = strong_frame_anchors(score, axis_length, cross_length)
+        local_gaps = [
+            float(second - first) for first, second in zip(anchors, anchors[1:])
+            if consensus_pitch * 0.78 <= second - first <= consensus_pitch * 1.28
+        ]
+        local_pitch = float(np.median(local_gaps)) if local_gaps else float(consensus_pitch)
+        segment_count = max(1, int(round(axis_length / max(1.0, local_pitch))))
+        if segment_count < 2:
+            return [], local_pitch, False
+        spacing = axis_length / float(segment_count)
+        separators = []
+        evidence_count = 0
+        baseline = float(np.percentile(smooth, 58))
+        strong_level = float(np.percentile(smooth, 78))
+        for boundary_index in range(1, segment_count):
+            expected = boundary_index * spacing
+            radius = max(4, int(round(spacing * 0.27)))
+            lo = max(3, int(round(expected)) - radius)
+            hi = min(axis_length - 3, int(round(expected)) + radius + 1)
+            if hi <= lo:
+                continue
+            candidate = lo + int(np.argmax(smooth[lo:hi]))
+            if smooth[candidate] >= max(baseline, strong_level * 0.72):
+                evidence_count += 1
+            separators.append(candidate)
+        separators = sorted(set(separators))
+        has_repeated_evidence = evidence_count >= max(1, int(math.ceil(len(separators) * 0.45)))
+        return separators, local_pitch, has_repeated_evidence
+
+    table_data = [rectified_table_data(contour) for contour in table_contours]
+    component_module_size = farm_component_module_size(table_data) if recovery_mode == "adaptive" else None
+    adaptive_pitch_x = (
+        component_module_size[0] if component_module_size
+        else farm_pitch_consensus(table_data, "x")
+    ) if recovery_mode == "adaptive" else None
+    adaptive_pitch_y = (
+        component_module_size[1] if component_module_size
+        else farm_pitch_consensus(table_data, "y")
+    ) if recovery_mode == "adaptive" else None
+    for table_index, (contour, data) in enumerate(zip(table_contours, table_data)):
+        table_quad = data["table_quad"]
+        local_w, local_h = data["local_w"], data["local_h"]
+        to_rgb = data["to_rgb"]
+        support = data["support"]
+        if not np.any(support):
+            continue
+        x_score, y_score = data["x_score"], data["y_score"]
+        if recovery_mode == "adaptive" and compact_component_mode:
+            split_connected_region = bool(
+                float(cv2.contourArea(contour)) >= adaptive_area_reference * 2.0
+            )
+            if split_connected_region:
+                x_separators = peak_separators(
+                    x_score, max(16, int(local_w * 0.28)), max(8, int(local_w * 0.10))
+                )
+                y_separators = peak_separators(
+                    y_score, max(12, int(local_w * 0.21)), max(8, int(local_w * 0.10))
+                )
+                x_separators = guided_periodic_separators(
+                    x_score, local_w, local_h, x_separators
+                )
+                y_separators = guided_periodic_separators(
+                    y_score, local_h, local_w, y_separators
+                )
+            else:
+                x_separators, y_separators = [], []
+            local_pitch_x = local_pitch_y = None
+            x_repeated = y_repeated = False
+        elif recovery_mode == "adaptive":
+            use_farm_mode = bool(
+                component_module_size and max(component_module_size[2:]) >= 0.08
+            )
+            local_module_size = (
+                component_module_size[:2] if use_farm_mode
+                else local_component_module_size(data, table_data, component_module_size)
+            )
+            x_separators, local_pitch_x, x_repeated = adaptive_module_separators(
+                x_score, local_w, local_h,
+                local_module_size[0] if local_module_size else adaptive_pitch_x,
+                data["rectification_scale"],
+            )
+            y_separators, local_pitch_y, y_repeated = adaptive_module_separators(
+                y_score, local_h, local_w,
+                local_module_size[1] if local_module_size else adaptive_pitch_y,
+                data["rectification_scale"],
+            )
+            if local_module_size:
+                # A compact component is split only when it is larger than the
+                # nearby module distribution *and* its RGB projection contains
+                # the expected strong frame separator. Cell-grid periodicity by
+                # itself is therefore insufficient.
+                width_ratio = data["source_width"] / max(1.0, local_module_size[0])
+                height_ratio = data["source_height"] / max(1.0, local_module_size[1])
+                area_ratio = width_ratio * height_ratio
+                oversized_component = bool(
+                    area_ratio >= 1.85 or width_ratio >= 1.72 or height_ratio >= 1.72
+                )
+                if not oversized_component or width_ratio < 1.42 or not x_repeated:
+                    x_separators = []
+                    x_repeated = False
+                if not oversized_component or height_ratio < 1.42 or not y_repeated:
+                    y_separators = []
+                    y_repeated = False
+        else:
             x_separators = peak_separators(x_score, max(16, int(local_w * 0.28)), max(8, int(local_w * 0.10)))
             y_separators = peak_separators(y_score, max(12, int(local_w * 0.21)), max(8, int(local_w * 0.10)))
-        else:
-            x_separators, y_separators = [], []
-        if recovery_mode == "adaptive" and split_connected_region:
-            x_separators = guided_periodic_separators(x_score, local_w, local_h, x_separators)
-            y_separators = guided_periodic_separators(y_score, local_h, local_w, y_separators)
+            local_pitch_x = local_pitch_y = None
+            x_repeated = y_repeated = False
         x_bounds = sorted(set([0, local_w - 1] + x_separators))
         y_bounds = sorted(set([0, local_h - 1] + y_separators))
         for y_index in range(len(y_bounds) - 1):
             for x_index in range(len(x_bounds) - 1):
                 lx1, lx2 = x_bounds[x_index], x_bounds[x_index + 1]
                 ly1, ly2 = y_bounds[y_index], y_bounds[y_index + 1]
-                if lx2 - lx1 < max(12, local_w * 0.20) or ly2 - ly1 < max(10, local_w * 0.13):
+                minimum_width = (
+                    max(8.0, float(local_pitch_x or 0) * 0.42)
+                    if recovery_mode == "adaptive" and not compact_component_mode
+                    else max(12.0, local_w * 0.20)
+                )
+                minimum_height = (
+                    max(8.0, float(local_pitch_y or 0) * 0.42)
+                    if recovery_mode == "adaptive" and not compact_component_mode
+                    else max(10.0, local_w * 0.13)
+                )
+                if lx2 - lx1 < minimum_width or ly2 - ly1 < minimum_height:
                     continue
                 cell_support = support[ly1:ly2 + 1, lx1:lx2 + 1]
                 coverage = float(np.mean(cell_support)) if cell_support.size else 0.0
@@ -1109,10 +1384,31 @@ def real_farm_detect_module_instances(image, parent_module, union_mask, parent_q
                     record["grid_texture_score"] = round(real_farm_module_grid_texture_score(image, record), 4)
                     if record["visual_pv_score"] < 0.16 or record["grid_texture_score"] < 0.35:
                         continue
-                record["warnings"] = [] if coverage >= 0.78 else [{
-                    "level": "warning", "code": "low_instance_support",
-                    "message": f"{module_id} has incomplete PV support and may need manual adjustment.",
-                }]
+                warnings = []
+                if coverage < 0.78:
+                    warnings.append({
+                        "level": "warning", "code": "low_instance_support",
+                        "message": f"{module_id} has incomplete PV support and may need manual adjustment.",
+                    })
+                unsplit_x = bool(
+                    recovery_mode == "adaptive" and not compact_component_mode
+                    and x_repeated and local_pitch_x
+                    and (lx2 - lx1) > float(local_pitch_x) * 1.58
+                )
+                unsplit_y = bool(
+                    recovery_mode == "adaptive" and not compact_component_mode
+                    and y_repeated and local_pitch_y
+                    and (ly2 - ly1) > float(local_pitch_y) * 1.58
+                )
+                if unsplit_x or unsplit_y:
+                    warnings.append({
+                        "level": "warning", "code": "unsplit_recovered_region",
+                        "message": (
+                            f"{module_id} still contains repeated module-scale frame intervals "
+                            "and should be reviewed."
+                        ),
+                    })
+                record["warnings"] = warnings
                 instances.append(record)
     if not instances:
         quad = np.asarray(real_farm_order_quad(parent_quad), dtype=np.float32)
