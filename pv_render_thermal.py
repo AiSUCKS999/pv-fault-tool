@@ -1,14 +1,18 @@
 # Thermal conversion, thermal fault rendering, and thermal color tints.
 def thermal_palette(value):
     stops = [
-        (0, (18, 7, 32)),
-        (42, (45, 14, 73)),
-        (82, (88, 24, 101)),
-        (118, (141, 39, 91)),
-        (150, (190, 62, 61)),
-        (184, (225, 105, 35)),
-        (220, (246, 168, 48)),
-        (255, (255, 225, 128)),
+        (0, (8, 0, 30)),
+        (32, (24, 0, 72)),
+        (64, (46, 0, 116)),
+        (96, (97, 3, 135)),
+        (120, (158, 14, 111)),
+        (144, (211, 40, 65)),
+        (168, (244, 88, 20)),
+        (184, (251, 130, 6)),
+        (208, (255, 187, 5)),
+        (232, (255, 231, 17)),
+        (246, (255, 246, 86)),
+        (255, (255, 255, 220)),
     ]
     for idx in range(len(stops) - 1):
         left_v, left_c = stops[idx]
@@ -1579,12 +1583,17 @@ def apply_sensor_model(temp, location_id, scene_distance="close"):
     """Make the scalar temperature field behave like a thermal camera."""
     h, w = temp.shape
     settings = thermal_scene_settings(scene_distance)
-    sensor_scale = float(settings["sensor_scale"])
-    sensor_blur = float(settings["sensor_blur"])
+    sensor_scale = max(0.78, float(settings["sensor_scale"]))
+    sensor_blur = min(0.60, float(settings["sensor_blur"]))
     detail_strength = float(settings["detail_strength"])
     rng = np.random.default_rng(seed_for(location_id, "sensor-model", scene_distance))
 
-    out = cv2.GaussianBlur(temp.astype(np.float32), (0, 0), sensor_blur)
+    pixel_scale = max(1.0, max(h, w) / 2400.0)
+    core = cv2.GaussianBlur(temp.astype(np.float32), (0, 0), max(sensor_blur, 0.72 * pixel_scale))
+    halo = cv2.GaussianBlur(temp.astype(np.float32), (0, 0), 1.8 * pixel_scale)
+    psf_variation = thermal_coherent_field(temp.shape, seed_for(location_id, "optical-response"), (24, 32))
+    halo_weight = np.clip(0.22 + psf_variation * 0.06, 0.10, 0.36)
+    out = core * (1 - halo_weight) + halo * halo_weight
 
     small = cv2.resize(
         out,
@@ -1592,15 +1601,29 @@ def apply_sensor_model(temp, location_id, scene_distance="close"):
         interpolation=cv2.INTER_AREA,
     )
     sh, sw = small.shape
-    small += rng.normal(0, 1.6, small.shape).astype(np.float32)
-    small += rng.normal(0, 0.9 * detail_strength, (1, sw)).astype(np.float32)
-    small += rng.normal(0, 0.6 * detail_strength, (sh, 1)).astype(np.float32)
+    # A detector lattice establishes correlation in source-scene coordinates;
+    # its texture remains observable when a native scene is shown as a crop.
+    detector_scale = min(1.0, 1500.0 / max(sh, sw))
+    dh, dw = max(16, int(round(sh * detector_scale))), max(16, int(round(sw * detector_scale)))
+    detector = rng.normal(0, 1.70, (dh, dw)).astype(np.float32)
+    detector = cv2.GaussianBlur(detector, (0, 0), 0.55)
+    detector += rng.normal(0, 0.22, (1, dw)).astype(np.float32)
+    detector += rng.normal(0, 0.18, (dh, 1)).astype(np.float32)
+    small += cv2.resize(detector, (sw, sh), interpolation=cv2.INTER_CUBIC)
+    small += thermal_coherent_field(small.shape, seed_for(location_id, "detector-nonuniformity"), (65, 85)) * 0.55
+    local_mean = cv2.GaussianBlur(small, (0, 0), 2.0)
+    contrast = thermal_coherent_field(
+        small.shape, seed_for(location_id, "sensor-local-response", scene_distance), (18, 24)
+    ) * 0.022
+    small += (small - local_mean) * np.clip(contrast, -0.05, 0.05)
+    small += rng.normal(0, 0.16 * detail_strength, (1, sw)).astype(np.float32)
+    small += rng.normal(0, 0.12 * detail_strength, (sh, 1)).astype(np.float32)
 
     out = cv2.resize(small, (w, h), interpolation=cv2.INTER_CUBIC)
 
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     r2 = ((xx - w / 2.0) / max(1.0, w / 2.0)) ** 2 + ((yy - h / 2.0) / max(1.0, h / 2.0)) ** 2
-    out = out - r2 * (3.0 + 2.0 * detail_strength)
+    out = out - r2 * (0.6 + 0.3 * detail_strength)
 
     return np.clip(out, 0, 255)
 
@@ -1619,69 +1642,12 @@ def thermalize(
     frame = np.array(rgb)
     gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
 
-    soft = cv2.GaussianBlur(gray, (0, 0), 2.4)
-    clahe = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(8, 8)).apply(soft)
-
-    terrain_low, terrain_high = {
-        "desert_farm": (8, 82),
-        "desert_track": (8, 82),
-        "rooftop": (14, 92),
-        "rooftop_warehouse": (14, 92),
-        "agri_rows": (12, 94),
-        "agri_field_new": (12, 94),
-        "farm_lake": (10, 82),
-        "floating_water": (10, 82),
-        "scenario_1": (12, 94),
-        "grass_open": (12, 94),
-    }.get(location_id, (12, 94))
-
-    temp = cv2.normalize(clahe, None, terrain_low, terrain_high, cv2.NORM_MINMAX).astype(np.float32)
-
-    broad = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), 10)
-    detail = gray.astype(np.float32) - broad
-    temp += detail * 0.08
-
-    rng = np.random.default_rng(seed_for(location_id, "opencv-thermal", include_pv))
-    temp += thermal_noise(temp.shape, rng, 3.4, 0.70)
-    temp += thermal_noise(temp.shape, rng, 7.2, 4.8)
-    temp += thermal_noise(temp.shape, rng, 5.8, 14.0)
-
-    scene_env = pv_environment_multiplier(
-        temp.shape,
-        seed_for(location_id, "thermal-cloud-sun", include_pv),
-        strength=0.070,
-    )
-    temp *= scene_env
-    temp = np.clip(temp, terrain_low - 8, terrain_high + 12)
+    temp = thermal_background_realism(np.empty(gray.shape, np.float32), rgb, location_id)
+    scene_drift = thermal_scene_drift(temp.shape, seed_for(location_id, "healthy-thermal-scene"))
 
     if include_pv:
-        shadow_mask = np.zeros(temp.shape, dtype=np.uint8)
-
-        for row in panels(location_id):
-            row_h = max(1, row["y2"] - row["y1"])
-            offset = max(2, int(row_h * 0.18))
-
-            if custom_layout_enabled():
-                module_count = custom_panels_per_row(location_id)
-                for layout in module_layouts_for_row(row, module_count):
-                    poly = module_visual_polygon(row, layout, "outer").copy()
-                    poly[:, 0] += offset
-                    poly[:, 1] += max(1, offset // 2)
-                    poly[:, 0] = np.clip(poly[:, 0], 0, BASE_SIZE[0] - 1)
-                    poly[:, 1] = np.clip(poly[:, 1], 0, BASE_SIZE[1] - 1)
-                    cv2.fillPoly(shadow_mask, [np.round(poly).astype(np.int32)], 180, cv2.LINE_AA)
-            else:
-                cv2.rectangle(
-                    shadow_mask,
-                    (row["x1"] + offset, row["y2"] - max(1, row_h // 12)),
-                    (min(BASE_SIZE[0] - 1, row["x2"] + offset), min(BASE_SIZE[1] - 1, row["y2"] + offset)),
-                    180,
-                    -1,
-                )
-
-        shadow_mask = cv2.GaussianBlur(shadow_mask, (0, 0), 3.5).astype(np.float32) / 255.0
-        shadow_strength = 5 if location_id in {"desert_farm", "desert_track"} else 14
-        temp -= shadow_mask * shadow_strength
+        healthy_module_support = np.zeros(temp.shape, np.uint8)
+        healthy_shadow_geometry = []
 
         for row in panels(location_id):
             x1, y1, x2, y2 = row["x1"], row["y1"], row["x2"], row["y2"]
@@ -1692,18 +1658,7 @@ def thermalize(
             if row_gray.size == 0:
                 continue
 
-            panel_min, panel_max = {
-                "desert_farm": (168, 200),
-                "desert_track": (168, 200),
-                "rooftop": (162, 194),
-                "rooftop_warehouse": (162, 194),
-                "agri_rows": (164, 196),
-                "agri_field_new": (164, 196),
-                "farm_lake": (158, 190),
-                "floating_water": (158, 190),
-                "scenario_1": (164, 196),
-                "grass_open": (164, 196),
-            }.get(location_id, (164, 196))
+            panel_min, panel_max = thermal_pv_operating_range(location_id)
 
             module_count = (
                 custom_panels_per_row(location_id)
@@ -1726,38 +1681,15 @@ def thermalize(
             grad_x = np.linspace(-4, 4, row_w, dtype=np.float32)[None, :]
             grad_y = np.linspace(2, -2, row_h, dtype=np.float32)[:, None]
             panel_local += grad_x + grad_y
-            panel_local = np.clip(panel_local, panel_min - 10, panel_max + 6).astype(np.float32)
-
-            if custom_layout_enabled():
-                for layout in module_layouts_for_row(row, module_count):
-                    ox1, oy1, ox2, oy2 = layout["outer"]
-                    lx1 = max(0, ox1 - x1)
-                    ly1 = max(0, oy1 - y1)
-                    lx2 = min(row_w, ox2 - x1)
-                    ly2 = min(row_h, oy2 - y1)
-                    if lx2 <= lx1 or ly2 <= ly1:
-                        continue
-                    mrng = np.random.default_rng(
-                        seed_for(location_id, row["id"], layout["module_number"], "module-temp")
-                    )
-                    module_h = max(1, ly2 - ly1)
-                    module_w = max(1, lx2 - lx1)
-                    yy = np.linspace(0.0, 1.0, module_h, dtype=np.float32)[:, None]
-                    xx = np.linspace(-1.0, 1.0, module_w, dtype=np.float32)[None, :]
-                    tilt_heat = np.linspace(-8.0, 10.5, module_h, dtype=np.float32)[:, None]
-                    center_heat = np.exp(-(xx ** 2 * 1.55 + (yy - 0.62) ** 2 * 3.8)) * 6.2
-                    edge_y = np.minimum(yy, 1.0 - yy)
-                    edge_x = np.minimum((xx + 1.0) / 2.0, (1.0 - xx) / 2.0)
-                    edge_cool = np.minimum(edge_y, edge_x)
-                    edge_cool = (1.0 - np.clip(edge_cool * 5.5, 0, 1)) * -2.4
-                    panel_local[ly1:ly2, lx1:lx2] += (
-                        float(mrng.normal(0, 2.0))
-                        + tilt_heat
-                        + center_heat
-                        + edge_cool
-                    )
+            panel_local = panel_local.astype(np.float32)
+            panel_local += scene_drift[y1:y2, x1:x2]
 
             row_mask = np.zeros((row_h, row_w), dtype=np.uint8)
+            for layout in module_layouts_for_row(row, module_count):
+                polygon = np.rint(module_visual_polygon(row, layout, "outer")).astype(np.int32)
+                cv2.fillConvexPoly(healthy_module_support, polygon, 255)
+                healthy_shadow_geometry.append(polygon)
+
 
             if custom_layout_enabled():
                 for layout in module_layouts_for_row(row, module_count):
@@ -1773,52 +1705,11 @@ def thermalize(
 
             temp[y1:y2, x1:x2] = temp[y1:y2, x1:x2] * (1.0 - row_mask) + panel_local * row_mask
 
-            edge_temp = panel_min - 18
-
-            if custom_layout_enabled():
-                module_count = custom_panels_per_row(location_id)
-                draw_thermal_module_cell_seams(
-                    temp,
-                    row,
-                    module_count,
-                    panel_min,
-                    include_string_grid=(scene_distance != "far"),
-                    scene_distance=scene_distance,
-                )
-
-                for layout in module_layouts_for_row(row, module_count):
-                    outer = module_visual_polygon(row, layout, "outer")
-                    left_top = tuple(np.round(outer[0]).astype(int))
-                    left_bottom = tuple(np.round(outer[3]).astype(int))
-                    if not actual_panel_model_enabled():
-                        draw_wavy_line(
-                            temp,
-                            left_top,
-                            left_bottom,
-                            edge_temp - 30,
-                            1,
-                            seed_for(row["id"], layout["module_number"], "thermal-gap-left"),
-                            0.32,
-                        )
-            else:
-                draw_wavy_line(temp, (x1, y1), (x2, y1), edge_temp, 1, seed_for(row["id"], "thermal-row-top"), 0.35)
-                draw_wavy_line(
-                    temp,
-                    (x1, y2),
-                    (x2, y2),
-                    edge_temp - 4,
-                    max(1, row_h // 16),
-                    seed_for(row["id"], "thermal-row-bottom"),
-                    0.4,
-                )
-                draw_thermal_module_cell_seams(
-                    temp,
-                    row,
-                    module_count,
-                    panel_min,
-                    include_string_grid=(scene_distance != "far"),
-                    scene_distance=scene_distance,
-                )
+        temp = thermal_boundary_response(
+            temp, healthy_module_support, seed_for(location_id, "healthy-boundary-response"),
+            location_id=location_id, source_image=rgb, geometries=healthy_shadow_geometry,
+        )
+        temp = thermal_refine_background_materials(temp, rgb, location_id, healthy_shadow_geometry)
 
         if fault_records:
             for record in fault_records:
@@ -1836,49 +1727,6 @@ def thermalize(
         elif fault_cell is not None and fault_type:
             temp = apply_thermal_fault(temp, fault_cell, fault_type, fault_scale)
 
-        for row in panels(location_id):
-            panel_min = {
-                "desert_farm": 168,
-                "desert_track": 168,
-                "rooftop": 162,
-                "rooftop_warehouse": 162,
-                "agri_rows": 164,
-                "agri_field_new": 164,
-                "farm_lake": 158,
-                "floating_water": 158,
-                "scenario_1": 164,
-                "grass_open": 164,
-            }.get(location_id, 164)
-
-            module_count = (
-                custom_panels_per_row(location_id)
-                if custom_layout_enabled()
-                else max(
-                    1,
-                    len(cells_for_row(location_id, row["id"]))
-                    // max(1, CUSTOM_MODULE_CELL_COLS * CUSTOM_MODULE_CELL_ROWS),
-                )
-            )
-
-            draw_thermal_module_cell_seams(
-                temp,
-                row,
-                module_count,
-                panel_min,
-                include_string_grid=False,
-                scene_distance=scene_distance,
-            )
-
     temp = apply_sensor_model(temp, location_id, scene_distance)
 
-    dither = np.random.default_rng(seed_for(location_id, "thermal-dither")).uniform(
-        -0.5,
-        0.5,
-        temp.shape,
-    ).astype(np.float32)
-
-    temp_u8 = np.clip(temp + dither, 0, 255).astype(np.uint8)
-    lut = np.array(thermal_lut(), dtype=np.uint8)
-    thermal_rgb = lut[temp_u8]
-
-    return Image.fromarray(thermal_rgb)
+    return thermal_display_rgb_from_scalar(temp, location_id, scene_distance)

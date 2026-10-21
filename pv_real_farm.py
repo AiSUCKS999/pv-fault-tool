@@ -1926,42 +1926,11 @@ def real_farm_material_masks(image):
 
 
 def real_farm_background_scalar(image):
-    """Build a new material-relative thermal scalar scene from RGB structure."""
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
-    height, width = gray.shape
-    masks = real_farm_material_masks(image)
-    base = np.full((height, width), 84.0, dtype=np.float32)
-    class_values = {
-        "vegetation": 67.0, "soil": 109.0, "roof_concrete": 96.0,
-        "metal_infrastructure": 102.0, "shadow": 48.0, "unknown": 82.0,
-        "pv_scene_candidate": 158.0,
-    }
-    for name, scalar_value in class_values.items():
-        base[masks[name] > 0] = scalar_value
-
-    seed = seed_for(width, height, "real-farm-common-thermal-base-v2")
-    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
-    scene_gradient = (xx / max(1, width - 1) - 0.5) * 7.0 + (0.5 - yy / max(1, height - 1)) * 5.0
-    broad = thermal_noise(base.shape, np.random.default_rng(seed), 8.5, max(12.0, max(width, height) / 95.0))
-    mottle = thermal_noise(base.shape, np.random.default_rng(seed_for(seed, "mottle")), 3.4, max(2.2, max(width, height) / 720.0))
-    structure = gray - cv2.GaussianBlur(gray, (0, 0), max(3.0, max(width, height) / 430.0))
-    edge = np.abs(cv2.Laplacian(cv2.GaussianBlur(gray, (0, 0), 1.2), cv2.CV_32F))
-    base += scene_gradient + broad + mottle + np.clip(structure, -32, 32) * 0.09 + np.clip(edge, 0, 24) * 0.10
-    # The generated-farm multiplier is intentionally reused, but its Gaussian
-    # working set grows sharply on multi-megapixel uploads. Evaluate the same
-    # model on a bounded scalar grid and restore it to the thermal-master size.
-    environment_seed = seed_for(seed, "thermal-cloud-sun")
-    maximum_axis = max(height, width)
-    if maximum_axis > 1280:
-        scale = 1280.0 / maximum_axis
-        working_shape = (max(32, int(round(height * scale))), max(32, int(round(width * scale))))
-        environment = pv_environment_multiplier(working_shape, environment_seed, strength=0.055)
-        environment = cv2.resize(environment, (width, height), interpolation=cv2.INTER_CUBIC)
-    else:
-        environment = pv_environment_multiplier(base.shape, environment_seed, strength=0.055)
-    base *= environment
-    return np.clip(base, 24, 148).astype(np.float32)
+    """Shared material/exposure model; PV geometry is composed separately."""
+    return thermal_background_realism(
+        np.empty((image.height, image.width), dtype=np.float32), image,
+        "real_farm", real_farm_material_masks(image),
+    )
 
 
 def real_farm_module_scalar_layer(image, modules, background_scalar=None):
@@ -1969,7 +1938,7 @@ def real_farm_module_scalar_layer(image, modules, background_scalar=None):
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     height, width = gray.shape
-    scene_base = np.asarray(background_scalar, dtype=np.float32) if background_scalar is not None else real_farm_background_scalar(image)
+    scene_drift = thermal_scene_drift(gray.shape, seed_for("real_farm", "healthy-thermal-scene"))
     scalar_sum = np.zeros((height, width), dtype=np.float32)
     weight_sum = np.zeros((height, width), dtype=np.float32)
     union_mask = real_farm_module_mask(image.size, modules, active=True)
@@ -1988,16 +1957,17 @@ def real_farm_module_scalar_layer(image, modules, background_scalar=None):
             continue
         roi_points = points - np.asarray([x1, y1], dtype=np.float32)
         to_roi = cv2.getPerspectiveTransform(destination, roi_points)
-        module_seed = seed_for(module.get("module_id", module_index), "real-farm-pv-layer")
-        pv_local = smooth_thermal_array_field((local_width, local_height), module_seed, 164, 196)
-        pv_local += pv_cell_temperature_field((local_height, local_width), seed_for(module_seed, "cell-field"), 1, strength=2.6)
+        # Geometry, rather than collection index/selection, pins module texture.
+        module_seed = seed_for(tuple(np.round(points, 2).ravel()), "healthy-module")
+        pv_local = healthy_thermal_module_field((local_width, local_height), module_seed, 164, 196)
+        pv_local += thermal_context_on_module(scene_drift, points, (local_width, local_height))
         local_gray = cv2.warpPerspective(gray, to_local, (local_width, local_height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
         seam = np.abs(cv2.Laplacian(cv2.GaussianBlur(local_gray, (0, 0), 0.8), cv2.CV_32F))
         seam /= max(1.0, float(np.percentile(seam, 96)))
-        pv_local -= np.clip(seam, 0, 1) * 5.5
+        pv_local -= np.clip(seam, 0, 1) * 0.75
         local_support = np.ones((local_height, local_width), dtype=np.float32)
         roi_size = (x2 - x1, y2 - y1)
-        warped_scalar = cv2.warpPerspective(pv_local.astype(np.float32), to_roi, roi_size, flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        warped_scalar = cv2.warpPerspective(pv_local.astype(np.float32), to_roi, roi_size, flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
         warped_support = cv2.warpPerspective(local_support, to_roi, roi_size, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         full_module_mask = real_farm_module_mask(image.size, [module], active=True)
         module_mask = full_module_mask[y1:y2, x1:x2].astype(np.float32) / 255.0
@@ -2049,6 +2019,15 @@ def real_farm_build_thermal_master(image, modules, real_thermal=None, final_pv_m
         alpha = np.clip(distance_inside / 1.35, 0, 1).astype(np.float32)
         combined = background * (1.0 - alpha) + pv_layer * alpha
         combined = np.clip(combined, 0, 255).astype(np.float32)
+        combined = thermal_boundary_response(
+            combined, mask, seed_for("real_farm", "healthy-boundary-response"),
+            location_id="real_farm", source_image=image,
+            geometries=[module["outer_polygon_rgb"] for module in accepted],
+            module_geometries=[module["outer_polygon_rgb"] for module in accepted],
+        )
+        combined = thermal_refine_background_materials(
+            combined, image, "real_farm", [module["outer_polygon_rgb"] for module in accepted]
+        )
         mode = REAL_FARM_SYNTHETIC_THERMAL
     return {
         "mode": mode,
@@ -2056,7 +2035,7 @@ def real_farm_build_thermal_master(image, modules, real_thermal=None, final_pv_m
         "pv_scalar": pv_layer.astype(np.float32),
         "pv_module_union_mask": mask.astype(np.uint8),
         "master_scalar": combined.astype(np.float32),
-        "display_range": real_farm_display_range(combined),
+        "display_range": (list(THERMAL_SCALAR_DISPLAY_RANGE) if real_thermal is None else real_farm_display_range(combined)),
         "accepted_modules": accepted,
         "accepted_parent_regions": accepted_parents,
         "rejected_modules": rejected,
@@ -2584,7 +2563,7 @@ def real_farm_dataset_zip(state, image, faulted_thermal, healthy_thermal=None, a
 
 def real_farm_get_thermal_master(state, image, modules):
     geometry_signature = real_farm_geometry_signature(modules)
-    signature = f"{state.get('source_rgb_sha256_prefix', '')}:{image.width}x{image.height}:{geometry_signature}:{state.get('thermal_source', REAL_FARM_SYNTHETIC_THERMAL)}"
+    signature = f"{THERMAL_REALISM_VERSION}:{state.get('source_rgb_sha256_prefix', '')}:{image.width}x{image.height}:{geometry_signature}:{state.get('thermal_source', REAL_FARM_SYNTHETIC_THERMAL)}"
     cached_signature = st.session_state.get("real_farm_thermal_master_signature")
     cached = st.session_state.get("real_farm_thermal_master_layers")
     if cached is None or cached_signature != signature:

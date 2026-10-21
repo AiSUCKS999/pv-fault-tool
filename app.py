@@ -10,6 +10,7 @@ _SECTION_FILES = [
     "pv_layout.py",
     "pv_annotations.py",
     "pv_render_rgb.py",
+    "pv_thermal_realism.py",
     "pv_render_thermal.py",
     "pv_real_farm.py",
     "pv_ui.py",

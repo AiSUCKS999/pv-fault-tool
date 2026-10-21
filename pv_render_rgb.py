@@ -938,15 +938,18 @@ def real_texture_thermal_panel_row(size, module_count, seed, location_id, panel_
             edge = cv2.Laplacian(gray_patch, cv2.CV_32F)
             edge = np.clip(np.abs(edge) / (np.percentile(np.abs(edge), 92) + 1e-6), 0, 1)
             seam_mask = cv2.GaussianBlur(np.maximum(seam_raw * 0.85, edge * 0.45), (0, 0), 0.55)
-            thermal -= seam_mask * (22 + 0.12 * (panel_max - panel_min))
+            thermal -= seam_mask * 1.2
         else:
             thermal = np.full((local_h, local_w), module_mid, dtype=np.float32)
 
+        thermal += healthy_thermal_module_field(
+            (local_w, local_h), seed_for(seed, layout["module_number"], "healthy-module"), panel_min, panel_max
+        ) - module_mid
         cell_variation = pv_cell_temperature_field(
             (local_h, local_w),
             seed_for(seed, layout["module_number"], "real-texture-cell-thermal"),
             1,
-            strength=3.0,
+            strength=0.25,
         )
         thermal += cell_variation
         thermal *= pv_environment_multiplier(
@@ -954,7 +957,7 @@ def real_texture_thermal_panel_row(size, module_count, seed, location_id, panel_
             seed_for(seed, layout["module_number"], "real-texture-module-env"),
             strength=0.045,
         )
-        thermal += rng.normal(0, 0.85, thermal.shape).astype(np.float32)
+        thermal += rng.normal(0, 0.12, thermal.shape).astype(np.float32)
         target_h = max(0, min(height, paste_y2 + 1) - paste_y1)
         target_w = max(0, min(width, paste_x2 + 1) - paste_x1)
         if target_h > 0 and target_w > 0:
@@ -963,90 +966,22 @@ def real_texture_thermal_panel_row(size, module_count, seed, location_id, panel_
                 panel_min - 28,
                 panel_max + 6,
             )
-        draw_cell_string_dot_texture(
-            row,
-            ix1,
-            iy1,
-            ix2,
-            iy2,
-            seed_for(seed, layout["module_number"], "real-texture-thermal-string-grid"),
-            thermal=True,
-            panel_min=panel_min,
-            strength=0.90,
-        )
-
-        # Controlled 6x2 target grid remains present, but as a physical thermal
-        # seam laid over the real crop rather than a drawn annotation.
-        if using_actual_model:
-            continue
-        for idx in range(1, CUSTOM_MODULE_CELL_COLS):
-            x = int(ix1 + idx * (ix2 - ix1) / CUSTOM_MODULE_CELL_COLS)
-            blend_wavy_line(row, (x, iy1), (x, iy2), max(10, panel_min - 42), 1, seed_for(seed, layout["module_number"], "thermal-real-v", idx), 0.22, 0.24, 0.60)
-        for idx in range(1, CUSTOM_MODULE_CELL_ROWS):
-            y = int(iy1 + idx * (iy2 - iy1) / CUSTOM_MODULE_CELL_ROWS)
-            blend_wavy_line(row, (ix1, y), (ix2, y), max(10, panel_min - 40), 1, seed_for(seed, layout["module_number"], "thermal-real-h", idx), 0.20, 0.22, 0.60)
-
     return cv2.GaussianBlur(row, (0, 0), 0.28).astype(np.float32)
 
 
 def procedural_thermal_panel_row(size, module_count, seed, panel_min, panel_max):
     width, height = size
-    rng = np.random.default_rng(seed)
-    row = np.full((height, width), panel_min - 34, dtype=np.float32)
+    row = np.full((height, width), panel_min - 60, dtype=np.float32)
     layouts, _, _ = module_layouts_for_dimensions(width, height, max(1, module_count))
-
     for layout in layouts:
-        ox1, oy1, ox2, oy2 = layout["outer"]
-        ix1, iy1, ix2, iy2 = layout["inner"]
-        if ox2 <= ox1 or oy2 <= oy1 or ix2 <= ix1 or iy2 <= iy1:
+        x1, y1, x2, y2 = layout["outer"]
+        if x2 <= x1 or y2 <= y1:
             continue
-
-        module_mid = rng.uniform(panel_min + 9, panel_max + 4)
-        frame_temp = max(4, panel_min - 112)
-        separator_temp = max(8, panel_min - 82)
-        rim_temp = max(10, panel_min - 64)
-        frame_w = max(2, min(5, int(round(max(1, oy2 - oy1) * 0.13))))
-        cv2.rectangle(row, (ox1, oy1), (ox2, oy2), frame_temp, -1)
-        cv2.rectangle(row, (ix1, iy1), (ix2, iy2), module_mid, -1)
-
-        cell_w = max(2, (ix2 - ix1) / CUSTOM_MODULE_CELL_COLS)
-        cell_h = max(2, (iy2 - iy1) / CUSTOM_MODULE_CELL_ROWS)
-        for cy in range(CUSTOM_MODULE_CELL_ROWS):
-            for cx in range(CUSTOM_MODULE_CELL_COLS):
-                x1 = int(round(ix1 + cx * cell_w))
-                x2 = int(round(ix1 + (cx + 1) * cell_w))
-                y1 = int(round(iy1 + cy * cell_h))
-                y2 = int(round(iy1 + (cy + 1) * cell_h))
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                cell_temp = module_mid + rng.normal(0, 1.1)
-                cv2.rectangle(row, (x1, y1), (x2, y2), cell_temp, -1)
-
-        draw_cell_string_dot_texture(
-            row,
-            ix1,
-            iy1,
-            ix2,
-            iy2,
-            seed_for(seed, layout["module_number"], "procedural-thermal-string-grid"),
-            thermal=True,
-            panel_min=panel_min,
-            strength=0.90,
+        field = healthy_thermal_module_field(
+            (x2 - x1, y2 - y1), seed_for(seed, layout["module_number"], "healthy-module"), panel_min, panel_max
         )
-
-        for idx in range(1, CUSTOM_MODULE_CELL_COLS):
-            x = int(round(ix1 + idx * (ix2 - ix1) / CUSTOM_MODULE_CELL_COLS))
-            cv2.line(row, (x, iy1), (x, iy2), separator_temp, 1, cv2.LINE_AA)
-        for idx in range(1, CUSTOM_MODULE_CELL_ROWS):
-            y = int(round(iy1 + idx * (iy2 - iy1) / CUSTOM_MODULE_CELL_ROWS))
-            cv2.line(row, (ix1, y), (ix2, y), separator_temp, 1, cv2.LINE_AA)
-        cv2.rectangle(row, (ox1, oy1), (ox2, oy2), frame_temp, frame_w, cv2.LINE_AA)
-        cv2.rectangle(row, (ix1, iy1), (ix2, iy2), rim_temp, 1, cv2.LINE_AA)
-
-    cell_field = pv_cell_temperature_field((height, width), seed_for(seed, "old-procedural-field"), module_count, strength=2.1)
-    row += cell_field
-    row *= pv_environment_multiplier((height, width), seed_for(seed, "old-procedural-env"), strength=0.025)
-    return cv2.GaussianBlur(row, (0, 0), 0.22).astype(np.float32)
+        row[y1:y2, x1:x2] = field
+    return row
 
 
 def redraw_visible_module_geometry(panel, module_count):

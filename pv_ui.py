@@ -710,17 +710,17 @@ def _substring_band(shape, geo, sub_index, rows_per_sub):
     return cv2.GaussianBlur(m, (0, 0), max(1.5, pitch * 0.10))
 
 
-def draw_close_thermal_module(module_cells, selected_cell_id, fault_records, size, location_id):
+def draw_close_thermal_module(module_cells, selected_cell_id, fault_records, size, location_id, scene_distance="close"):
     width, height = size
     geo = close_module_geometry(size)
     rects = close_module_cell_rects(module_cells, size)
     cell_map = {c["id"]: c for c in module_cells}
     pitch = geo["pitch"]
-    rng = np.random.default_rng(seed_for(location_id, selected_cell_id, "close-thermal-module"))
+    rng = np.random.default_rng(seed_for(location_id, module_cells[0]["id"] if module_cells else "empty", "close-thermal-module"))
 
     # Background (sky / ground behind the module)
     temp = np.full((height, width), 70, np.float32)
-    temp += _noise_field((height, width), seed_for(location_id, "close-thermal-bg"), 90, 2) * 10
+    temp = thermal_background_realism(temp, terrain_layer(location_id), location_id)
 
     # Frame (cooler, metal) and backsheet gaps
     fx1, fy1, fx2, fy2 = geo["frame"]
@@ -729,46 +729,17 @@ def draw_close_thermal_module(module_cells, selected_cell_id, fault_records, siz
     temp[iy1:iy2, ix1:ix2] = 126
     iw, ih = ix2 - ix1, iy2 - iy1
 
-    # Cells: healthy baseline in the red/orange band, with clear cell-to-cell thermal variety.
-    for cell in module_cells:
-        x1, y1, x2, y2 = rects[cell["id"]]
-        w, h = x2 - x1, y2 - y1
-        row_pos = (float(cell.get("module_cell_col") or 1) - 1.0) / max(1.0, geo["rows"] - 1.0)
-        col_pos = (float(cell.get("module_cell_row") or 1) - 1.0) / max(1.0, geo["cols"] - 1.0)
-        base = (
-            166
-            + 7.5 * (1.0 - row_pos)
-            + 3.5 * math.sin((col_pos * math.pi * 2.0) + float(rng.normal(0, 0.20)))
-            + float(rng.normal(0, 3.4))
-        )
-        ex = 1 - np.abs(np.linspace(-1, 1, w, dtype=np.float32))[None, :]
-        ey = 1 - np.abs(np.linspace(-1, 1, h, dtype=np.float32))[:, None]
-        bowl = np.clip(np.minimum(ex, ey) * 4, 0, 1)
-        local_haze = (_noise_field((h, w), seed_for(cell["id"], location_id, "thermal-cell-haze"), max(5.0, min(w, h) * 0.45), 2) - 0.5) * 5.0
-        tile = base + 5.0 * bowl - 4.0 + local_haze
-        m = pv_cell_chamfer_mask(w, h)
-        region = temp[y1:y2, x1:x2]
-        region[:] = region * (1 - m) + tile * m
-
-    # Thermal dispersion / Hughes-like hue variety: broad gradients and soft warm/cool islands
-    # are added before the LUT, so the final colors come from temperature differences.
-    yy, xx = np.mgrid[0:ih, 0:iw].astype(np.float32)
-    nx = (xx / max(1, iw - 1)) * 2.0 - 1.0
-    ny = (yy / max(1, ih - 1)) * 2.0 - 1.0
-    tilt_gradient = -7.0 * ny + 3.4 * nx
-    lowfreq = (_noise_field((ih, iw), seed_for(location_id, selected_cell_id, "close-thermal-low"), iw * 0.34, 4) - 0.5) * 14.0
-    island = np.zeros((ih, iw), np.float32)
-    for idx in range(4):
-        cx = iw * float(rng.uniform(0.12, 0.88))
-        cy = ih * float(rng.uniform(0.12, 0.88))
-        sx = iw * float(rng.uniform(0.14, 0.34))
-        sy = ih * float(rng.uniform(0.12, 0.30))
-        amp = float(rng.uniform(-7.0, 9.0))
-        island += amp * np.exp(-(((xx - cx) / sx) ** 2 + ((yy - cy) / sy) ** 2) / 2.0)
-    edge_cool = -5.2 * np.clip((np.abs(nx) - 0.72) / 0.28, 0, 1)
-    edge_cool += -4.2 * np.clip((np.abs(ny) - 0.74) / 0.26, 0, 1)
-    temp[iy1:iy2, ix1:ix2] += tilt_gradient + lowfreq + island + edge_cool
-    _add_gaussian(temp, (ix1 + ix2) / 2, iy1 + ih * 0.12, iw * 0.07, ih * 0.09, 12.0)
+    # The fallback close renderer uses the same healthy module plane as scene
+    # masters. Preserve physical cell gaps without stamping a warm spot beneath
+    # every diagnosis. Target selection never seeds the healthy texture.
+    module_seed = seed_for(location_id, module_cells[0]["id"] if module_cells else "empty", "healthy-close-module")
+    module_field = healthy_thermal_module_field((iw, ih), module_seed, *thermal_pv_operating_range(location_id))
+    module_field = thermal_module_frame_continuity(
+        module_field, np.ones(module_field.shape, np.uint8),
+        [np.float32([[0, 0], [iw-1, 0], [iw-1, ih-1], [0, ih-1]])],
+        seed=module_seed,
+    )
+    temp[iy1:iy2, ix1:ix2] = module_field
 
     rows_per_sub = max(1, geo["rows"] // 3)
 
@@ -826,19 +797,9 @@ def draw_close_thermal_module(module_cells, selected_cell_id, fault_records, siz
                 temp[y1:y2, x1:x2] += anomaly * (34 + 46 * sev) + core * (28 + 34 * sev)
             temp[y1:y2, x1:x2] += 5 + 7 * sev
 
-    # Camera model: optics blur, sensor noise, banding, vignette, dithering
-    temp = cv2.GaussianBlur(temp, (0, 0), 1.3)
-    temp += cv2.GaussianBlur(rng.normal(0, 4.5, temp.shape).astype(np.float32), (0, 0), 0.8)
-    temp += rng.normal(0, 0.8, (height, 1)).astype(np.float32)
-    temp += rng.normal(0, 0.6, (1, width)).astype(np.float32)
-    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
-    r2 = ((xx - width / 2) / (width / 2)) ** 2 + ((yy - height / 2) / (height / 2)) ** 2
-    temp -= r2 * 5.0
-    temp += rng.uniform(-0.5, 0.5, temp.shape).astype(np.float32)
-
-    lut = np.array(thermal_lut(), dtype=np.uint8)
-    rgb = lut[np.clip(temp, 0, 255).astype(np.uint8)]
-    return Image.fromarray(rgb, "RGB")
+    return thermal_display_rgb_from_scalar(
+        apply_sensor_model(temp, location_id, scene_distance), location_id, scene_distance
+    )
 
 
 def close_module_diagnostic_image(location_id, view, selected_row_id, selected_cell_id, fault_records=None):
@@ -1427,7 +1388,7 @@ def source_fault_key(fault_records):
 
 
 def solar_render_cache_signature(location_id, size=None):
-    signature = []
+    signature = [(THERMAL_REALISM_VERSION, 0, 0)]
     for path in (solar_render_asset_path(location_id), solar_render_metadata_path(location_id)):
         if not path:
             signature.append(("", 0, 0))
@@ -1478,11 +1439,14 @@ def cached_close_source_scene(location_id, view, fault_key, render_signature):
         return master
     records = records_from_source_fault_key(fault_key)
     render_row_id, render_cell_id = stable_fault_render_target(location_id, fault_key)
-    return solar_render_thermal_image(location_id, master, render_row_id, render_cell_id, records).convert("RGB")
+    base, geometries = cached_native_thermal_master(location_id, solar_render_cache_signature(location_id))
+    return finalize_solar_render_thermal_image(
+        location_id, base, geometries, render_row_id, render_cell_id, records, scene_distance="close"
+    ).convert("RGB")
 
 
 @st.cache_data(show_spinner=False, max_entries=512)
-def cached_module_preview_face(location_id, view, selected_row_id, selected_cell_id, fault_key):
+def cached_module_preview_face(location_id, view, selected_row_id, selected_cell_id, fault_key, scene_distance="far"):
     module_cells = module_cells_for_target(location_id, selected_row_id, selected_cell_id)
     records = [
         {
@@ -1494,13 +1458,13 @@ def cached_module_preview_face(location_id, view, selected_row_id, selected_cell
     ]
     size = (460, 275)
     if view == "thermal":
-        module_img = draw_close_thermal_module(module_cells, selected_cell_id, records, size, location_id)
+        module_img = draw_close_thermal_module(module_cells, selected_cell_id, records, size, location_id, scene_distance)
     else:
         module_img = draw_close_rgb_module(module_cells, selected_cell_id, records, size, location_id)
     return crop_module_face(module_img, margin=5)
 
 
-def solar_panel_tile_image(location_id, view, selected_row_id, panel_number, selected_cell_id, fault_records=None):
+def solar_panel_tile_image(location_id, view, selected_row_id, panel_number, selected_cell_id, fault_records=None, scene_distance="far"):
     grouped = module_cells_by_number(location_id, selected_row_id)
     selected_cell = cell_by_id(location_id, selected_row_id, selected_cell_id)
     selected_module = selected_cell.get("module_number")
@@ -1527,6 +1491,7 @@ def solar_panel_tile_image(location_id, view, selected_row_id, panel_number, sel
             selected_row_id,
             tile_cell["id"],
             compact_fault_key(module_records),
+            scene_distance,
         )
         module_img = module_img.resize((sub_w, sub_h), Image.Resampling.BICUBIC)
         col = idx % SOLAR_PANEL_MODULE_COLS
@@ -2051,65 +2016,15 @@ def rendered_fault_cell_from_record(location_id, record, selected_row_id, select
 
 
 def smooth_thermal_array_field(size, seed, panel_min, panel_max):
-    """Create a natural low-frequency panel field without a drawn cell grid."""
-    width, height = size
-    rng = np.random.default_rng(seed)
-    normal_high = max(panel_min + 5.0, panel_max - 10.0)
-    midpoint = float(rng.uniform(panel_min + 2.0, normal_high))
-    field = np.full((height, width), midpoint, dtype=np.float32)
-    texture = smooth_unit_field(
-        (height, width),
-        seed_for(seed, "smooth-array-texture"),
-        max(2.0, min(width, height) * 0.24),
-        octaves=2,
-    )
-    field += (texture - 0.5) * 7.0
-    field += np.linspace(-1.8, 1.8, width, dtype=np.float32)[None, :]
-    field += np.linspace(1.4, -1.4, height, dtype=np.float32)[:, None]
-    field += rng.normal(0, 0.32, (height, width)).astype(np.float32)
-    field = cv2.GaussianBlur(field, (0, 0), max(0.75, min(width, height) * 0.018))
-    return np.clip(field, panel_min - 5.0, panel_max - 7.0).astype(np.float32)
+    """Compatibility entry point for the shared healthy thermal model."""
+    return healthy_thermal_module_field(size, seed, panel_min, panel_max)
 
 
 def solar_render_thermal_base_field(location_id, rendered):
-    rgb = np.asarray(rendered.convert("RGB")).astype(np.float32)
-    gray = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32)
-    soft = cv2.GaussianBlur(gray, (0, 0), 1.8)
-    clahe = cv2.createCLAHE(clipLimit=1.25, tileGridSize=(8, 8)).apply(np.clip(soft, 0, 255).astype(np.uint8)).astype(np.float32)
-
-    terrain_low, terrain_high, detail_gain, edge_gain = {
-        "desert_farm": (34, 126, 0.10, 2.0),
-        "desert_track": (34, 126, 0.10, 2.0),
-        "rooftop": (42, 138, 0.18, 4.0),
-        "rooftop_warehouse": (42, 138, 0.18, 4.0),
-        "agri_rows": (22, 112, 0.13, 2.4),
-        "agri_field_new": (22, 112, 0.13, 2.4),
-        "farm_lake": (18, 94, 0.11, 1.3),
-        "floating_water": (18, 94, 0.11, 1.3),
-        "scenario_1": (22, 112, 0.13, 2.4),
-        "grass_open": (22, 112, 0.13, 2.4),
-    }.get(location_id, (22, 112, 0.13, 2.2))
-
-    low_p, high_p = np.percentile(clahe, [2.5, 97.5])
-    normalized = np.clip((clahe - low_p) / max(1.0, high_p - low_p), 0.0, 1.0)
-    temp = terrain_low + normalized * (terrain_high - terrain_low)
-    broad = cv2.GaussianBlur(gray, (0, 0), 12)
-    detail = gray - broad
-    temp += detail * detail_gain
-    edges = cv2.Laplacian(cv2.GaussianBlur(gray, (0, 0), 1.0), cv2.CV_32F)
-    temp += np.clip(np.abs(edges), 0, 18) * edge_gain * 0.08
-
-    rng = np.random.default_rng(seed_for(location_id, "opencv-thermal", True))
-    temp += thermal_noise(temp.shape, rng, 3.4, 0.70)
-    temp += thermal_noise(temp.shape, rng, 7.2, 4.8)
-    temp += thermal_noise(temp.shape, rng, 5.8, 14.0)
-    scene_env = pv_environment_multiplier(
-        temp.shape,
-        seed_for(location_id, "thermal-cloud-sun", True),
-        strength=0.070,
+    temp = thermal_background_realism(
+        np.empty((rendered.height, rendered.width), np.float32), rendered, location_id
     )
-    temp *= scene_env
-    temp = np.clip(temp, terrain_low - 10, terrain_high + 16)
+    scene_drift = thermal_scene_drift(temp.shape, seed_for(location_id, "healthy-thermal-scene"))
 
     panel_mask = solar_render_panel_mask(rendered, location_id).astype(np.float32) / 255.0
     panel_mask = np.clip(panel_mask * 1.18, 0.0, 0.98)
@@ -2125,44 +2040,31 @@ def solar_render_thermal_base_field(location_id, rendered):
             key: {"box": box, "polygon": box_polygon(box)}
             for key, box in fallback_boxes.items()
         }
-    array_boxes = {key: geometry["box"] for key, geometry in array_geometries.items()}
 
-    shadow = cv2.GaussianBlur(panel_mask, (0, 0), 7.0)
-    shadow_strength = 5 if location_id in {"desert_farm", "desert_track"} else 14
-    temp -= shadow * shadow_strength * 0.55
+    panel_min, panel_max = thermal_pv_operating_range(location_id)
 
-    panel_min, panel_max = {
-        "desert_farm": (168, 200),
-        "desert_track": (168, 200),
-        "rooftop": (162, 194),
-        "rooftop_warehouse": (162, 194),
-        "agri_rows": (164, 196),
-        "agri_field_new": (164, 196),
-        "farm_lake": (158, 190),
-        "floating_water": (158, 190),
-        "scenario_1": (164, 196),
-        "grass_open": (164, 196),
-    }.get(location_id, (164, 196))
+    healthy_module_support = np.zeros(temp.shape, np.uint8)
+    healthy_module_geometry = []
+    for key, geometry in array_geometries.items():
+        # Geometry supplies physical modules only. There is no filled table
+        # rectangle and no thermal subdivision painted inside any module.
+        region = {"box": geometry["box"], "polygon": geometry["polygon"]}
+        for number, module in array_module_polygons(region).items():
+            cv2.fillConvexPoly(healthy_module_support, np.rint(module_outer_polygon(module)).astype(np.int32), 255)
+            healthy_module_geometry.append(module_outer_polygon(module))
+            composite_healthy_thermal_module(
+                temp, module_outer_polygon(module), scene_drift,
+                seed_for(location_id, key, number, "healthy-module"),
+                panel_min, panel_max, panel_mask,
+            )
 
-    for key, box in array_boxes.items():
-        x1, y1, x2, y2 = [int(value) for value in box]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(temp.shape[1], x2), min(temp.shape[0], y2)
-        if x2 <= x1 or y2 <= y1:
-            continue
-        local_w, local_h = x2 - x1, y2 - y1
-        local_panel = smooth_thermal_array_field(
-            (local_w, local_h),
-            seed_for(location_id, key, "rendered-original-thermal-array"),
-            panel_min,
-            panel_max,
-        )
-        grad_x = np.linspace(-1.8, 1.8, local_w, dtype=np.float32)[None, :]
-        grad_y = np.linspace(1.2, -1.2, local_h, dtype=np.float32)[:, None]
-        local_panel = np.clip(local_panel + grad_x + grad_y, panel_min - 16, panel_max + 8)
-        local_mask = panel_mask[y1:y2, x1:x2]
-        temp[y1:y2, x1:x2] = temp[y1:y2, x1:x2] * (1.0 - local_mask) + local_panel * local_mask
-
+    temp = thermal_boundary_response(
+        temp, healthy_module_support, seed_for(location_id, "healthy-boundary-response"),
+        location_id=location_id, source_image=rendered,
+        geometries=[geometry["polygon"] for geometry in array_geometries.values()],
+        module_geometries=healthy_module_geometry,
+    )
+    temp = thermal_refine_background_materials(temp, rendered, location_id, healthy_module_geometry)
     return temp.astype(np.float32), array_geometries
 
 
@@ -2171,24 +2073,12 @@ def thermal_display_rgb_from_scalar(temp, location_id, scene_distance="far", dis
     temp = np.asarray(temp, dtype=np.float32)
     if temp.size == 0:
         return Image.fromarray(np.zeros((1, 1, 3), dtype=np.uint8))
-    # Far-view hotspots occupy far less than one percent of the image. Keeping
-    # the old 99.35 percentile clipped them to the same hue as healthy panels.
-    low_pct, high_pct = (1.0, 99.995) if str(scene_distance).lower() == "far" else (1.0, 99.80)
-    if display_range is not None and len(display_range) == 2:
-        low, high = (float(display_range[0]), float(display_range[1]))
-    else:
-        low, high = np.percentile(temp, [low_pct, high_pct])
+    # Same relative scalar calibration for healthy/faulted and far/close. A
+    # provided measured-scene range remains authoritative. Crops never autoscale.
+    calibration = THERMAL_SCALAR_DISPLAY_RANGE if display_range is None else display_range
+    low, high = (float(v) for v in calibration)
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
-        low, high = float(np.min(temp)), float(np.max(temp))
-    if display_range is None and str(scene_distance).lower() == "far":
-        # Reserve the yellow/cream end of the palette for actual anomalies.
-        # Healthy panels normally occupy the orange range around 160-190.
-        high = max(float(high), 238.0)
-    min_span = 72.0 if str(scene_distance).lower() == "far" else 64.0
-    if high - low < min_span:
-        mid = (high + low) / 2.0
-        low = mid - min_span / 2.0
-        high = mid + min_span / 2.0
+        raise ValueError("Invalid thermal display calibration")
     dither = np.random.default_rng(seed_for(location_id, "thermal-dither", scene_distance)).uniform(
         -0.45,
         0.45,
@@ -2440,11 +2330,32 @@ def draw_solar_render_overlays(image, location_id, selected_row_id, selected_cel
 
 
 @st.cache_data(show_spinner=False, max_entries=12)
-def cached_solar_render_thermal_base(location_id, render_size, render_signature):
-    rendered = solar_render_image(location_id, render_size)
+def cached_native_thermal_master(location_id, render_signature):
+    """Authoritative Generated healthy scalar scene at source resolution."""
+    rendered = solar_render_image(location_id, None)
     if rendered is None:
         return None
     return solar_render_thermal_base_field(location_id, rendered)
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def cached_solar_render_thermal_base(location_id, render_size, render_signature):
+    master = cached_native_thermal_master(location_id, solar_render_cache_signature(location_id))
+    if master is None:
+        return None
+    scalar, geometries = master
+    if not render_size:
+        return scalar, geometries
+    height, width = scalar.shape
+    ratio = min(float(render_size[0]) / width, float(render_size[1]) / height)
+    size = (max(1, int(round(width * ratio))), max(1, int(round(height * ratio))))
+    sx, sy = size[0] / width, size[1] / height
+    scaled = {
+        key: {**geometry, "box": scale_box(geometry["box"], sx, sy),
+              "polygon": scale_polygon(geometry["polygon"], sx, sy)}
+        for key, geometry in geometries.items()
+    }
+    return cv2.resize(scalar, size, interpolation=cv2.INTER_AREA), scaled
 
 
 @st.cache_data(show_spinner=False, max_entries=48)
@@ -2571,7 +2482,18 @@ def module_field_image(location_id, view, selected_row_id, selected_cell_id, fau
         dynamic_field_h += 24
     static_field_w, static_field_h = module_field_static_canvas_size(location_id, view)
     field_w, field_h = static_field_w, static_field_h
-    field = module_field_background(location_id, view, (field_w, field_h), selected_row_id).convert("RGBA")
+    # Missing/pre-render-free layouts still build a single scalar scene. They
+    # must not assemble already palette-mapped thermal preview tiles.
+    background_view = "rgb" if view == "thermal" else view
+    background_target = None if view == "thermal" else selected_row_id
+    field = module_field_background(location_id, background_view, (field_w, field_h), background_target).convert("RGBA")
+    thermal_scalar = None
+    thermal_geometries = {}
+    healthy_module_support = np.zeros((field_h, field_w), np.uint8)
+    healthy_module_geometry = []
+    if view == "thermal":
+        thermal_scalar = thermal_background_realism(np.empty((field_h, field_w), np.float32), field, location_id)
+        thermal_drift = thermal_scene_drift(thermal_scalar.shape, seed_for(location_id, "healthy-thermal-scene"))
     draw = ImageDraw.Draw(field, "RGBA")
     label_font = grid_font(12 if max_visible_panels < 6 else 10)
 
@@ -2589,13 +2511,27 @@ def module_field_image(location_id, view, selected_row_id, selected_cell_id, fau
                 and cell_by_id(location_id, row["id"], record.get("target_cell_id")).get("module_number") in panel_modules
             ]
             tile_selected_cell_id = selected_cell_id if is_selected else cells[0]["id"]
-            tile = solar_panel_tile_image(location_id, view, row["id"], panel_number, tile_selected_cell_id, records)
-            tile = tile.resize((tile_w, tile_h), Image.Resampling.BICUBIC)
+            if view != "thermal":
+                tile = solar_panel_tile_image(location_id, view, row["id"], panel_number, tile_selected_cell_id, records, scene_distance)
+                tile = tile.resize((tile_w, tile_h), Image.Resampling.BICUBIC)
             row_offset_x = 0
             if location_id == "agri_field_new":
                 row_offset_x = [70, 70, 70, 70, 70][row_idx % 5]
             x = pad_x + row_offset_x + col_idx * (tile_w + gap_x)
             y = pad_y + row_idx * (tile_h + gap_y)
+            if view == "thermal":
+                key = (row_number_from_id(location_id, row["id"]), panel_number)
+                geometry = {"box": (x, y, x + tile_w, y + tile_h),
+                            "polygon": box_polygon((x, y, x + tile_w, y + tile_h))}
+                thermal_geometries[key] = geometry
+                for number, module in array_module_polygons(geometry).items():
+                    cv2.fillConvexPoly(healthy_module_support, np.rint(module_outer_polygon(module)).astype(np.int32), 255)
+                    healthy_module_geometry.append(module_outer_polygon(module))
+                    composite_healthy_thermal_module(
+                        thermal_scalar, module_outer_polygon(module), thermal_drift,
+                        seed_for(location_id, key, number, "healthy-module"), *thermal_pv_operating_range(location_id),
+                    )
+                continue
             if view == "rgb":
                 if location_id in {"agri_field_new", "grass_open"}:
                     rack_shadow = Image.new("RGBA", (tile_w + 30, tile_h + 34), (0, 0, 0, 0))
@@ -2637,6 +2573,24 @@ def module_field_image(location_id, view, selected_row_id, selected_cell_id, fau
                     draw_fault_label(draw, (x, y, x + tile_w, y + tile_h), label, label_font, field.size)
             if is_selected:
                 selected_rect = (x, y, x + tile_w, y + tile_h)
+
+    if view == "thermal":
+        thermal_scalar = thermal_boundary_response(
+            thermal_scalar, healthy_module_support, seed_for(location_id, "healthy-boundary-response"),
+            location_id=location_id, source_image=field,
+            geometries=[geometry["polygon"] for geometry in thermal_geometries.values()],
+            module_geometries=healthy_module_geometry,
+        )
+        thermal_scalar = thermal_refine_background_materials(thermal_scalar, field, location_id, healthy_module_geometry)
+        image = finalize_solar_render_thermal_image(
+            location_id, thermal_scalar, thermal_geometries, selected_row_id,
+            selected_cell_id, fault_records, scene_distance,
+        )
+        if show_grid:
+            overlay = ImageDraw.Draw(image)
+            for geometry in thermal_geometries.values():
+                overlay.rectangle(geometry["box"], outline=(56, 189, 248), width=1)
+        return image
 
     if selected_rect:
         draw_corner_marks(draw, selected_rect, (250, 204, 21, 255), width=3 if view == "rgb" else 5)
