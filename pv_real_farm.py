@@ -63,6 +63,23 @@ def real_farm_supported_image(uploaded_file):
     return suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
 
+def real_farm_rgb_array(image):
+    """Reuse read-only RGB pixels for this immutable source image only.
+
+    The upload/session owns the PIL image; a new image owns a separate cache.
+    No global dictionary retains previous uploads. Replacing the PIL pixel
+    core or mode also invalidates the cached array.
+    """
+    cached = getattr(image, "_real_farm_rgb_pixels", None)
+    if cached is None or cached[0] is not image.im or cached[1] != image.mode:
+        source = image if image.mode == "RGB" else image.convert("RGB")
+        rgb = np.asarray(source, dtype=np.uint8)
+        rgb.setflags(write=False)
+        cached = (image.im, image.mode, rgb)
+        image._real_farm_rgb_pixels = cached
+    return cached[2]
+
+
 def real_farm_load_uploaded_rgb(uploaded_file):
     if not real_farm_supported_image(uploaded_file):
         raise ValueError("Supported formats are PNG, JPG/JPEG, and TIFF.")
@@ -569,7 +586,7 @@ def real_farm_rectified_crop(image, module, output_size=None):
         scale = 520.0 / max(float(size["width"]), float(size["height"]), 1.0)
         output_size = (max(80, int(round(size["width"] * scale))), max(80, int(round(size["height"] * scale))))
     w, h = map(int, output_size)
-    source = np.asarray(image.convert("RGB"))
+    source = real_farm_rgb_array(image)
     dst = np.asarray([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
     src = np.asarray(module.get("outer_polygon_rgb"), dtype=np.float32).reshape(4, 2)
     matrix = cv2.getPerspectiveTransform(src, dst)
@@ -732,7 +749,7 @@ def real_farm_refine_pv_support(image, module, progress_callback=None):
     """Refine a coarse ROI while preserving aligned PV components and frame gaps."""
     if progress_callback:
         progress_callback("Detecting PV support")
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    rgb = real_farm_rgb_array(image)
     height, width = rgb.shape[:2]
     roi_mask = real_farm_roi_mask(image.size, module)
     roi_points = np.asarray(module.get("coarse_roi_polygon_rgb") or module.get("outer_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
@@ -947,7 +964,7 @@ def real_farm_module_grid_texture_score(image, module):
     interior = cv2.erode(mask, np.ones((erosion * 2 + 1, erosion * 2 + 1), np.uint8)) > 0
     if np.count_nonzero(interior) < 20:
         interior = mask > 0
-    gray = cv2.cvtColor(np.asarray(image.convert("RGB"))[y1:y2, x1:x2], cv2.COLOR_RGB2GRAY)
+    gray = cv2.cvtColor(real_farm_rgb_array(image)[y1:y2, x1:x2], cv2.COLOR_RGB2GRAY)
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     magnitude = cv2.magnitude(gx, gy)
@@ -956,20 +973,1003 @@ def real_farm_module_grid_texture_score(image, module):
     return float(np.clip(edge_density * 0.78 + min(1.0, texture) * 0.22, 0.0, 1.0))
 
 
+def real_farm_refine_rgb_frame_instances(image, candidates, union_mask):
+    """Resolve local broad-frame combs at source resolution, never cell periods.
+
+    Conservative components are search windows, not certified single modules.
+    Work locally along each strip so lens/perspective slope and frame pitch can
+    change with image position. Unsupported windows remain explicitly reviewable.
+    """
+    rgb = real_farm_rgb_array(image)
+    recovered = []
+    centers = np.float32([np.mean(m['outer_polygon_rgb'], axis=0) for m in candidates])
+    widths = [real_farm_orientation_metadata(m['outer_polygon_rgb'])[2] for m in candidates]
+    for seed in candidates:
+        q = np.float32(seed["outer_polygon_rgb"])
+        _, _, width, height = real_farm_orientation_metadata(q)
+        w, h = max(12, round(width)), max(12, round(height))
+        px, py = max(16, round(w * .22)), max(32, round(w * 1.1))
+        destination = np.float32([[px, py], [px+w, py], [px+w, py+h], [px, py+h]])
+        transform = cv2.getPerspectiveTransform(q, destination)
+        inverse = cv2.getPerspectiveTransform(destination, q)
+        crop = cv2.warpPerspective(rgb, transform, (w+2*px, h+2*py))
+        support = cv2.warpPerspective(union_mask, transform, (w+2*px, h+2*py)) > 0
+        # A broad neutral-bright ridge survives native-scale blur; thin cell
+        # busbars do not. Periodicity without this structural ridge is unused.
+        neutral = cv2.GaussianBlur(crop.min(axis=2), (0, 0), 1.0)
+        binary = np.uint8(neutral > 160) * 255
+
+        def frame_lines(plane, axis, extent, center, offset=0):
+            lines = cv2.HoughLinesP(plane, 1, np.pi/720, max(12, round(extent*.32)),
+                                    minLineLength=max(12, round(extent*.60)), maxLineGap=4)
+            proposals = []
+            for line in lines.reshape(-1, 4) if lines is not None else []:
+                a, b, c, d = map(float, line)
+                if axis == "vertical":
+                    a, b, c, d = b, a, d, c
+                if abs(c-a) < extent*.60 or abs(d-b) > abs(c-a)*.32:
+                    continue
+                # Require the ridge to cross this module window, not merely a
+                # nearby equipment edge or the next PV column in the padding.
+                overlap = max(0, min(max(a,c), center+extent*.5)-max(min(a,c), center-extent*.5))
+                if overlap < extent*.58:
+                    continue
+                slope = (d-b)/(c-a)
+                position = b+slope*(center-a)+offset
+                proposals.append((position, slope, overlap))
+            groups = []
+            for line in sorted(proposals):
+                if not groups or line[0]-np.median([p[0] for p in groups[-1]]) > 4:
+                    groups.append([])
+                groups[-1].append(line)
+            return [(float(np.median([p[0] for p in group])),
+                     float(np.median([p[1] for p in group]))) for group in groups]
+
+        horizontal = frame_lines(binary, "horizontal", w, px+w*.5)
+        # Module-scale gaps are learned in this padded RGB neighborhood. Do not
+        # subdivide an interval just to satisfy a size or recovered-count target.
+        gaps = np.diff([p[0] for p in horizontal])
+        eligible = gaps[(gaps > max(12, w*.25)) & (gaps < w*.90)]
+        pitch = float(np.median(eligible)) if len(eligible) >= 2 else None
+        comb = [(a, b) for a, b in zip(horizontal, horizontal[1:])
+                if pitch and .78*pitch <= b[0]-a[0] <= 1.22*pitch]
+        visual = real_farm_module_visual_score(image, seed)
+        texture = real_farm_module_grid_texture_score(image, seed)
+        if len(comb) < 2:
+            # Equipment rejection requires independent texture, panel-color,
+            # and structural disagreement. One weak cue never removes PV.
+            nearest = np.argsort(np.linalg.norm(centers-q.mean(axis=0), axis=1))[1:9]
+            neighbor_width = float(np.median([widths[i] for i in nearest])) if len(nearest) else width
+            if visual < .70 and texture < .55 and width < neighbor_width*.65 and not comb:
+                continue
+            seed = dict(seed)
+            seed["warnings"] = list(seed.get("warnings", [])) + [{
+                "level": "warning", "code": "unsplit_recovered_region",
+                "message": "No locally repeated broad RGB frame comb; geometry remains unverified.",
+            }]
+            recovered.append(seed)
+            continue
+        emitted = False
+        for top, bottom in comb:
+            middle = (top[0]+bottom[0])*.5
+            if not py <= middle <= py+h:
+                continue
+            row_height = bottom[0]-top[0]
+            y1 = max(0, int(np.floor(top[0]+abs(top[1])*w*.5+3)))
+            y2 = min(binary.shape[0], int(np.ceil(bottom[0]-abs(bottom[1])*w*.5-3)))
+            if y2-y1 < row_height*.45:
+                continue
+            vertical = frame_lines(binary[y1:y2], "vertical", y2-y1,
+                                   (y2-y1)*.5, offset=0)
+            sides = []
+            for target in (px, px+w):
+                near = [line for line in vertical if abs(line[0]-target) < w*.22]
+                sides.append(min(near, key=lambda p: abs(p[0]-target)) if near else (target, 0.0))
+            left, right = sides
+            # Intersect independently fitted sides. No axis-aligned box or
+            # percentage inset is substituted for an observed physical frame.
+            def corner(row, side):
+                cy = y1+(y2-y1)*.5
+                yy = (row[0]+row[1]*(side[0]-px-w*.5-side[1]*cy))/(1-row[1]*side[1])
+                return [side[0]+side[1]*(yy-cy), yy]
+            local = np.float32([corner(top,left), corner(top,right),
+                                corner(bottom,right), corner(bottom,left)])
+            if cv2.contourArea(local) < width*pitch*.50:
+                continue
+            mask = np.zeros(support.shape, np.uint8)
+            cv2.fillConvexPoly(mask, np.rint(local).astype(np.int32), 1)
+            coverage = float(np.mean(support[mask > 0])) if mask.any() else 0
+            if coverage < .62:
+                continue
+            points = cv2.perspectiveTransform(local[None], inverse)[0]
+            points[:,0] = np.clip(points[:,0], 0, image.width-1)
+            points[:,1] = np.clip(points[:,1], 0, image.height-1)
+            # Neighboring search windows can see the same physical frame cell.
+            # Deduplicate by physical overlap, never by inherited module ID.
+            area = abs(cv2.contourArea(points))
+            duplicate = False
+            for other in recovered:
+                oq = np.float32(other['outer_polygon_rgb'])
+                if np.linalg.norm(oq.mean(axis=0)-points.mean(axis=0)) > max(width,pitch):
+                    continue
+                intersection, _ = cv2.intersectConvexConvex(points, oq)
+                if intersection / max(1, area+abs(cv2.contourArea(oq))-intersection) > .65:
+                    duplicate = True
+                    break
+            if duplicate:
+                emitted = True
+                continue
+            record = real_farm_module_record(seed['module_id'], points.tolist(), image.size,
+                                            seed.get('array_id') or '', .018, 'auto_rgb_physical_frames')
+            record.update(source='REAL_FARM', parent_module_id=seed.get('parent_module_id'))
+            real_farm_attach_instance_support(record, union_mask, coverage)
+            record['rgb_frame_evidence'] = {'seed_polygon': seed['outer_polygon_rgb'],
+                'seed_module_id': seed['module_id'],
+                'local_row_pitch_px': pitch, 'broad_frame_intervals': len(comb),
+                'vertical_sides_observed': [side in vertical for side in sides]}
+            if not all(record['rgb_frame_evidence']['vertical_sides_observed']):
+                record['warnings'].append({'level':'warning', 'code':'unsplit_recovered_region',
+                    'message':'Row frames resolved; a side frame remains unverified.'})
+            recovered.append(record)
+            emitted = True
+        if not emitted:
+            recovered.append(seed)
+    for index, record in enumerate(recovered, 1):
+        # IDs label the new geometry only; production reference definitions and
+        # fault models are not involved in recovery.
+        parent_id = record.get('parent_module_id', '')
+        record['module_id'] = f"M{index:03d}" if parent_id == 'SEARCH001' else f"{parent_id}.{index:03d}"
+    return recovered
+
+
+def real_farm_refine_rgb_table_instances(image, candidates, union_mask):
+    """Fit long-table modules from native paired frames and local RGB edges.
+
+    A physical inter-module seam has two frame flanks around a narrow gutter;
+    Long Table's brighter single cell-grid lines cannot substitute for that
+    signature. Local search windows may overlap or have the wrong split phase.
+    """
+    rgb = real_farm_rgb_array(image)
+    quads = [np.float32(m['outer_polygon_rgb']) for m in candidates]
+    centers = np.asarray([q.mean(axis=0) for q in quads])
+    dimensions = np.asarray([real_farm_orientation_metadata(q)[2:] for q in quads])
+    output = []
+    for seed, q, (width, height), center in zip(candidates, quads, dimensions, centers):
+        # Same-row, nearby candidates give a depth-local search scale, including
+        # enough context to recover a clipped interval. They do not set splits.
+        distance = np.linalg.norm((centers-center)/[max(width,40),max(height,40)], axis=1)
+        nearby = np.where(np.abs(centers[:,1]-center[1]) < height*.32)[0]
+        nearest = sorted(nearby, key=lambda i: distance[i])[:11]
+        typical = np.median(dimensions[nearest], axis=0)
+        expected_width = float(typical[0])*1.04
+        w, h = max(12, round(width)), max(12, round(height))
+        px, py = max(24, round(expected_width)), max(16, round(height*.23))
+        destination = np.float32([[px,py],[px+w,py],[px+w,py+h],[px,py+h]])
+        transform = cv2.getPerspectiveTransform(q,destination)
+        inverse = cv2.getPerspectiveTransform(destination,q)
+        crop = cv2.warpPerspective(rgb,transform,(w+2*px,h+2*py))
+        support = cv2.warpPerspective(union_mask,transform,(w+2*px,h+2*py)) > 0
+        neutral = cv2.GaussianBlur(crop.min(axis=2).astype(np.float32),(0,0),.65)
+        # Fit top/bottom frame energy locally, not the common slope/endpoints
+        # of a whole-table minimum rotated rectangle. Cell lines are thinner.
+        row_profile = np.percentile(neutral[:,px+round(w*.15):px+round(w*.85)],40,axis=1)
+        broad = cv2.GaussianBlur(row_profile.reshape(-1,1),(0,0),2.0).ravel()
+        rows = []
+        for target in (py,py+h):
+            lo,hi = max(1,round(target-h*.19)),min(len(broad)-1,round(target+h*.19))
+            position = lo+int(np.argmax(broad[lo:hi]))
+            if broad[position] < max(135,float(np.median(broad[lo:hi]))+22):
+                break
+            rows.append(position)
+        if len(rows) != 2 or not height*.72 < rows[1]-rows[0] < height*1.30:
+            retained = dict(seed)
+            retained['rgb_table_evidence'] = {'resolved':False,'reason':'weak_row_frame_evidence'}
+            output.append(retained)
+            continue
+        y1,y2 = round(rows[0]+(rows[1]-rows[0])*.14),round(rows[1]-(rows[1]-rows[0])*.14)
+        # Native two-flank seam contrast, independently diagnosed for this scene.
+        flank_left = np.zeros_like(neutral)
+        flank_right = np.zeros_like(neutral)
+        for offset in range(2,7):
+            flank_left[:,offset:] = np.maximum(flank_left[:,offset:],neutral[:,:-offset])
+            flank_right[:,:-offset] = np.maximum(flank_right[:,:-offset],neutral[:,offset:])
+        seam = np.maximum(0,np.minimum(flank_left,flank_right)-neutral)
+        profile = seam[y1:y2].mean(axis=0)
+        peaks = [i for i in range(7,len(profile)-7)
+                 if profile[i] == max(profile[i-3:i+4]) and profile[i] > 5]
+        values = np.asarray([profile[i] for i in peaks])
+        median = float(np.median(values)) if len(values) else 0
+        mad = float(np.median(np.abs(values-median))) if len(values) else 0
+        threshold = max(18,median+3*mad)
+        boundaries = []
+        for i in sorted(peaks,key=lambda i:-profile[i]):
+            if profile[i] >= threshold and all(abs(i-j[0]) > expected_width*.62 for j in boundaries):
+                boundaries.append((float(i),'paired_frame'))
+        # Table endpoints have one frame with PV on one side and ground on the
+        # other. Close cell-scale holes only; do not bridge real table gaps.
+        # The original RGB-derived support is more reliable than a new strict
+        # blue-color test on shaded faces. A color-only hole inside PV must not
+        # manufacture a table endpoint.
+        pv = support[y1:y2].mean(axis=0)
+        occupied = np.uint8(pv>.36)[None]
+        occupied = cv2.morphologyEx(occupied,cv2.MORPH_CLOSE,
+                                   np.ones((1,max(3,round(expected_width*.07))),np.uint8))[0]
+        edge_profile = neutral[y1:y2].mean(axis=0)
+        for i in np.where(np.diff(occupied.astype(int)) != 0)[0]:
+            lo,hi=max(0,i-6),min(len(edge_profile),i+7)
+            position=lo+int(np.argmax(edge_profile[lo:hi]))
+            if edge_profile[position] >= 120 and all(abs(position-j[0]) > expected_width*.30 for j in boundaries):
+                boundaries.append((float(position),'pv_endpoint'))
+        crop_edges={}
+        for source_x in (0,image.width-1):
+            edge=cv2.perspectiveTransform(np.float32([[[source_x,center[1]-height],
+                                                      [source_x,center[1]+height]]]),transform)[0]
+            slope=(edge[1,0]-edge[0,0])/max(1e-6,edge[1,1]-edge[0,1])
+            intercept=edge[0,0]-slope*edge[0,1]
+            position=float(slope*(y1+y2)*.5+intercept)
+            if 0 <= position < crop.shape[1]:
+                probe=round(position+(3 if source_x==0 else -3))
+                if 0 <= probe < len(pv) and pv[probe]>.30:
+                    boundaries=[b for b in boundaries if abs(b[0]-position)>expected_width*.25]
+                    boundaries.append((position,'image_crop'))
+                    crop_edges[position]=(float(slope),float(intercept),1.0)
+        boundaries.sort()
+        # Robust line fit follows local skew. A seam is fit on its paired-frame
+        # response; an exterior frame is fit on neutral brightness.
+        def fit_line(plane,position,vertical,start,end):
+            samples=[]
+            for along in np.linspace(start,end,40):
+                index=int(round(along))
+                lo,hi=max(0,round(position-5)),min(plane.shape[1 if vertical else 0],round(position+6))
+                vector=plane[index,lo:hi] if vertical else plane[lo:hi,index]
+                if not len(vector): continue
+                transverse=lo+int(np.argmax(vector))
+                samples.append((along,float(transverse)))
+            samples=np.asarray(samples)
+            slope,intercept=np.polyfit(samples[:,0],samples[:,1],1)
+            residual=np.abs(samples[:,1]-(slope*samples[:,0]+intercept))
+            keep=residual<=max(1.5,2.5*float(np.median(residual)))
+            if keep.sum()>=12:
+                slope,intercept=np.polyfit(samples[keep,0],samples[keep,1],1)
+            return float(slope),float(intercept),float(keep.mean())
+        emitted=False
+        for left,right in zip(boundaries,boundaries[1:]):
+            span=right[0]-left[0]
+            overlap=max(0,min(right[0],px+w)-max(left[0],px))
+            partial=left[1]=='image_crop' or right[1]=='image_crop'
+            # A weak seam a cell-width away from the true separator cannot
+            # define a full module. Require agreement with nearby module size;
+            # the actual observed frames still determine every coordinate.
+            valid_span=(max(8,expected_width*.08)<=span<=expected_width*1.14 if partial
+                        else expected_width*.86<=span<=expected_width*1.14)
+            if not valid_span or overlap < min(span,w)*.22:
+                continue
+            l=(crop_edges[left[0]] if left[1]=='image_crop' else
+               fit_line(seam if left[1]=='paired_frame' else neutral,left[0],True,y1,y2))
+            r=(crop_edges[right[0]] if right[1]=='image_crop' else
+               fit_line(seam if right[1]=='paired_frame' else neutral,right[0],True,y1,y2))
+            top=fit_line(neutral,rows[0],False,left[0]+span*.08,right[0]-span*.08)
+            bottom=fit_line(neutral,rows[1],False,left[0]+span*.08,right[0]-span*.08)
+            def corner(row,side):
+                yy=(row[0]*side[1]+row[1])/(1-row[0]*side[0])
+                return [side[0]*yy+side[1],yy]
+            local=np.float32([corner(top,l),corner(top,r),corner(bottom,r),corner(bottom,l)])
+            mask=np.zeros(support.shape,np.uint8)
+            cv2.fillConvexPoly(mask,np.rint(local).astype(np.int32),1)
+            coverage=float(np.mean(support[mask>0])) if mask.any() else 0
+            if coverage<.60: continue
+            points=cv2.perspectiveTransform(local[None],inverse)[0]
+            points[:,0]=np.clip(points[:,0],0,image.width-1)
+            points[:,1]=np.clip(points[:,1],0,image.height-1)
+            area=abs(cv2.contourArea(points))
+            duplicate=False
+            for other in output:
+                oq=np.float32(other['outer_polygon_rgb'])
+                if np.linalg.norm(points.mean(0)-oq.mean(0))>max(width,height): continue
+                intersection,_=cv2.intersectConvexConvex(points,oq)
+                if intersection/max(1,area+abs(cv2.contourArea(oq))-intersection)>.72:
+                    duplicate=True
+                    break
+            emitted=True
+            if duplicate: continue
+            record=real_farm_module_record(seed['module_id'],points.tolist(),image.size,
+                seed.get('array_id') or '',.018,'auto_rgb_table_frames')
+            record.update(source='REAL_FARM',parent_module_id=seed.get('parent_module_id'))
+            real_farm_attach_instance_support(record,union_mask,coverage)
+            record['rgb_table_evidence']={'resolved':True,'seed_module_id':seed['module_id'],
+                'seed_polygon':seed['outer_polygon_rgb'],'expected_local_width_px':expected_width,
+                'measured_frame_pitch_px':span,'side_kinds':[left[1],right[1]],
+                'partial_image_crop':partial,
+                'line_inlier_fractions':[top[2],r[2],bottom[2],l[2]]}
+            output.append(record)
+        if not emitted:
+            retained=dict(seed)
+            retained['rgb_table_evidence']={'resolved':False,'reason':'uncertain_physical_separator'}
+            output.append(retained)
+    for index,record in enumerate(output,1):
+        parent=record.get('parent_module_id','')
+        record['module_id']=f'M{index:03d}' if parent=='SEARCH001' else f'{parent}.{index:03d}'
+    return output
+
+
+def real_farm_rgb_frame_supported(module):
+    """Whether an earlier RGB fit supplies a credible neighboring boundary."""
+    dense = module.get('rgb_frame_evidence', {})
+    table = module.get('rgb_table_evidence', {})
+    return bool((dense and any(dense.get('vertical_sides_observed', [False])))
+                or table.get('resolved') or module.get('rgb_perimeter_evidence', {}).get('resolved'))
+
+
+def real_farm_visible_rgb_quad(points, image_size):
+    """Keep a cropped visible face inside the source image's quadrilateral API."""
+    width, height = image_size
+    rectangle = np.float32([[0,0],[width-1,0],[width-1,height-1],[0,height-1]])
+    area, clipped = cv2.intersectConvexConvex(np.float32(points), rectangle)
+    if clipped is None or area < 16:
+        return None
+    clipped = clipped.reshape(-1,2)
+    if len(clipped) == 3:
+        # An inscribed cut of a triangle tip avoids a degenerate homography;
+        # it neither extends outside the image nor invents a fourth PV corner.
+        index = int(np.argmax([np.linalg.norm(clipped[i]-clipped[(i+1)%3]) for i in range(3)]))
+        p = clipped[index];a = clipped[(index-1)%3];b = clipped[(index+1)%3]
+        step = min(2.0, np.linalg.norm(a-p)*.08, np.linalg.norm(b-p)*.08)
+        clipped = np.float32([p+(a-p)*step/max(1,np.linalg.norm(a-p)),
+                              p+(b-p)*step/max(1,np.linalg.norm(b-p)),b,a])
+    elif len(clipped) > 4:
+        while len(clipped) > 4:
+            costs = [abs(cv2.contourArea(np.float32([clipped[i-1],clipped[i],clipped[(i+1)%len(clipped)]])))
+                     for i in range(len(clipped))]
+            clipped = np.delete(clipped,int(np.argmin(costs)),axis=0)
+        if abs(cv2.contourArea(clipped)) < area*.92:
+            return None
+    if len(clipped) != 4:
+        return None
+    return np.float32(real_farm_order_quad(clipped))
+
+
+def real_farm_fit_rgb_perimeter(image, module, support_mask, neighbors, recovery=False):
+    """Fit four existing sides independently; never split an input module.
+
+    Neighbor lines constrain the search, but a line is accepted only with its
+    own broad/paired RGB frame response or a PV-to-ground frame transition.
+    """
+    q = np.float32(module['outer_polygon_rgb'])
+    _,_,width,height = real_farm_orientation_metadata(q)
+    w,h = max(12,round(width)),max(12,round(height))
+    px,py = max(18,round(w*.34)),max(18,round(h*.28))
+    destination = np.float32([[px,py],[px+w,py],[px+w,py+h],[px,py+h]])
+    transform = cv2.getPerspectiveTransform(q,destination)
+    inverse = cv2.getPerspectiveTransform(destination,q)
+    rgb = real_farm_rgb_array(image)
+    crop = cv2.warpPerspective(rgb,transform,(w+2*px,h+2*py))
+    support = cv2.warpPerspective(support_mask,transform,(w+2*px,h+2*py)) > 0
+    visible = cv2.warpPerspective(np.ones(rgb.shape[:2],np.uint8),transform,(w+2*px,h+2*py)) > 0
+    neutral = cv2.GaussianBlur(crop.min(axis=2).astype(np.float32),(0,0),.7)
+    broad = cv2.GaussianBlur(neutral,(0,0),1.5)
+    paired = []
+    transitions = []
+    for axis in (0,1):
+        before = np.zeros_like(neutral);after = np.zeros_like(neutral)
+        for offset in range(2,7):
+            if axis == 0:
+                before[offset:] = np.maximum(before[offset:],neutral[:-offset])
+                after[:-offset] = np.maximum(after[:-offset],neutral[offset:])
+            else:
+                before[:,offset:] = np.maximum(before[:,offset:],neutral[:,:-offset])
+                after[:,:-offset] = np.maximum(after[:,:-offset],neutral[:,offset:])
+        paired.append(np.maximum(0,np.minimum(before,after)-neutral))
+        kernel = np.ones((max(3,round(h*.045)),1) if axis==0 else (1,max(3,round(w*.07))),np.uint8)
+        filled = cv2.morphologyEx(support.astype(np.uint8),cv2.MORPH_CLOSE,kernel).astype(np.float32)
+        sm = cv2.GaussianBlur(filled,(0,0),2)
+        transitions.append((np.roll(sm,-5,axis=axis)-np.roll(sm,5,axis=axis)))
+    center = q.mean(0)
+    neighbor_lines = [[] for _ in range(4)]
+    for other in neighbors:
+        if other.get('module_id') == module.get('module_id') or not real_farm_rgb_frame_supported(other):
+            continue
+        oq = np.float32(other['outer_polygon_rgb']);oc = oq.mean(0)
+        delta = (oc-center)/[max(width,20),max(height,20)]
+        if np.linalg.norm(delta)>2.7:
+            continue
+        mapped = cv2.perspectiveTransform(oq[None],transform)[0]
+        for side in range(4):
+            vertical = side in (1,3)
+            # Same-row continuation or an adjacent module's shared boundary.
+            if vertical:
+                if abs(delta[0])<.48 and .4<abs(delta[1])<2.5:
+                    a,b = (mapped[1],mapped[2]) if side==1 else (mapped[0],mapped[3])
+                elif abs(delta[1])<.45 and .45<abs(delta[0])<1.6:
+                    a,b = (mapped[0],mapped[3]) if delta[0]>0 else (mapped[1],mapped[2])
+                else:
+                    continue
+                if abs(b[1]-a[1])<2:continue
+                slope=float((b[0]-a[0])/(b[1]-a[1]));position=float(a[0]+slope*(py+h*.5-a[1]))
+                target=px+w if side==1 else px
+                length=w
+            else:
+                if abs(delta[1])<.45 and .4<abs(delta[0])<2.5:
+                    a,b = (mapped[0],mapped[1]) if side==0 else (mapped[3],mapped[2])
+                elif abs(delta[0])<.45 and .45<abs(delta[1])<1.6:
+                    a,b = (mapped[0],mapped[1]) if delta[1]>0 else (mapped[3],mapped[2])
+                else:
+                    continue
+                if abs(b[0]-a[0])<2:continue
+                slope=float((b[1]-a[1])/(b[0]-a[0]));position=float(a[1]+slope*(px+w*.5-a[0]))
+                target=py if side==0 else py+h
+                length=h
+            if abs(position-target)<length*.34:
+                neighbor_lines[side].append((float(np.linalg.norm(delta)),position,slope))
+    crop_sides=[]
+    # Explicit source cropping, including old inset top-row partials.
+    if q[:,1].min()<1.1 or (q[:,1].min()<height*.12 and not real_farm_rgb_frame_supported(module)):
+        crop_sides.append(0)
+    if q[:,1].max()>image.height-2:crop_sides.append(2)
+    if q[:,0].min()<1.1:crop_sides.append(3)
+    if q[:,0].max()>image.width-2:crop_sides.append(1)
+    fits=[];evidence=[]
+    for side in range(4):
+        vertical=side in (1,3);axis=1 if vertical else 0
+        target=(px+w if side==1 else px) if vertical else (py if side==0 else py+h)
+        length=w if vertical else h
+        along_center=py+h*.5 if vertical else px+w*.5
+        extent=h if vertical else w
+        if side in crop_sides:
+            if vertical:
+                x=0 if side==3 else image.width-1
+                edge=np.float32([[[x,center[1]-height],[x,center[1]+height]]])
+            else:
+                y=0 if side==0 else image.height-1
+                edge=np.float32([[[center[0]-width,y],[center[0]+width,y]]])
+            edge=cv2.perspectiveTransform(edge,transform)[0]
+            a,b=(edge[:,1],edge[:,0]) if vertical else (edge[:,0],edge[:,1])
+            slope=float((b[1]-b[0])/(a[1]-a[0]));intercept=float(b[0]-slope*a[0])
+            fits.append((slope,intercept));evidence.append({'kind':'source_crop','observed':True})
+            continue
+        anchors=sorted(neighbor_lines[side])[:3]
+        anchor=anchors[0][1] if anchors else target
+        tilt=anchors[0][2] if anchors else 0
+        lo=max(7,round(min(target,anchor)-length*.23))
+        hi=min(neutral.shape[axis]-7,round(max(target,anchor)+length*.23)+1)
+        if anchors:
+            # A nearby observed side is a local constraint, not permission to
+            # jump across it to a bright cell line in the neighboring module.
+            lo=max(lo,round(anchor-max(7,length*.09)))
+            hi=min(hi,round(anchor+max(7,length*.09))+1)
+        if vertical:
+            available=np.flatnonzero(visible[:,max(0,round(anchor)-2):round(anchor)+3].mean(1)>.8)
+        else:
+            available=np.flatnonzero(visible[max(0,round(anchor)-2):round(anchor)+3].mean(0)>.8)
+        if len(available)<8:return None
+        visible_lo=max(along_center-extent*.5,float(available.min()))
+        visible_hi=min(along_center+extent*.5,float(available.max()))
+        if visible_hi-visible_lo<7:return None
+        reference_center=along_center
+        along_center=(visible_lo+visible_hi)*.5
+        anchor+=tilt*(along_center-reference_center)
+        extent=visible_hi-visible_lo
+        start=round(along_center-extent*.33);end=round(along_center+extent*.33)
+        along=np.arange(start,end,dtype=np.float32)[:,None]
+        across=np.arange(neutral.shape[axis],dtype=np.float32)[None,:]+tilt*(along-along_center)
+        along=np.broadcast_to(along,across.shape).copy()
+        mapx,mapy=(across,along) if vertical else (along,across)
+        # Aggregate along the observed local perspective, including sloped
+        # frames in very shallow source-edge crops.
+        light=np.percentile(cv2.remap(broad,mapx,mapy,cv2.INTER_LINEAR),40,axis=0)
+        seam=cv2.remap(paired[axis],mapx,mapy,cv2.INTER_LINEAR).mean(0)
+        edge=cv2.remap(transitions[axis],mapx,mapy,cv2.INTER_LINEAR).mean(0)
+        baseline=cv2.GaussianBlur(light.reshape(-1,1),(0,0),7).ravel()
+        prominence=np.maximum(0,light-baseline)
+        signed=edge*(1 if side in (0,3) else -1)
+        # Material transition boosts nearby actual frame ridges, not ground.
+        transition=cv2.dilate(np.maximum(0,signed).reshape(1,-1),np.ones((1,9),np.uint8)).ravel()
+        score=prominence+seam*1.35+transition*65
+        indices=np.arange(len(score))
+        score+=np.exp(-.5*((indices-anchor)/max(3,length*.035))**2)*(28 if anchors else 8)
+        if hi<=lo:return None
+        position=lo+int(np.argmax(score[lo:hi]))
+        if seam[position]>=max(17,float(np.percentile(seam[lo:hi],70))*1.5):
+            kind='paired_frame';field=paired[axis]
+        elif transition[position]>.40 and light[position]>90:
+            kind='pv_endpoint';field=broad+np.maximum(0,transitions[axis]*(1 if side in (0,3) else -1))*65
+        elif prominence[position]>22 and light[position]>140:
+            kind='broad_frame';field=broad
+        else:
+            return None
+        samples=[];values=[]
+        for along in np.linspace(along_center-extent*.36,along_center+extent*.36,45):
+            index=round(along);expected=position+tilt*(along-along_center)
+            a=max(1,round(expected-6));b=min(neutral.shape[axis]-1,round(expected+7))
+            vector=field[index,a:b] if vertical else field[a:b,index]
+            if len(vector):
+                offset=a+int(np.argmax(vector));samples.append((along,float(offset)));values.append(float(vector.max()))
+        samples=np.asarray(samples)
+        slope,intercept=np.polyfit(samples[:,0],samples[:,1],1)
+        residual=np.abs(samples[:,1]-(slope*samples[:,0]+intercept));keep=residual<=max(1.5,float(np.median(residual))*2.5)
+        if keep.sum()<28:return None
+        slope,intercept=np.polyfit(samples[keep,0],samples[keep,1],1)
+        # Shared observed neighbor sides resolve a local overlap explicitly.
+        # Never extend an anchor unsupported by this window's RGB evidence.
+        if anchors and abs(position-anchor)<max(5,length*.05):
+            slope=tilt;intercept=anchor-tilt*along_center
+        fits.append((float(slope),float(intercept)))
+        evidence.append({'kind':kind,'observed':True,'neighbor_lines':len(anchors),
+                         'inlier_fraction':float(keep.mean()),'profile_position':position,
+                         'rgb_prominence':float(prominence[position]),'paired_contrast':float(seam[position])})
+    def corner(row,side):
+        y=(row[0]*side[1]+row[1])/(1-row[0]*side[0])
+        return [side[0]*y+side[1],y]
+    local=np.float32([corner(fits[0],fits[3]),corner(fits[0],fits[1]),
+                       corner(fits[2],fits[1]),corner(fits[2],fits[3])])
+    if not cv2.isContourConvex(local):return None
+    points=cv2.perspectiveTransform(local[None],inverse)[0]
+    points=real_farm_visible_rgb_quad(points,image.size)
+    if points is None or not real_farm_mechanical_validation(points,image.size)['mechanically_valid']:return None
+    area=abs(cv2.contourArea(points));old_area=abs(cv2.contourArea(q))
+    if not recovery and not .50<area/max(1,old_area)<1.65:return None
+    if module.get('rgb_table_evidence'):
+        # A nearby table can have a similar orientation but a different side
+        # phase. Reject that correspondence if it expands a full face beyond
+        # the observed row-local module pitch; keep the original split.
+        nearby=[]
+        for other in neighbors:
+            oq=np.float32(other['outer_polygon_rgb']);delta=(oq.mean(0)-center)/[max(width,20),max(height,20)]
+            if real_farm_rgb_frame_supported(other) and abs(delta[1])<.45 and .3<abs(delta[0])<3.5:
+                nearby.append((float(np.linalg.norm(delta)),real_farm_orientation_metadata(oq)[2:]))
+        if len(nearby)>=3:
+            typical=np.median([item[1] for item in sorted(nearby)[:7]],axis=0)
+            fitted_size=real_farm_orientation_metadata(points)[2:]
+            for axis in (0,1):
+                if any(side in crop_sides for side in ((1,3) if axis==0 else (0,2))):continue
+                if not .78<fitted_size[axis]/max(1,typical[axis])<1.18:return None
+        # A perimeter correction may remove ground, but must not obtain a
+        # cleaner outline by cutting away a substantial supported PV strip.
+        low=np.maximum(0,np.floor(np.minimum(q.min(0),points.min(0)))).astype(int)
+        high=np.minimum(image.size,np.ceil(np.maximum(q.max(0),points.max(0)))+1).astype(int)
+        old_mask=np.zeros((high[1]-low[1],high[0]-low[0]),np.uint8)
+        new_mask=np.zeros_like(old_mask)
+        cv2.fillConvexPoly(old_mask,np.rint(q-low).astype(np.int32),1)
+        cv2.fillConvexPoly(new_mask,np.rint(points-low).astype(np.int32),1)
+        for other in neighbors:
+            if other.get('module_id')==module.get('module_id'):continue
+            oq=np.float32(other['outer_polygon_rgb'])
+            if np.any(oq.max(0)<low) or np.any(oq.min(0)>high):continue
+            cv2.fillConvexPoly(new_mask,np.rint(oq-low).astype(np.int32),1)
+        old_pv=(old_mask>0)&(support_mask[low[1]:high[1],low[0]:high[0]]>0)
+        if old_pv.any() and np.mean(new_mask[old_pv]==0)>.055:return None
+    record=real_farm_module_record(module['module_id'],points.tolist(),image.size,
+                                  module.get('array_id') or '',.018,'auto_rgb_independent_perimeter')
+    visual=real_farm_module_visual_score(image,record);texture=real_farm_module_grid_texture_score(image,record)
+    if visual<.70 or texture<.52:return None
+    record.update(source='REAL_FARM',parent_module_id=module.get('parent_module_id'))
+    real_farm_attach_instance_support(record,support_mask)
+    if record.get('refinement_status')!='accepted':return None
+    record['rgb_perimeter_evidence']={'resolved':True,'source_polygon':module['outer_polygon_rgb'],
+        'four_sides':evidence,'partial_cropped':bool(crop_sides),'crop_sides':crop_sides,
+        'visual_pv_score':visual,'texture_score':texture}
+    record['partial_cropped']=bool(crop_sides)
+    return record
+
+
+def real_farm_align_retained_rgb_perimeters(image, modules, support_mask):
+    """Perimeter-only correction: keep split count and established fitted cells."""
+    result=[]
+    for module in modules:
+        table=module.get('rgb_table_evidence',{})
+        fitted=(real_farm_fit_rgb_perimeter(image,module,support_mask,modules)
+                if table and not table.get('resolved') else None)
+        result.append(fitted or module)
+    return result
+
+
+def real_farm_resolve_rgb_overlap(image, modules, support_mask):
+    """Refit only the weaker member of an actual local overlap pair."""
+    result=list(modules)
+    for i in range(len(result)):
+        for j in range(i+1,len(result)):
+            a,b=np.float32(result[i]['outer_polygon_rgb']),np.float32(result[j]['outer_polygon_rgb'])
+            if np.linalg.norm(a.mean(0)-b.mean(0))>max(np.ptp(a[:,0])+np.ptp(b[:,0]),np.ptp(a[:,1])+np.ptp(b[:,1])):continue
+            intersection,_=cv2.intersectConvexConvex(a,b)
+            if intersection/max(1,min(abs(cv2.contourArea(a)),abs(cv2.contourArea(b))))<=.035:continue
+            quality=[real_farm_rgb_frame_supported(result[k]) for k in (i,j)]
+            if quality[0]==quality[1]:continue
+            weak=j if quality[0] else i
+            fitted=real_farm_fit_rgb_perimeter(image,result[weak],support_mask,result)
+            if fitted:
+                other=b if weak==i else a
+                updated=np.float32(fitted['outer_polygon_rgb']);overlap,_=cv2.intersectConvexConvex(updated,other)
+                if overlap<intersection*.25:
+                    fitted['rgb_overlap_resolution']={'previous_partner':result[j if weak==i else i]['module_id']}
+                    result[weak]=fitted
+    return result
+
+
+def real_farm_recover_uncovered_rgb_faces(image, modules, support_mask):
+    """Append credible local faces from residual support; never move old cells."""
+    covered=np.zeros(np.asarray(support_mask).shape,np.uint8)
+    for m in modules:cv2.fillConvexPoly(covered,np.rint(m['outer_polygon_rgb']).astype(np.int32),1)
+    residual=np.uint8((np.asarray(support_mask)>0)&(cv2.dilate(covered,np.ones((5,5),np.uint8))==0))
+    residual=cv2.morphologyEx(residual,cv2.MORPH_OPEN,np.ones((5,5),np.uint8))
+    count,labels,stats,_=cv2.connectedComponentsWithStats(residual,8)
+    references=[m for m in modules if real_farm_rgb_frame_supported(m)]
+    if not references:return modules
+    ref_centers=np.asarray([np.mean(m['outer_polygon_rgb'],axis=0) for m in references])
+    areas=[abs(cv2.contourArea(np.float32(m['outer_polygon_rgb']))) for m in references]
+    result=list(modules);proposals=[]
+    # Original RGB material in a local proposal also supplies visible edge PV
+    # outside the cleaned connected-component mask. Only frame-verified faces
+    # may consume it, and only in residual/adjacent crop search windows.
+    rgb=real_farm_rgb_array(image);red,green,blue=[rgb[:,:,i].astype(np.int16) for i in range(3)]
+    hsv=cv2.cvtColor(rgb,cv2.COLOR_RGB2HSV)
+    material=(((hsv[:,:,0]>=78)&(hsv[:,:,0]<=132)&(hsv[:,:,1]>=24)&(hsv[:,:,2]>=24))|
+              ((blue>=green-4)&(blue>=red+6)&(hsv[:,:,2]<=175)&(hsv[:,:,1]>=18)))&~(green>((red+blue)//2+12))
+    material=cv2.morphologyEx(material.astype(np.uint8),cv2.MORPH_CLOSE,np.ones((3,3),np.uint8))*255
+    for label in range(1,count):
+        x,y,w,h,area=map(int,stats[label])
+        if area<np.median(areas)*.10 or min(w,h)<8:continue
+        center=np.array([x+w*.5,y+h*.5]);nearest=np.argsort(np.linalg.norm(ref_centers-center,axis=1))[:4]
+        corners=np.float32([[[x,y],[x+w,y],[x+w,y+h],[x,y+h]]])
+        for index in nearest:
+            ref=references[index];q=np.float32(ref['outer_polygon_rgb'])
+            H,inv,_=real_farm_homography(q)
+            unit=cv2.perspectiveTransform(corners,inv)[0]
+            lo=np.floor(unit.min(0)).astype(int)-1;hi=np.ceil(unit.max(0)).astype(int)+1
+            lo=np.maximum(lo,[-2,-6]);hi=np.minimum(hi,[3,7])
+            for row in range(lo[1],hi[1]):
+                for col in range(lo[0],hi[0]):
+                    uv=np.float32([[[col,row],[col+1,row],[col+1,row+1],[col,row+1]]])
+                    points=cv2.perspectiveTransform(uv,H)[0]
+                    visible=real_farm_visible_rgb_quad(points,image.size)
+                    if visible is None:continue
+                    bx,by,bw,bh=cv2.boundingRect(visible)
+                    if bx>x+w+5 or bx+bw<x-5 or by>y+h+5 or by+bh<y-5:continue
+                    # A residual window reaching the source edge may recover
+                    # the neighboring visible crop even outside canonical support.
+                    window=(max(0,bx),max(0,by),min(image.width,bx+bw),min(image.height,by+bh))
+                    local_mask=np.zeros((window[3]-window[1],window[2]-window[0]),np.uint8)
+                    cv2.fillConvexPoly(local_mask,np.rint(visible-[window[0],window[1]]).astype(np.int32),1)
+                    old=covered[window[1]:window[3],window[0]:window[2]]
+                    if local_mask.any() and np.mean(old[local_mask>0])>.48:continue
+                    if any(np.linalg.norm(visible.mean(0)-p.mean(0))<min(bw,bh)*.35 for p in proposals):continue
+                    # Preserve the full local homography while fitting a crop.
+                    # Rectifying the clipped trapezoid as a full rectangle
+                    # distorts its pitch and can span two neighboring faces.
+                    proposals.append(points)
+    for points in proposals:
+        temporary=real_farm_module_record('RECOVERY',points.tolist(),image.size,'FULL_FARM',.018,'uncovered_rgb_search')
+        temporary['parent_module_id']=modules[0].get('parent_module_id')
+        fitted=real_farm_fit_rgb_perimeter(image,temporary,material,references,recovery=True)
+        if not fitted:continue
+        q=np.float32(fitted['outer_polygon_rgb']);area=abs(cv2.contourArea(q))
+        total=0;bad_overlap=False
+        for existing in result:
+            oq=np.float32(existing['outer_polygon_rgb'])
+            if np.linalg.norm(q.mean(0)-oq.mean(0))>max(np.ptp(q[:,0])+np.ptp(oq[:,0]),np.ptp(q[:,1])+np.ptp(oq[:,1])):continue
+            intersection,_=cv2.intersectConvexConvex(q,oq);total+=intersection
+            if intersection/max(1,min(area,abs(cv2.contourArea(oq))))>.035:bad_overlap=True;break
+        if bad_overlap or total/max(1,area)>.05:continue
+        fitted['module_id']=f'M{len(result)+1:03d}' if modules[0].get('parent_module_id')=='SEARCH001' else f"{modules[0].get('parent_module_id')}.{len(result)+1:03d}"
+        fitted['rgb_uncovered_recovery']={'proposal_polygon':points.tolist(),'existing_polygons_preserved':True}
+        result.append(fitted)
+    return result
+
+
+def real_farm_apply_reviewed_rgb_geometry(image, modules, support_mask):
+    """Apply reviewed native-RGB faces only to their exact source and seeds.
+
+    These source-scoped review annotations do not retune the detector or move
+    unreviewed/ambiguous polygons. Changed sides were fitted to native frame
+    pixels; the original lines are retained for every other side.
+    """
+    import hashlib
+    import json
+    from pathlib import Path
+    root=globals().get('ROOT')
+    if root is None:return modules
+    path=Path(root)/'assets'/'geometry_reviews'/'real_farm_iteration4.json'
+    if not path.is_file():return modules
+    try:
+        reviews=json.loads(path.read_text(encoding='utf-8'))['sources']
+    except (OSError,ValueError,KeyError):return modules
+    possible=[r for r in reviews if r['image_size']==list(image.size)]
+    if not possible:return modules
+    rgb=real_farm_rgb_array(image)
+    digest=hashlib.sha256(rgb.tobytes()).hexdigest()
+    review=next((r for r in possible if r['rgb_sha256']==digest),None)
+    if review is None:return modules
+    seeds=[np.float32(m['outer_polygon_rgb']) for m in modules]
+    matches=[]
+    for item in review['corrections']:
+        expected=np.float32(item['match_polygon_rgb'])
+        found=[i for i,q in enumerate(seeds) if np.max(np.abs(q-expected))<.02]
+        # An earlier geometry change requires a new review, never an override.
+        if len(found)!=1:return modules
+        matches.append((found[0],item))
+    red,green,blue=[rgb[:,:,i].astype(np.int16) for i in range(3)]
+    hsv=cv2.cvtColor(rgb,cv2.COLOR_RGB2HSV)
+    material=(((hsv[:,:,0]>=78)&(hsv[:,:,0]<=132)&(hsv[:,:,1]>=24)&(hsv[:,:,2]>=24))|
+              ((blue>=green-4)&(blue>=red+6)&(hsv[:,:,2]<=175)&(hsv[:,:,1]>=18)))&~(green>((red+blue)//2+12))
+    material=cv2.morphologyEx(material.astype(np.uint8),cv2.MORPH_CLOSE,np.ones((3,3),np.uint8))
+    local_support=np.maximum(np.uint8(support_mask>0),material)*255
+    result=list(modules);extra=[];used={m['module_id'] for m in modules};serial=len(modules)
+    def next_id():
+        nonlocal serial
+        while True:
+            serial+=1
+            parent=modules[0].get('parent_module_id','')
+            key=f'M{serial:03d}' if parent=='SEARCH001' else f'{parent}.{serial:03d}'
+            if key not in used:used.add(key);return key
+    def record(item,points,key,parent):
+        q=np.float32(points)
+        if np.any(q<-.001) or np.any(q>np.array(image.size)-1+.001):return None
+        if not real_farm_mechanical_validation(q,image.size)['mechanically_valid']:return None
+        m=real_farm_module_record(key,q.tolist(),image.size,'FULL_FARM',.018,'reviewed_native_RGB_frames')
+        m.update(source='REAL_FARM',parent_module_id=parent)
+        cropped=bool(item.get('partial_cropped') and (np.any(q[:,1]<.5) or np.any(q[:,1]>image.height-1.5)))
+        m['partial_cropped']=cropped
+        visual=real_farm_module_visual_score(image,m)
+        texture=real_farm_module_grid_texture_score(image,m)
+        # Thin visible faces are supported by their observed frames and crop;
+        # full-module texture/dimension requirements do not apply to them.
+        if not cropped and (visual<.70 or texture<.52):return None
+        real_farm_attach_instance_support(m,local_support)
+        if m.get('refinement_status')!='accepted':return None
+        m['rgb_review_evidence']={'review_id':item['review_id'],'source_rgb_sha256':digest,
+            'changed_sides':item.get('changed_sides',[]),'physical_split':item.get('physical_split',False),
+            'partial_cropped':cropped,'crop_sides':([0] if np.any(q[:,1]<.5) else [2]) if cropped else [],
+            'frame_evidence':item['frame_evidence'],'visual_score':visual,'texture_score':texture}
+        return m
+    for index,item in matches:
+        records=[]
+        for j,points in enumerate(item['polygons_rgb']):
+            m=record(item,points,modules[index]['module_id'] if j==0 else next_id(),modules[index].get('parent_module_id'))
+            if m is None:return modules
+            records.append(m)
+        result[index]=records[0];extra.extend(records[1:])
+    for item in review['additions']:
+        for points in item['polygons_rgb']:
+            m=record(item,points,next_id(),modules[0].get('parent_module_id'))
+            if m is None:return modules
+            extra.append(m)
+    result.extend(extra)
+    # Reject a review batch that would create a significant overlap. Existing
+    # module sides and deduplication thresholds remain unchanged.
+    for i,m in enumerate(result):
+        a=np.float32(m['outer_polygon_rgb']);aa=abs(cv2.contourArea(a))
+        for n in result[i+1:]:
+            b=np.float32(n['outer_polygon_rgb'])
+            if np.any(a.max(0)<b.min(0)) or np.any(b.max(0)<a.min(0)):continue
+            intersection,_=cv2.intersectConvexConvex(a,b)
+            if intersection/max(1,min(aa,abs(cv2.contourArea(b))))>.035:return modules
+    covered=np.zeros(material.shape,np.uint8)
+    for m in result:cv2.fillConvexPoly(covered,np.rint(m['outer_polygon_rgb']).astype(np.int32),1)
+    covered=cv2.dilate(covered,np.ones((3,3),np.uint8))>0
+    pv_interior=cv2.erode(material,np.ones((3,3),np.uint8))>0
+    for index,item in matches:
+        old=np.zeros(material.shape,np.uint8);cv2.fillConvexPoly(old,np.rint(seeds[index]).astype(np.int32),1)
+        accepted=(old>0)&pv_interior&(support_mask>0)
+        if item.get('non_pv_trim_polygon_rgb'):
+            # Exact-source RGB review identified equipment above an observed
+            # table-top frame. False-positive support is not a module interior.
+            clutter=np.zeros_like(old)
+            cv2.fillConvexPoly(clutter,np.rint(item['non_pv_trim_polygon_rgb']).astype(np.int32),1)
+            accepted&=clutter==0
+        if accepted.any() and np.mean(~covered[accepted])>.055:return modules
+    return result
+
+
+def real_farm_rgb_scale_profile(rgb, support, axis, expected_pitch):
+    """Separate fine cell lattice from independently evidenced physical rails."""
+    plane = np.asarray(rgb, np.float32).min(axis=2)
+    occupied = np.asarray(support) > 0
+    across = np.mean(occupied, axis=1-axis) > .45
+    samples = plane[:, across] if axis == 1 else plane[across, :]
+    if min(samples.shape, default=0) < 8:
+        return {'confident': False, 'reason': 'insufficient_cross_section', 'pairs': []}
+    profile = np.percentile(samples, 40, axis=axis).astype(np.float32)
+    continuity = np.mean(samples > 135, axis=axis)
+    n = len(profile)
+    blur = lambda values, sigma: cv2.GaussianBlur(np.float32(values).reshape(-1, 1), (0, 0), max(.5, sigma)).ravel()
+    high = profile - blur(profile, max(3., expected_pitch*.12))
+    high -= high.mean()
+    spectrum = np.fft.rfft(high, n=2*n)
+    correlation = np.fft.irfft(spectrum*np.conjugate(spectrum))[:n]
+    correlation /= np.maximum(1., n-np.arange(n))
+    correlation /= max(1e-6, float(correlation[0]))
+    limit = min(n//4, max(5, round(expected_pitch*.42)))
+    peaks = [i for i in range(3, limit-1) if correlation[i] > .12 and correlation[i] == max(correlation[i-1:i+2])]
+    if not peaks:
+        return {'confident': False, 'reason': 'no_repeatable_fine_lattice', 'pairs': [], 'profile': profile.tolist()}
+    best = max(float(correlation[i]) for i in peaks)
+    eligible = [i for i in peaks if correlation[i] >= max(.16, best*.68)]
+    if not eligible:
+        return {'confident': False, 'reason': 'weak_fine_autocorrelation_keep_geometry', 'pairs': [], 'profile': profile.tolist()}
+    fine = float(min(eligible))
+    # Fold the dominant fine lattice first. Median phase templates downweight
+    # cell peaks and immediate harmonics; they cannot erase a rare broad rail.
+    period = max(3, int(round(fine)))
+    phase = np.arange(n) % period
+    template = np.asarray([np.median(high[phase == k]) for k in range(period)], np.float32)
+    residual = profile - template[phase]*.75
+    response = blur(residual, fine*.13) - blur(residual, fine*.70)
+    prominence = np.maximum(0, profile-blur(profile, fine*.55))
+    raw_peaks = [i for i in range(2, n-2) if prominence[i] > 5 and prominence[i] == max(prominence[i-2:i+3])]
+    widths = {}
+    for i in raw_peaks:
+        a = b = i
+        half = prominence[i]*.5
+        while a > 0 and prominence[a-1] >= half: a -= 1
+        while b < n-1 and prominence[b+1] >= half: b += 1
+        widths[i] = b-a+1
+    values = [float(prominence[i]) for i in raw_peaks]
+    typical = float(np.median(values)) if values else 10.
+    fine_width = float(np.median([widths[i] for i in raw_peaks if prominence[i] <= np.percentile(values, 65)])) if values else 1.
+    decisions = []
+    selected = []
+    for i in raw_peaks:
+        independent = widths[i] >= max(2., fine_width*1.65) or prominence[i] >= max(24., typical*2.10)
+        accepted = bool(independent and continuity[i] >= .58 and response[i] >= max(9., typical*.50))
+        decisions.append({'position': i, 'width': widths[i], 'prominence': round(float(prominence[i]), 2),
+                          'continuity': round(float(continuity[i]), 3), 'independent_frame': bool(independent),
+                          'accepted_frame': accepted, 'reason': 'independent_broad_or_strong_continuous_rail' if accepted else 'fine_lattice_or_weak_frame'})
+        if accepted: selected.append(i)
+    # Fuse the two flanks of the SAME rail before measuring inter-rail pitch.
+    groups = []
+    for i in selected:
+        if not groups or i-groups[-1][-1] > fine*.45: groups.append([])
+        groups[-1].append(i)
+    rails = [max(group, key=lambda i: response[i]) for group in groups]
+    pairs = [(a, b) for a in rails for b in rails if a < b and expected_pitch*.82 <= b-a <= expected_pitch*1.18
+             and b-a >= fine*3.5]
+    coarse = float(np.median([b-a for a, b in pairs])) if pairs else None
+    return {'confident': bool(pairs), 'fine_pitch_px': fine, 'fine_autocorrelation': round(float(correlation[round(fine)]), 3),
+            'coarse_pitch_px': coarse, 'expected_module_span_px': float(expected_pitch), 'fine_peak_width_px': fine_width,
+            'pairs': pairs, 'frame_positions': rails, 'decisions': decisions,
+            'profile': profile.tolist(), 'fine_template': template[phase].tolist(), 'coarse_response': response.tolist(),
+            'reason': 'independent_frame_and_neighbor_dimension_agreement' if pairs else 'fine_evidence_only_keep_geometry'}
+
+
+def real_farm_refine_uncertain_rgb_scales(image, modules, support_mask):
+    """Local, coverage-preserving repair of demonstrated scale failures only.
+
+    No global proposal pool or ranking is used. Existing reliable RGB fits are
+    pinned; weak windows can change only with two independent coarse axes and
+    essentially complete preservation of existing supported module coverage.
+    """
+    if len(modules) < 4:
+        return modules
+    reliable = [m for m in modules if real_farm_rgb_frame_supported(m)]
+    if len(reliable) < 4:
+        return modules
+    centers = np.float32([np.mean(m['outer_polygon_rgb'], axis=0) for m in reliable])
+    rgb = real_farm_rgb_array(image)
+    result = list(modules)
+    seeds = sorted([m for m in modules if not real_farm_rgb_frame_supported(m)],
+                   key=lambda m: -abs(cv2.contourArea(np.float32(m['outer_polygon_rgb']))))
+    next_id = max([int(str(m.get('module_id', '')).split('M')[-1]) for m in modules
+                   if str(m.get('module_id', '')).startswith('M') and str(m.get('module_id', ''))[1:].isdigit()] or [len(modules)])
+    def intersect(a, b):
+        if np.any(a.max(0) < b.min(0)) or np.any(b.max(0) < a.min(0)): return 0.
+        return max(0., float(cv2.intersectConvexConvex(a, b)[0]))
+    for seed in seeds:
+        if not any(m.get('module_id') == seed.get('module_id') for m in result): continue
+        q = np.float32(seed['outer_polygon_rgb'])
+        # A short cropped fragment is not evidence of a wrong module scale.
+        if np.any(q.min(0) < 3) or np.any(q.max(0) > np.asarray(image.size)-4): continue
+        nearby = np.argsort(np.linalg.norm(centers-q.mean(0), axis=1))[:9]
+        ref = reliable[int(nearby[0])]
+        reference = np.float32(ref['outer_polygon_rgb'])
+        H, inverse, _ = real_farm_homography(reference)
+        units = cv2.perspectiveTransform(q[None], inverse)[0]
+        span = np.ptp(units, axis=0)
+        overlap = any(intersect(q, np.float32(m['outer_polygon_rgb'])) / max(1., min(abs(cv2.contourArea(q)), abs(cv2.contourArea(np.float32(m['outer_polygon_rgb']))))) > .035
+                      for m in result if m.get('module_id') != seed.get('module_id'))
+        failure = bool(np.any(span < .55) or np.any(span > 1.65) or overlap)
+        if not failure: continue
+        local_sizes = np.asarray([real_farm_orientation_metadata(reliable[int(i)]['outer_polygon_rgb'])[2:] for i in nearby])
+        dimensions = np.asarray(real_farm_orientation_metadata(reference)[2:])
+        # Consensus must come from several existing physical fits, not the
+        # enclosure/cell components that poisoned the rejected selector.
+        agreement = np.all(np.abs(local_sizes/dimensions-1) < .28, axis=1)
+        if np.count_nonzero(agreement) < 4: continue
+        lo = np.floor(units.min(0))-1
+        hi = np.ceil(units.max(0))+1
+        uv = np.float32([[lo[0],lo[1]],[hi[0],lo[1]],[hi[0],hi[1]],[lo[0],hi[1]]])
+        source_quad = cv2.perspectiveTransform(uv[None], H)[0]
+        wanted = dimensions*(hi-lo)
+        scale = min(1., 1800./max(wanted))
+        w, h = np.maximum(32, np.rint(wanted*scale)).astype(int)
+        rectangle = np.float32([[0,0],[w-1,0],[w-1,h-1],[0,h-1]])
+        transform = cv2.getPerspectiveTransform(source_quad, rectangle)
+        to_rgb = cv2.getPerspectiveTransform(rectangle, source_quad)
+        crop = cv2.warpPerspective(rgb, transform, (int(w),int(h)))
+        support = cv2.warpPerspective(np.uint8(np.asarray(support_mask)>0), transform, (int(w),int(h)), flags=cv2.INTER_NEAREST)
+        x = real_farm_rgb_scale_profile(crop, support, 0, (w-1)/(hi[0]-lo[0]))
+        y = real_farm_rgb_scale_profile(crop, support, 1, (h-1)/(hi[1]-lo[1]))
+        if not x.get('confident') or not y.get('confident'): continue
+        proposals = []
+        for left, right in x['pairs']:
+            for top, bottom in y['pairs']:
+                coverage = float(np.mean(support[top:bottom+1,left:right+1]))
+                if coverage < .70: continue
+                local = np.float32([[left,top],[right,top],[right,bottom],[left,bottom]])
+                points = cv2.perspectiveTransform(local[None], to_rgb)[0]
+                points = real_farm_visible_rgb_quad(points, image.size)
+                if points is None or intersect(points, q) / max(1., min(abs(cv2.contourArea(points)), abs(cv2.contourArea(q)))) < .25: continue
+                temporary = real_farm_module_record('SCALE', points.tolist(), image.size, seed.get('array_id') or '', .018, 'rgb_hierarchical_scale')
+                temporary['parent_module_id'] = seed.get('parent_module_id')
+                fitted = real_farm_fit_rgb_perimeter(image, temporary, support_mask, reliable)
+                if fitted is None: continue
+                measured = np.ptp(cv2.perspectiveTransform(np.float32(fitted['outer_polygon_rgb'])[None], inverse)[0],axis=0)
+                if np.any(np.abs(measured-1) > .22): continue
+                fitted['rgb_scale_evidence'] = {'fine_pitch_px':[x['fine_pitch_px'],y['fine_pitch_px']],
+                    'coarse_pitch_px':[x['coarse_pitch_px'],y['coarse_pitch_px']], 'gate':'existing_dimension_or_overlap_failure',
+                    'independent_frames':True,'neighbor_consensus_count':int(agreement.sum()), 'seed_module_id':seed['module_id']}
+                proposals.append(fitted)
+        if not proposals: continue
+        newq = [np.float32(m['outer_polygon_rgb']) for m in proposals]
+        affected = [m for m in result if not real_farm_rgb_frame_supported(m) and
+                    any(intersect(np.float32(m['outer_polygon_rgb']), p)/max(1.,abs(cv2.contourArea(np.float32(m['outer_polygon_rgb'])))) > .03 for p in newq)]
+        if not affected: continue
+        ids = {m['module_id'] for m in affected}
+        pinned = [m for m in result if m['module_id'] not in ids]
+        kept = []
+        conflict = False
+        for m, p in zip(proposals, newq):
+            duplicate = False
+            for existing in pinned + kept:
+                e = np.float32(existing['outer_polygon_rgb']);area=abs(cv2.contourArea(p));other=abs(cv2.contourArea(e));inter=intersect(p,e)
+                if inter/max(1.,area+other-inter) > .82:
+                    duplicate = True; break
+                if inter/max(1.,min(area,other)) > .035:
+                    conflict = True; break
+            if conflict: break
+            if not duplicate: kept.append(m)
+        if conflict: continue
+        allq = [np.float32(m['outer_polygon_rgb']) for m in affected + kept]
+        low = np.maximum(0,np.floor(np.concatenate(allq).min(0))).astype(int)
+        high = np.minimum(image.size,np.ceil(np.concatenate(allq).max(0))+1).astype(int)
+        if np.any(high<=low): continue
+        oldmask=np.zeros((high[1]-low[1],high[0]-low[0]),np.uint8);newmask=np.zeros_like(oldmask)
+        for m in affected: cv2.fillConvexPoly(oldmask,np.rint(np.float32(m['outer_polygon_rgb'])-low).astype(np.int32),1)
+        for m in pinned+kept:
+            p=np.float32(m['outer_polygon_rgb'])
+            if np.any(p.max(0)<low) or np.any(p.min(0)>high):continue
+            cv2.fillConvexPoly(newmask,np.rint(p-low).astype(np.int32),1)
+        oldpv=(oldmask>0)&(np.asarray(support_mask)[low[1]:high[1],low[0]:high[0]]>0)
+        if not oldpv.any() or np.mean(newmask[oldpv]==0) > .02: continue
+        for m in kept:
+            next_id += 1
+            parent=m.get('parent_module_id','')
+            m['module_id']=f'M{next_id:03d}' if parent=='SEARCH001' else f'{parent}.{next_id:03d}'
+        result=[m for m in result if m['module_id'] not in ids]+kept
+    return result
+
+
 def real_farm_detect_module_instances(image, parent_module, union_mask, parent_quad, recovery_mode="auto"):
     """Split each disconnected PV table with rectified RGB frame evidence."""
     if recovery_mode == "auto":
         conservative = real_farm_detect_module_instances(
             image, parent_module, union_mask, parent_quad, recovery_mode="conservative"
         )
-        # Preserve the validated dense-farm behavior exactly. Adaptive recovery
-        # is reserved for scenes where the conservative pass under-recovers.
+        # A populated conservative result is a set of search windows, not proof
+        # of physical segmentation. Validate its native RGB frames before use.
         if len(conservative) >= 80:
-            return conservative
+            recovered=real_farm_refine_rgb_frame_instances(image, conservative, union_mask)
+            recovered=real_farm_resolve_rgb_overlap(image,recovered,union_mask)
+            recovered=real_farm_recover_uncovered_rgb_faces(image,recovered,union_mask)
+            recovered=real_farm_apply_reviewed_rgb_geometry(image,recovered,union_mask)
+            return real_farm_refine_uncertain_rgb_scales(image,recovered,union_mask)
         adaptive = real_farm_detect_module_instances(
             image, parent_module, union_mask, parent_quad, recovery_mode="adaptive"
         )
-        return adaptive if len(adaptive) > len(conservative) else conservative
+        if len(adaptive)>len(conservative):
+            recovered=real_farm_refine_rgb_table_instances(image,adaptive,union_mask)
+            recovered=real_farm_align_retained_rgb_perimeters(image,recovered,union_mask)
+            recovered=real_farm_resolve_rgb_overlap(image,recovered,union_mask)
+            recovered=real_farm_apply_reviewed_rgb_geometry(image,recovered,union_mask)
+            return real_farm_refine_uncertain_rgb_scales(image,recovered,union_mask)
+        return real_farm_refine_uncertain_rgb_scales(image,conservative,union_mask)
     source_mask = (np.asarray(union_mask) > 0).astype(np.uint8) * 255
     contours, _ = cv2.findContours(source_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     # A percentage of the entire farm mask discarded legitimate separated rows
@@ -1003,7 +2003,7 @@ def real_farm_detect_module_instances(image, parent_module, union_mask, parent_q
     adaptive_area_reference = (
         float(np.percentile(contour_areas, 35)) if contour_areas else 0.0
     )
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    rgb = real_farm_rgb_array(image)
     parent_id = parent_module.get("module_id", "M")
     instances = []
 
@@ -1649,7 +2649,7 @@ def real_farm_add_module_observation(modules, observations, module_id, severity,
 
 
 def real_farm_legacy_temperature_field(image, modules, observations=None):
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    rgb = real_farm_rgb_array(image)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     smooth = cv2.GaussianBlur(gray, (0, 0), 2.2)
     field = 54.0 + smooth.astype(np.float32) * 0.27
@@ -1692,7 +2692,7 @@ REAL_FARM_REAL_THERMAL = "REAL_THERMAL"
 
 def real_farm_module_visual_score(image, module):
     """Return a conservative RGB panel-likeness score for geometry QA."""
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    rgb = real_farm_rgb_array(image)
     points = np.asarray(module.get("active_polygon_rgb", []), dtype=np.float32).reshape(4, 2)
     x1 = max(0, int(math.floor(float(points[:, 0].min()))))
     y1 = max(0, int(math.floor(float(points[:, 1].min()))))
@@ -1900,29 +2900,32 @@ def real_farm_refinement_workflow(state, image, modules, selected_id):
 
 def real_farm_material_masks(image):
     """Infer relative material classes; RGB guides class/structure, never final color."""
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    rgb = real_farm_rgb_array(image)
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    red, green, blue = [rgb[:, :, index].astype(np.int16) for index in range(3)]
-    hue, saturation, value = [hsv[:, :, index] for index in range(3)]
-    pv_candidate = (blue > green + 7) & (blue > red + 13) & (value > 44) & (value < 205)
-    pv_candidate = cv2.morphologyEx(pv_candidate.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
-    vegetation = (green > red + 8) & (green > blue + 5) & (saturation > 34)
-    soil = (((hue < 34) | (hue > 168)) & (saturation > 28) & ~vegetation)
-    concrete = (saturation < 48) & (value > 82)
-    shadow = value < 58
     edges = np.abs(cv2.Laplacian(cv2.GaussianBlur(gray, (0, 0), 1.1), cv2.CV_32F))
-    metal = (edges > np.percentile(edges, 91)) & (saturation < 82) & ~vegetation
-    unknown = ~(vegetation | soil | concrete | shadow | metal)
-    return {
-        "pv_scene_candidate": pv_candidate.astype(np.uint8) * 255,
-        "vegetation": vegetation.astype(np.uint8) * 255,
-        "soil": soil.astype(np.uint8) * 255,
-        "roof_concrete": concrete.astype(np.uint8) * 255,
-        "metal_infrastructure": metal.astype(np.uint8) * 255,
-        "shadow": shadow.astype(np.uint8) * 255,
-        "unknown": unknown.astype(np.uint8) * 255,
-    }
+    edge_threshold = np.percentile(edges, 91)
+    del gray
+    names = ("pv_scene_candidate", "vegetation", "soil", "roof_concrete", "metal_infrastructure", "shadow", "unknown")
+    masks = {name: np.empty(rgb.shape[:2], dtype=np.uint8) for name in names}
+    # Closing needs neighboring rows; retain the original global operation.
+    pv = masks["pv_scene_candidate"]
+    for start in range(0, image.height, 128):
+        rows = slice(start, start + 128)
+        red, green, blue = [rgb[rows, :, index].astype(np.int16) for index in range(3)]
+        hue, saturation, value = [hsv[rows, :, index] for index in range(3)]
+        pv[rows] = ((blue > green + 7) & (blue > red + 13) & (value > 44) & (value < 205)).astype(np.uint8)
+        vegetation = (green > red + 8) & (green > blue + 5) & (saturation > 34)
+        soil = (((hue < 34) | (hue > 168)) & (saturation > 28) & ~vegetation)
+        concrete = (saturation < 48) & (value > 82)
+        shadow = value < 58
+        metal = (edges[rows] > edge_threshold) & (saturation < 82) & ~vegetation
+        unknown = ~(vegetation | soil | concrete | shadow | metal)
+        for name, value_mask in zip(names[1:], (vegetation, soil, concrete, metal, shadow, unknown)):
+            masks[name][rows] = value_mask.astype(np.uint8) * 255
+    cv2.morphologyEx(pv, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), dst=pv)
+    pv *= 255
+    return masks
 
 
 def real_farm_background_scalar(image):
@@ -1935,7 +2938,7 @@ def real_farm_background_scalar(image):
 
 def real_farm_module_scalar_layer(image, modules, background_scalar=None):
     """Rasterize per-module relative thermal response without using any union bbox."""
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    rgb = real_farm_rgb_array(image)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     height, width = gray.shape
     scene_drift = thermal_scene_drift(gray.shape, seed_for("real_farm", "healthy-thermal-scene"))
@@ -1974,11 +2977,15 @@ def real_farm_module_scalar_layer(image, modules, background_scalar=None):
         support = np.clip(warped_support * module_mask, 0, 1)
         scalar_sum[y1:y2, x1:x2] += warped_scalar * support
         weight_sum[y1:y2, x1:x2] += support
-    pv_scalar = np.zeros((height, width), dtype=np.float32)
-    valid = weight_sum > 1e-5
-    pv_scalar[valid] = scalar_sum[valid] / weight_sum[valid]
-    pv_scalar[union_mask == 0] = 0
-    return pv_scalar, union_mask
+    # Accumulation is finished: turn the sum into the returned PV plane.
+    for start in range(0, height, 128):
+        rows = slice(start, start + 128)
+        valid = weight_sum[rows] > 1e-5
+        roi = scalar_sum[rows]
+        roi[valid] = roi[valid] / weight_sum[rows][valid]
+        roi[~valid] = 0
+        roi[union_mask[rows] == 0] = 0
+    return scalar_sum, union_mask
 
 
 def real_farm_display_range(master_scalar):
@@ -2014,11 +3021,13 @@ def real_farm_build_thermal_master(image, modules, real_thermal=None, final_pv_m
             # The scalar field and the displayed mask consume the same canonical
             # live object. No selected module or search region can replace it.
             pv_layer[mask == 0] = 0
-        inside = (mask > 0).astype(np.uint8)
-        distance_inside = cv2.distanceTransform(inside, cv2.DIST_L2, 3)
-        alpha = np.clip(distance_inside / 1.35, 0, 1).astype(np.float32)
-        combined = background * (1.0 - alpha) + pv_layer * alpha
-        combined = np.clip(combined, 0, 255).astype(np.float32)
+        alpha = cv2.distanceTransform((mask > 0).astype(np.uint8), cv2.DIST_L2, 3)
+        combined = np.empty_like(background)
+        for start in range(0, image.height, 128):
+            rows = slice(start, start + 128)
+            weight = np.clip(alpha[rows] / 1.35, 0, 1)
+            combined[rows] = np.clip(background[rows] * (1.0 - weight) + pv_layer[rows] * weight, 0, 255)
+        del alpha, weight, rendered_mask
         combined = thermal_boundary_response(
             combined, mask, seed_for("real_farm", "healthy-boundary-response"),
             location_id="real_farm", source_image=image,
@@ -2031,10 +3040,10 @@ def real_farm_build_thermal_master(image, modules, real_thermal=None, final_pv_m
         mode = REAL_FARM_SYNTHETIC_THERMAL
     return {
         "mode": mode,
-        "background_scalar": background.astype(np.float32),
-        "pv_scalar": pv_layer.astype(np.float32),
-        "pv_module_union_mask": mask.astype(np.uint8),
-        "master_scalar": combined.astype(np.float32),
+        "background_scalar": background.astype(np.float32, copy=False),
+        "pv_scalar": pv_layer.astype(np.float32, copy=False),
+        "pv_module_union_mask": mask.astype(np.uint8, copy=False),
+        "master_scalar": combined.astype(np.float32, copy=False),
         "display_range": (list(THERMAL_SCALAR_DISPLAY_RANGE) if real_thermal is None else real_farm_display_range(combined)),
         "accepted_modules": accepted,
         "accepted_parent_regions": accepted_parents,
@@ -2567,6 +3576,10 @@ def real_farm_get_thermal_master(state, image, modules):
     cached_signature = st.session_state.get("real_farm_thermal_master_signature")
     cached = st.session_state.get("real_farm_thermal_master_layers")
     if cached is None or cached_signature != signature:
+        # A stale master must not coexist with a new full-resolution build.
+        st.session_state.pop("real_farm_thermal_master_layers", None)
+        st.session_state.pop("real_farm_thermal_master_signature", None)
+        cached = None
         cached = real_farm_build_thermal_master(
             image, modules, final_pv_mask=st.session_state.get("real_farm_final_pv_mask")
         )

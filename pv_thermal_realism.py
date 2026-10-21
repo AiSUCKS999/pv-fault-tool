@@ -27,7 +27,7 @@ def thermal_coherent_field(shape, seed, grid=(7, 9)):
                              borderType=cv2.BORDER_REFLECT_101)
     field -= float(field.mean())
     field /= max(1e-6, float(field.std()))
-    return cv2.resize(field, (width, height), interpolation=cv2.INTER_CUBIC).astype(np.float32)
+    return cv2.resize(field, (width, height), interpolation=cv2.INTER_CUBIC)
 
 
 def thermal_scene_drift(shape, seed):
@@ -37,7 +37,10 @@ def thermal_scene_drift(shape, seed):
     local = thermal_coherent_field(shape, seed_for(seed, "ventilation"), (18, 24))
     x = np.linspace(-1, 1, width, dtype=np.float32)[None, :]
     y = np.linspace(-1, 1, height, dtype=np.float32)[:, None]
-    return (broad * 1.5 + local * 2.8 + x * 4.0 - y * 2.5).astype(np.float32)
+    for start in range(0, height, 128):
+        rows = slice(start, start + 128)
+        broad[rows] = broad[rows] * 1.5 + local[rows] * 2.8 + x * 4.0 - y[rows] * 2.5
+    return broad
 
 
 def thermal_surface_microtexture(shape, seed):
@@ -75,7 +78,7 @@ def thermal_background_realism(base, image, location_id, material_masks=None):
             np.empty((size[1], size[0]), np.float32), image.resize(size), location_id, masks
         )
         return cv2.resize(small, (width, height), interpolation=cv2.INTER_CUBIC)
-    rgb = np.asarray(image.convert("RGB").resize((width, height)), dtype=np.uint8)
+    rgb = np.asarray((image if image.mode == "RGB" else image.convert("RGB")).resize((width, height)), dtype=np.uint8)
     red, green, blue = [rgb[:, :, i].astype(np.float32) for i in range(3)]
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     scale = max(1.0, max(height, width) / 1600.0)
@@ -155,7 +158,7 @@ def thermal_refine_background_materials(scalar, image, location_id, module_geome
     height, width = source.shape
     ratio = min(1.0, 1600.0 / max(height, width))
     size = (max(16, int(round(width * ratio))), max(16, int(round(height * ratio))))
-    rgb = np.asarray(image.convert("RGB").resize(size), np.uint8)
+    rgb = np.asarray((image if image.mode == "RGB" else image.convert("RGB")).resize(size), np.uint8)
     red, green, blue = [rgb[:, :, i].astype(np.float32) for i in range(3)]
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     smooth = cv2.GaussianBlur(gray, (0, 0), 1.0)
@@ -201,7 +204,10 @@ def thermal_refine_background_materials(scalar, image, location_id, module_geome
         # target is involved in this bounded structural correction.
         shadow = np.clip((0.23 - smooth / 255.0) / 0.18, 0, 1)
         delta = 22.0 * np.tanh(delta / 22.0) * (1 - shadow * 0.85)
-    delta = cv2.resize(delta.astype(np.float32), (width, height), interpolation=cv2.INTER_CUBIC)
+    # Release bounded material-analysis planes before allocating native fields.
+    del rgb, red, green, blue, gray, smooth, medium, detail, exposure
+    del fine, broad, micro, vegetation, cooling, land_noise
+    delta = cv2.resize(delta.astype(np.float32, copy=False), (width, height), interpolation=cv2.INTER_CUBIC)
     support = np.zeros(source.shape, np.uint8)
     for geometry in module_geometries if module_geometries is not None else []:
         points = np.asarray(geometry, np.float32)
@@ -210,11 +216,14 @@ def thermal_refine_background_materials(scalar, image, location_id, module_geome
     distance = cv2.distanceTransform(1 - support, cv2.DIST_L2, 3)
     pixel_scale = max(1.0, max(height, width) / 2400.0)
     guard = max(26.0, 32.0 * pixel_scale) if location_id == "real_farm" else max(28.0, max(height, width) / 48.0)
-    blend = np.clip((distance - guard) / max(12.0, guard * 0.5), 0, 1)
-    blend = blend * blend * (3.0 - 2.0 * blend)
     result = source.copy()
-    editable = blend > 0
-    result[editable] = np.clip(source[editable] + delta[editable] * blend[editable], 0, 255)
+    for start in range(0, height, 128):
+        rows = slice(start, start + 128)
+        blend = np.clip((distance[rows] - guard) / max(12.0, guard * 0.5), 0, 1)
+        blend = blend * blend * (3.0 - 2.0 * blend)
+        editable = blend > 0
+        roi = result[rows]
+        roi[editable] = np.clip(source[rows][editable] + delta[rows][editable] * blend[editable], 0, 255)
     return result
 
 
@@ -373,7 +382,7 @@ def thermal_elevation_response(scalar, support_mask, seed, location_id=None, geo
 
     rgb = None
     if source_image is not None:
-        rgb = np.asarray(source_image.convert("RGB").resize(size), np.float32)
+        rgb = np.asarray((source_image if source_image.mode == "RGB" else source_image.convert("RGB")).resize(size), np.float32)
     # One synthetic illumination direction per Generated scene, independent of
     # module rotation/selection. For Real Farm, use original RGB shade evidence
     # outside the tables, not the desired PV/background temperature contrast.
@@ -451,7 +460,11 @@ def thermal_elevation_response(scalar, support_mask, seed, location_id=None, geo
         shade_fraction, ambient = 0.10, 77.0
     cooling = np.clip(coverage, 0, 1) * np.maximum(surface - ambient, 0) * shade_fraction * outside
     cooling = cv2.resize(cooling, (w, h), interpolation=cv2.INTER_LINEAR)
-    return (scalar - cooling * (support_mask == 0)).astype(np.float32)
+    result = np.empty_like(scalar, dtype=np.float32)
+    for start in range(0, h, 128):
+        rows = slice(start, start + 128)
+        result[rows] = scalar[rows] - cooling[rows] * (support_mask[rows] == 0)
+    return result
 
 
 def thermal_module_frame_continuity(scalar, support_mask, geometries, seed=None):
@@ -549,17 +562,33 @@ def thermal_boundary_response(scalar, support_mask, seed, location_id=None, geom
     scale = max(0.8, max(h, w) / 2100.0)
     distance = cv2.distanceTransform(inside, cv2.DIST_L2, 3)
     distance += cv2.distanceTransform(1 - inside, cv2.DIST_L2, 3)
-    uneven = thermal_coherent_field(scalar.shape, seed_for(seed, "boundary-transfer"), (65, 90))
     fine = thermal_coherent_field(scalar.shape, seed_for(seed, "boundary-local-transfer"), (110, 150))
-    band = np.exp(-distance / (1.7 * scale * np.clip(1 + fine * 0.25, 0.55, 1.65)))
+    # The distance plane becomes the band; row expressions preserve float32
+    # operation order without allocating several more native-size planes.
+    band = distance
+    for start in range(0, h, 128):
+        rows = slice(start, start + 128)
+        band[rows] = np.exp(-band[rows] / (1.7 * scale * np.clip(1 + fine[rows] * 0.25, 0.55, 1.65)))
+    uneven = thermal_coherent_field(scalar.shape, seed_for(seed, "boundary-transfer"), (65, 90))
     pv_weight = cv2.GaussianBlur(inside.astype(np.float32), (0, 0), 2.2 * scale)
-    pv_average = cv2.GaussianBlur(scalar * inside, (0, 0), 2.2 * scale) / np.maximum(pv_weight, 0.02)
-    relaxation = np.clip(0.22 + uneven * 0.16 + fine * 0.12, 0.0, 0.55) * band * np.clip(pv_weight * 3, 0, 1)
-    out = scalar + np.clip(pv_average - scalar, 0, 48) * relaxation
+    out = np.empty_like(scalar)
+    np.multiply(scalar, inside, out=out)
+    cv2.GaussianBlur(out, (0, 0), 2.2 * scale, dst=out)
+    for start in range(0, h, 128):
+        rows = slice(start, start + 128)
+        pv_average = out[rows] / np.maximum(pv_weight[rows], 0.02)
+        relaxation = np.clip(0.22 + uneven[rows] * 0.16 + fine[rows] * 0.12, 0.0, 0.55) * band[rows] * np.clip(pv_weight[rows] * 3, 0, 1)
+        out[rows] = scalar[rows] + np.clip(pv_average - scalar[rows], 0, 48) * relaxation
+        band[rows] *= np.clip(0.30 + uneven[rows] * 0.09 + fine[rows] * 0.13, 0.04, 0.65)
+    del distance, uneven, fine, pv_weight, pv_average, relaxation, inside
     softened = cv2.GaussianBlur(out, (0, 0), 1.05 * scale)
-    mix = band * np.clip(0.30 + uneven * 0.09 + fine * 0.13, 0.04, 0.65)
-    healthy = (out * (1 - mix) + softened * mix).astype(np.float32)
-    healthy = thermal_elevation_response(healthy, support_mask, seed, location_id, geometries, source_image)
+    for start in range(0, h, 128):
+        rows = slice(start, start + 128)
+        mix = band[rows]
+        out[rows] = out[rows] * (1 - mix) + softened[rows] * mix
+    del softened, band, mix
+    healthy = thermal_elevation_response(out, support_mask, seed, location_id, geometries, source_image)
+    del out
     return thermal_module_frame_continuity(
         healthy, support_mask, module_geometries if module_geometries is not None else geometries
     )

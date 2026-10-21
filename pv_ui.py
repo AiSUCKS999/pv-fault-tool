@@ -2079,14 +2079,16 @@ def thermal_display_rgb_from_scalar(temp, location_id, scene_distance="far", dis
     low, high = (float(v) for v in calibration)
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
         raise ValueError("Invalid thermal display calibration")
-    dither = np.random.default_rng(seed_for(location_id, "thermal-dither", scene_distance)).uniform(
-        -0.45,
-        0.45,
-        temp.shape,
-    ).astype(np.float32)
-    temp_u8 = np.clip((temp + dither - low) / max(1.0, high - low) * 255.0, 0, 255).astype(np.uint8)
+    rng = np.random.default_rng(seed_for(location_id, "thermal-dither", scene_distance))
     lut = np.array(thermal_lut(), dtype=np.uint8)
-    return Image.fromarray(lut[temp_u8])
+    rgb = np.empty((*temp.shape, 3), dtype=np.uint8)
+    for start in range(0, temp.shape[0], 128):
+        rows = slice(start, start + 128)
+        # Sequential row draws retain the original scene-space RNG stream.
+        dither = rng.uniform(-0.45, 0.45, temp[rows].shape).astype(np.float32)
+        temp_u8 = np.clip((temp[rows] + dither - low) / max(1.0, high - low) * 255.0, 0, 255).astype(np.uint8)
+        rgb[rows] = lut[temp_u8]
+    return Image.fromarray(rgb)
 
 
 def scalar_debug_image(field, mode="thermal", location_id="debug"):

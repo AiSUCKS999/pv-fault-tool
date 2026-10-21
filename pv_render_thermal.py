@@ -1589,17 +1589,23 @@ def apply_sensor_model(temp, location_id, scene_distance="close"):
     rng = np.random.default_rng(seed_for(location_id, "sensor-model", scene_distance))
 
     pixel_scale = max(1.0, max(h, w) / 2400.0)
-    core = cv2.GaussianBlur(temp.astype(np.float32), (0, 0), max(sensor_blur, 0.72 * pixel_scale))
-    halo = cv2.GaussianBlur(temp.astype(np.float32), (0, 0), 1.8 * pixel_scale)
+    source = np.asarray(temp, dtype=np.float32)
+    core = cv2.GaussianBlur(source, (0, 0), max(sensor_blur, 0.72 * pixel_scale))
+    halo = cv2.GaussianBlur(source, (0, 0), 1.8 * pixel_scale)
     psf_variation = thermal_coherent_field(temp.shape, seed_for(location_id, "optical-response"), (24, 32))
-    halo_weight = np.clip(0.22 + psf_variation * 0.06, 0.10, 0.36)
-    out = core * (1 - halo_weight) + halo * halo_weight
+    out = core
+    for start in range(0, h, 128):
+        rows = slice(start, start + 128)
+        halo_weight = np.clip(0.22 + psf_variation[rows] * 0.06, 0.10, 0.36)
+        out[rows] = core[rows] * (1 - halo_weight) + halo[rows] * halo_weight
+    del halo, psf_variation, halo_weight
 
     small = cv2.resize(
         out,
         (max(8, int(round(w * sensor_scale))), max(8, int(round(h * sensor_scale)))),
         interpolation=cv2.INTER_AREA,
     )
+    del out, core
     sh, sw = small.shape
     # A detector lattice establishes correlation in source-scene coordinates;
     # its texture remains observable when a native scene is shown as a crop.
@@ -1619,13 +1625,17 @@ def apply_sensor_model(temp, location_id, scene_distance="close"):
     small += rng.normal(0, 0.16 * detail_strength, (1, sw)).astype(np.float32)
     small += rng.normal(0, 0.12 * detail_strength, (sh, 1)).astype(np.float32)
 
+    del detector, local_mean, contrast
     out = cv2.resize(small, (w, h), interpolation=cv2.INTER_CUBIC)
-
-    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    r2 = ((xx - w / 2.0) / max(1.0, w / 2.0)) ** 2 + ((yy - h / 2.0) / max(1.0, h / 2.0)) ** 2
-    out = out - r2 * (0.6 + 0.3 * detail_strength)
-
-    return np.clip(out, 0, 255)
+    del small
+    xx = np.arange(w, dtype=np.float32)[None, :]
+    yy = np.arange(h, dtype=np.float32)[:, None]
+    for start in range(0, h, 128):
+        rows = slice(start, start + 128)
+        r2 = ((xx - w / 2.0) / max(1.0, w / 2.0)) ** 2 + ((yy[rows] - h / 2.0) / max(1.0, h / 2.0)) ** 2
+        out[rows] = out[rows] - r2 * (0.6 + 0.3 * detail_strength)
+    np.clip(out, 0, 255, out=out)
+    return out
 
 
 def thermalize(
