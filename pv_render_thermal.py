@@ -138,6 +138,7 @@ def production_hotspot_residuals():
                 "duplicate_family_id": meta.get("duplicate_family_id"),
                 "source_dataset": meta.get("source_dataset"),
                 "morphology_family": meta.get("morphology_family", "SUBMODULE_REGION"),
+                "compact_core_family": (float(meta.get("mask_residual_agreement", {}).get("max_component_elongation", 99)) <= 4.0 and int(meta.get("mask_residual_agreement", {}).get("support_component_count", 0)) == 1),
                 "residual": residual,
                 "support": support,
             }
@@ -152,6 +153,10 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale, reference_i
         return False
 
     residuals = production_hotspot_residuals()
+    if fault_type == "SingleHotSpot" and not reference_id:
+        # Single hotspots use the approved compact-core family. Long line-like
+        # reference anomalies remain available through explicit reference pins.
+        residuals = [item for item in residuals if item.get("compact_core_family")] or residuals
     if not residuals:
         if trace is not None:
             trace["failure_reason"] = "hotspot_production_bank_empty"
@@ -181,8 +186,8 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale, reference_i
     mx1, my1, mx2, my2 = clamp_bbox_to_field(temp, (mx1, my1, mx2, my2))
     if mx2 > mx1 and my2 > my1:
         module_w, module_h = mx2 - mx1, my2 - my1
-        footprint_w = min(module_w, max(x2 - x1, 12, int(round(module_w * 0.28))))
-        footprint_h = min(module_h, max(y2 - y1, 10, int(round(module_h * 0.28))))
+        footprint_w = min(module_w, max(x2 - x1, 12, int(round(module_w * 0.40))))
+        footprint_h = min(module_h, max(y2 - y1, 10, int(round(module_h * 0.42))))
         origin_info = cell.get("fault_origin_px") if isinstance(cell, dict) else None
         center_x = float(origin_info.get("x", (x1 + x2) / 2)) if origin_info else (x1 + x2) / 2
         center_y = float(origin_info.get("y", (y1 + y2) / 2)) if origin_info else (y1 + y2) / 2
@@ -207,6 +212,34 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale, reference_i
         used.add(ref["reference_id"])
         field = np.array(ref["residual"], dtype=np.float32, copy=True)
         support = np.array(ref["support"], dtype=np.float32, copy=True)
+        # Bank canvases can contain several separated detections and mostly
+        # empty image area. Map ONE connected reference anomaly, not the whole
+        # camera frame compressed a second time into a cell-sized footprint.
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            ((support > 0.10) & (field > 0.04)).astype(np.uint8), connectivity=8)
+        if count > 1:
+            energy = np.bincount(labels.ravel(), weights=field.ravel(), minlength=count)
+            energy[0] = 0
+            peaks = np.zeros(count, np.float32)
+            np.maximum.at(peaks, labels.ravel(), field.ravel())
+            energy[peaks < float(field.max()) * 0.90] = 0
+            label = int(np.argmax(energy))
+            rx, ry, rw, rh = map(int, stats[label, :4])
+            # Isolate the chosen connected anomaly before cropping: an adjacent
+            # reference detection must not become a second single-hotspot core.
+            selected = (labels == label).astype(np.uint8)
+            selected = cv2.dilate(selected, np.ones((3, 3), np.uint8))
+            field *= selected
+            support *= selected
+            padding = max(4, int(round(max(rw, rh) * 0.40)))
+            sx1,sy1 = max(0,rx-padding),max(0,ry-padding)
+            sx2,sy2 = min(field.shape[1],rx+rw+padding),min(field.shape[0],ry+rh+padding)
+            field = field[sy1:sy2,sx1:sx2]
+            support = support[sy1:sy2,sx1:sx2]
+        # Retain the reference core and disperse its own residual into the
+        # surrounding laminate. This is scalar conduction, before acquisition.
+        spread = cv2.GaussianBlur(field, (0, 0), max(0.8, min(field.shape) * 0.11))
+        field = field + spread * 0.85
         trace_source_field = field.copy()
         trace_source_support = support.copy()
         if field.size == 0 or support.size == 0:
@@ -214,11 +247,12 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale, reference_i
 
         bw, bh = max(2, x2 - x1), max(2, y2 - y1)
         scale_jitter = float(rng.uniform(0.82, 1.12))
-        target_w = int(clamp(round(bw * scale_jitter), 2, bw))
-        target_h = int(clamp(round(bh * scale_jitter), 2, bh))
+        fit = min(bw / field.shape[1], bh / field.shape[0]) * min(1.0, scale_jitter)
+        target_w = int(clamp(round(field.shape[1] * fit), 2, bw))
+        target_h = int(clamp(round(field.shape[0] * fit), 2, bh))
         field = cv2.resize(field, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
         support = cv2.resize(support, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
-        field = np.clip(field, 0, 1)
+        field = np.clip(field, 0, 1.5)
         support = np.clip(support, 0, 1)
 
         origin_info = cell.get("fault_origin_px") if isinstance(cell, dict) else None
@@ -244,22 +278,9 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale, reference_i
             continue
 
         strength = (34.0 + 58.0 * severity) * float(rng.uniform(0.90, 1.12))
-        halo_sigma = max(1.0, min(local_field.shape) * 0.14)
-        halo = cv2.GaussianBlur(local_field, (0, 0), halo_sigma)
-        halo_peak = float(halo.max(initial=0.0))
-        if halo_peak > 0.01:
-            halo = halo / halo_peak
-        support_halo = cv2.GaussianBlur(local_support, (0, 0), halo_sigma * 1.15)
-        support_peak = float(support_halo.max(initial=0.0))
-        if support_peak > 0.01:
-            support_halo = support_halo / support_peak
-        anomaly = np.clip(np.maximum(local_field * 0.88, halo * 0.72), 0, 1)
-        alpha = np.clip(np.maximum.reduce((local_support, support_halo * 0.68, anomaly * 0.82)), 0, 0.98)
         region = temp[py1:py2, px1:px2]
         before = region.copy()
-        target = region + anomaly * strength
-        target = np.maximum(target, 212 + anomaly * (34 + 44 * severity))
-        temp[py1:py2, px1:px2] = region * (1.0 - alpha * 0.88) + target * (alpha * 0.88)
+        region += local_field * strength
         if trace is not None:
             trace_residual[py1:py2, px1:px2] += temp[py1:py2, px1:px2] - before
             trace_support[py1:py2, px1:px2] = np.maximum(trace_support[py1:py2, px1:px2], local_support)
@@ -430,24 +451,15 @@ def apply_production_submodule_fault_signal(temp, cell, fault_type, scale, refer
         return False
 
     severity = clamp(scale, 1, 10) / 10.0
-    local_noise = smooth_unit_field((h, w), seed_for(cell.get("id", "submodule"), fault_type, scale, "target-panel-only-noise"), max(1.0, min(w, h) * 0.20), octaves=2)
-    low = cv2.GaussianBlur(field, (0, 0), max(0.55, min(w, h) * (0.070 if fault_type == "SingleDiode" else 0.090)))
-    if fault_type == "SingleDiode":
-        anomaly = np.clip(field * 0.62 + low * 0.34 + local_noise * support * 0.08, 0, 1)
-        strength = (18.0 + 38.0 * severity) * float(rng.uniform(0.86, 1.12))
-        alpha = np.clip(np.maximum(support * 0.78, anomaly * 0.56), 0, 0.86)
-        shoulder = cv2.GaussianBlur(support, (0, 0), max(0.85, min(w, h) * 0.12))
-        adjacent_lift = np.clip(shoulder - support * 0.45, 0, 1) * (4.0 + 8.0 * severity)
-    else:
-        anomaly = np.clip(low * 0.76 + field * 0.18 + local_noise * support * 0.06, 0, 1)
-        strength = (10.0 + 27.0 * severity) * float(rng.uniform(0.84, 1.08))
-        alpha = np.clip(np.maximum(support * 0.64, anomaly * 0.44), 0, 0.78)
-        adjacent_lift = 0
+    # Reference fields already encode the core, shoulder and thermal spread.
+    # Preserve that morphology once; extra diffusion and opacity multiplication
+    # formerly flattened and attenuated the anomaly before sensor acquisition.
+    strength = ((40.0 + 55.0 * severity) if fault_type == "SingleDiode"
+                else (22.0 + 36.0 * severity))
 
     region = temp[y1:y2, x1:x2]
     before = region.copy()
-    target = region + anomaly * strength + adjacent_lift
-    temp[y1:y2, x1:x2] = region * (1.0 - alpha) + target * alpha
+    region += field * strength
     if trace is not None:
         trace_residual = np.zeros_like(temp, dtype=np.float32)
         trace_support = np.zeros_like(temp, dtype=np.float32)
@@ -1508,8 +1520,7 @@ def apply_thermal_fault(
         temp[by1:by2, bx1:bx2] += band[:bh, :bw] * (44 + 54 * severity)
 
     elif fault_type in SOILING_FAULTS | {"Bird droppings", "Snow cover"}:
-        mask = np.array(irregular_mask((bw, bh), seed_for(cell["id"], "dust-mask"), blobs=9), dtype=np.float32) / 255.0
-        mask = cv2.GaussianBlur(mask, (0, 0), max(0.8, min(bw, bh) * 0.05))
+        mask = organic_fault_mask(bw, bh, fault_type, seed_for(cell["id"], "dust-mask"))
         if fault_type == "Bird droppings":
             cool_delta = 38 + 30 * severity
             warm_rim = 18 + 18 * severity
@@ -1579,7 +1590,7 @@ def apply_thermal_fault(
     return temp
 
 
-def apply_sensor_model(temp, location_id, scene_distance="close"):
+def legacy_apply_sensor_model(temp, location_id, scene_distance="close"):
     """Make the scalar temperature field behave like a thermal camera."""
     h, w = temp.shape
     settings = thermal_scene_settings(scene_distance)
@@ -1638,6 +1649,37 @@ def apply_sensor_model(temp, location_id, scene_distance="close"):
     return out
 
 
+def apply_sensor_model(temp, location_id, scene_distance="close", support_mask=None):
+    """One native acquisition, shared by spatial Far/Close views.
+
+    Do not diffuse reference faults through a second halo, shrink/enlarge the
+    detector plane, and then blur it again. The reference PSF is already present
+    in production residuals; a restrained optical integration preserves it.
+    """
+    if st.session_state.get("thermal_renderer_mode") == "Legacy Thermal (Fallback)":
+        return legacy_apply_sensor_model(temp, location_id, "far")
+    source = np.asarray(temp, dtype=np.float32)
+    out = cv2.GaussianBlur(source, (0, 0), 0.55)
+    if support_mask is not None:
+        # Integrate the PV material separately at its physical perimeter. Hot
+        # substrate must not replace the cooler metal/glass scalar response.
+        weight = (np.asarray(support_mask) > 0).astype(np.float32)
+        pv = cv2.GaussianBlur(source * weight, (0, 0), 0.55)
+        coverage = cv2.GaussianBlur(weight, (0, 0), 0.55)
+        for start in range(0, out.shape[0], 128):
+            rows = slice(start, start + 128)
+            inside = weight[rows] > 0
+            out[rows][inside] = (pv[rows] / np.maximum(coverage[rows], 1e-6))[inside]
+        del weight, pv, coverage
+    rng = np.random.default_rng(seed_for(location_id, "native-detector"))
+    # Bounded row allocations retain repeatable sensor noise in scene coordinates.
+    for start in range(0, out.shape[0], 128):
+        rows = slice(start, start + 128)
+        out[rows] += rng.normal(0, 0.70, out[rows].shape).astype(np.float32)
+    np.clip(out, 0, 255, out=out)
+    return out
+
+
 def thermalize(
     image,
     location_id,
@@ -1649,6 +1691,9 @@ def thermalize(
     scene_distance="close",
 ):
     rgb = ImageOps.exif_transpose(image).convert("RGB")
+    fault_records = thermal_records_for_distance(fault_records, scene_distance)
+    if fault_type and not thermal_records_for_distance([{"fault_type": fault_type}], scene_distance):
+        fault_type = None
     frame = np.array(rgb)
     gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
 

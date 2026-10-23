@@ -1,0 +1,208 @@
+{
+  "reference_path": "C:\\Users\\ammar.AMMAR\\OneDrive\\Documents\\Design\\references\\solar_github_resources\\extracted\\Solar_Panel_Fault_Detection-main\\Solar_Panel_Fault_Detection-main\\Solar_panel_fault_detection_multiclass\\100_Example\\Mision 6_DJI_0001.jpg",
+  "reference_sha256": "0141fce1dbf5ed8fc8cb55d6ba462b58969adae3d7c897251cc86dce1fcfc50c",
+  "reference_original_size": [
+    640,
+    512
+  ],
+  "signal_units": "Observed grayscale display codes; not temperatures",
+  "reference_healthy_selection": "Visually normal candidate module faces; no electrical verification",
+  "face_measurements": [
+    {
+      "group": "lower_left",
+      "box": [
+        76,
+        413,
+        84,
+        430
+      ],
+      "mean": 126.67646789550781,
+      "residual_std": 1.3988748010574843,
+      "gradient_short": 21.23809523809524,
+      "gradient_long": 1.123774509803846
+    },
+    {
+      "group": "lower_left",
+      "box": [
+        94,
+        413,
+        102,
+        430
+      ],
+      "mean": 130.14706420898438,
+      "residual_std": 1.1831656106696924,
+      "gradient_short": 17.047619047618948,
+      "gradient_long": -3.8174019607844807
+    },
+    {
+      "group": "lower_left",
+      "box": [
+        111,
+        413,
+        119,
+        430
+      ],
+      "mean": 131.63235473632812,
+      "residual_std": 1.2714666859050183,
+      "gradient_short": 17.19047619047607,
+      "gradient_long": -5.83333333333362
+    },
+    {
+      "group": "lower_left",
+      "box": [
+        128,
+        413,
+        136,
+        430
+      ],
+      "mean": 134.01470947265625,
+      "residual_std": 1.0404286492995278,
+      "gradient_short": 18.690476190476197,
+      "gradient_long": -6.78553921568648
+    },
+    {
+      "group": "middle_right",
+      "box": [
+        336,
+        345,
+        342,
+        357
+      ],
+      "mean": 130.68055725097656,
+      "residual_std": 1.876948232009342,
+      "gradient_short": 22.62619047619053,
+      "gradient_long": -0.016317016316795437
+    },
+    {
+      "group": "middle_right",
+      "box": [
+        354,
+        345,
+        360,
+        357
+      ],
+      "mean": 136.43055725097656,
+      "residual_std": 0.8388656456214599,
+      "gradient_short": 24.002380952380967,
+      "gradient_long": -9.480186480186271
+    },
+    {
+      "group": "middle_right",
+      "box": [
+        372,
+        345,
+        378,
+        357
+      ],
+      "mean": 139.4583282470703,
+      "residual_std": 1.512027933142594,
+      "gradient_short": 7.650000000000132,
+      "gradient_long": -6.673659673659273
+    },
+    {
+      "group": "middle_left",
+      "box": [
+        113,
+        345,
+        119,
+        357
+      ],
+      "mean": 124.43055725097656,
+      "residual_std": 1.772044711019107,
+      "gradient_short": 29.34523809523808,
+      "gradient_long": -1.289044289044025
+    },
+    {
+      "group": "middle_left",
+      "box": [
+        131,
+        345,
+        137,
+        357
+      ],
+      "mean": 129.40277099609375,
+      "residual_std": 1.0752650482105592,
+      "gradient_short": 20.197619047619146,
+      "gradient_long": -6.869463869463605
+    }
+  ],
+  "module_mean": 131.4303741455078,
+  "array_mean_std": 3.5250336917711578,
+  "module_mean_std": 0.4650637626869566,
+  "module_gradient_short": 20.197619047619146,
+  "module_gradient_long": -5.83333333333362,
+  "observed_face_residual_std": 1.2714666859050183,
+  "intrinsic_texture_std": 1.0148136465626378,
+  "detector_noise_std": 0.7660161852836609,
+  "frame_signal": 103.0,
+  "effective_sigma_px": 0.7999999999999999,
+  "seam_fit": {
+    "mse": 8.714964686952689,
+    "center": 8.5
+  },
+  "module_short_px": 17.0,
+  "module_long_px": 28.0,
+  "source_module_short_px": 115.16810607910156,
+  "materials": {
+    "exposed_aisle": {
+      "box": [
+        80,
+        450,
+        230,
+        475
+      ],
+      "mean": 198.3592071533203,
+      "detrended_std": 8.158627756882247,
+      "correlation_px": 4.5
+    },
+    "track_like_surface": {
+      "box": [
+        581,
+        210,
+        626,
+        360
+      ],
+      "mean": 154.7888946533203,
+      "detrended_std": 12.495991095957239,
+      "correlation_px": 11.0
+    },
+    "shade": {
+      "box": [
+        80,
+        439,
+        130,
+        442
+      ],
+      "mean": 105.18000030517578,
+      "detrended_std": 2.6579968558259988,
+      "correlation_px": 2.0
+    }
+  },
+  "camera_size": [
+    700,
+    466
+  ],
+  "seed": 20261022,
+  "source_material_classifier": {
+    "low_chroma": 18.0,
+    "low_texture": 5.0
+  },
+  "mapping": {
+    "observed_signal_range": [
+      0,
+      255
+    ],
+    "legacy_scalar_range": [
+      24,
+      254
+    ],
+    "palette": "Existing fixed thermal_lut; no histogram matching or color correction"
+  },
+  "assumptions": [
+    "Material labels are appearance proxies, not verified material identities",
+    "Effective seam response includes physical seam width",
+    "Array correlation spans three module widths; shorter module correlation spans one width",
+    "Two-times camera supersampling; geometric adjacency tolerances are 8 percent",
+    "RGB thresholds select substrate/shade only; they do not set thermal intensity"
+  ]
+}

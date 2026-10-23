@@ -743,8 +743,10 @@ def draw_close_thermal_module(module_cells, selected_cell_id, fault_records, siz
 
     rows_per_sub = max(1, geo["rows"] // 3)
 
-    for record in fault_records or []:
+    for record in thermal_records_for_distance(fault_records, scene_distance):
         tid = record.get("target_cell_id")
+        if str(scene_distance).lower() == "close" and tid != selected_cell_id:
+            continue
         if tid not in rects:
             continue
         x1, y1, x2, y2 = rects[tid]
@@ -753,6 +755,19 @@ def draw_close_thermal_module(module_cells, selected_cell_id, fault_records, siz
         sev = clamp(record.get("fault_scale", 8), 1, 10) / 10
         row_idx = int(cell_map[tid].get("module_cell_col") or 1) - 1
         sub_idx = clamp(row_idx // rows_per_sub, 0, 2)
+
+        if ft in {"SingleDiode", "SingleByPassed"}:
+            target = dict(cell_map[tid])
+            target.update({
+                "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                "module_bbox_px": {"x1": fx1, "y1": fy1, "x2": fx2, "y2": fy2},
+                "active_module_bbox_px": {"x1": ix1, "y1": iy1, "x2": ix2, "y2": iy2},
+            })
+            temp = apply_thermal_fault(
+                temp, target, ft, record.get("fault_scale", DEFAULT_FAULT_SCALE),
+                production_reference_id=record.get("production_reference_id"), require_production=True,
+            )
+            continue
 
         if ft in CRACKING_FAULTS:
             core = crack_mask(cw, ch, _fault_seed(record, "close-crack"))   # same shape as RGB
@@ -1145,6 +1160,10 @@ def scale_region_to_image(region, from_size, to_size):
 
 
 def close_source_scene(location_id, view, selected_row_id, selected_cell_id, fault_records=None, fallback=None):
+    if view == "thermal" and reference_demo_selected():
+        return reference_demo_generated(location_id)
+    if view == "thermal":
+        fault_records = thermal_records_for_distance(fault_records, "close", selected_row_id, selected_cell_id)
     source = cached_close_source_scene(
         location_id,
         view,
@@ -1388,8 +1407,9 @@ def source_fault_key(fault_records):
 
 
 def solar_render_cache_signature(location_id, size=None):
-    signature = [(THERMAL_REALISM_VERSION, 0, 0)]
-    for path in (solar_render_asset_path(location_id), solar_render_metadata_path(location_id)):
+    signature = [(THERMAL_REALISM_VERSION + str(st.session_state.get("thermal_renderer_mode", "Current Thermal")), 0, 0)]
+    for path in (solar_render_asset_path(location_id), solar_render_metadata_path(location_id),
+                 ROOT / "pv_ui.py", ROOT / "pv_render_thermal.py", ROOT / "pv_thermal_realism.py", ROOT / "pv_real_farm.py"):
         if not path:
             signature.append(("", 0, 0))
             continue
@@ -1429,7 +1449,7 @@ def stable_fault_render_target(location_id, fault_key):
         return "", ""
 
 
-@st.cache_data(show_spinner=False, max_entries=12)
+@st.cache_data(show_spinner=False, max_entries=2)
 def cached_close_source_scene(location_id, view, fault_key, render_signature):
     master = solar_render_image(location_id, None)
     if master is None:
@@ -1441,7 +1461,7 @@ def cached_close_source_scene(location_id, view, fault_key, render_signature):
     render_row_id, render_cell_id = stable_fault_render_target(location_id, fault_key)
     base, geometries = cached_native_thermal_master(location_id, solar_render_cache_signature(location_id))
     return finalize_solar_render_thermal_image(
-        location_id, base, geometries, render_row_id, render_cell_id, records, scene_distance="close"
+        location_id, base, geometries, render_row_id, render_cell_id, records, scene_distance="far"
     ).convert("RGB")
 
 
@@ -1575,7 +1595,41 @@ def solar_render_geometry_items(location_id):
     except OSError:
         return []
     layout_key = f"{custom_row_count(location_id)}x{custom_panels_per_row(location_id)}"
-    return (((index or {}).get("scenes") or {}).get(location_id) or {}).get(layout_key, [])
+    items = (((index or {}).get("scenes") or {}).get(location_id) or {}).get(layout_key, [])
+    asset = solar_render_asset_path(location_id)
+    return aligned_generated_array_geometry(str(asset), tuple(json.dumps(item, sort_keys=True) for item in items)) if asset else items
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def aligned_generated_array_geometry(asset_path, item_keys):
+    """Remove cast shadows from the fixed Generated asset's four-module envelopes."""
+    rgb = np.asarray(Image.open(asset_path).convert("RGB"))
+    height, width = rgb.shape[:2]
+    items = [json.loads(key) for key in item_keys]
+    for item in items:
+        points = np.asarray(item["polygon"], np.float32) * [width, height]
+        x1, y1 = np.maximum(0, np.floor(points.min(0)).astype(int))
+        x2, y2 = np.minimum([width, height], np.ceil(points.max(0)).astype(int))
+        local = rgb[y1:y2, x1:x2].astype(np.float32)
+        r, g, b = local[:, :, 0], local[:, :, 1], local[:, :, 2]
+        faces = ((b > r * 1.10) & (b > g * .95) & (b > 22) & (local.mean(2) < 145)).astype(np.uint8)
+        faces = cv2.morphologyEx(faces, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        count, labels, stats, centers = cv2.connectedComponentsWithStats(faces, 8)
+        candidates = [i for i in range(1, count) if stats[i, 4] > faces.size * .025]
+        if len(candidates) != 4:
+            continue  # Retain the supplied geometry if source faces are ambiguous.
+        candidates = sorted(candidates, key=lambda i: centers[i, 1])
+        candidates = sorted(candidates[:2], key=lambda i: centers[i, 0]) + sorted(candidates[2:], key=lambda i: centers[i, 0])
+        polygons = []
+        for i in candidates:
+            x, y, w, h, area = stats[i]
+            polygons.append([[x1+x-4,y1+y-4],[x1+x+w+3,y1+y-4],
+                             [x1+x+w+3,y1+y+h+3],[x1+x-4,y1+y+h+3]])
+        all_points = np.asarray(polygons).reshape(-1, 2)
+        left, top = all_points.min(0); right, bottom = all_points.max(0)
+        item["polygon"] = (np.asarray([[left,top],[right,top],[right,bottom],[left,bottom]]) / [width,height]).tolist()
+        item["module_polygons"] = (np.asarray(polygons) / [width,height]).tolist()
+    return items
 
 
 def solar_render_panel_mask(rendered, location_id=None):
@@ -1584,15 +1638,10 @@ def solar_render_panel_mask(rendered, location_id=None):
         width, height = rendered.size
         mask = np.zeros((height, width), dtype=np.uint8)
         for item in geometry_items:
-            polygon = np.asarray(
-                [
-                    [round(float(point[0]) * width), round(float(point[1]) * height)]
-                    for point in item.get("polygon", [])
-                ],
-                dtype=np.int32,
-            )
-            if polygon.shape == (4, 2):
-                cv2.fillPoly(mask, [polygon], 255, lineType=cv2.LINE_AA)
+            for quad in item.get("module_polygons", [item.get("polygon", [])]):
+                polygon = np.rint(np.asarray(quad) * [width, height]).astype(np.int32)
+                if polygon.shape == (4, 2):
+                    cv2.fillPoly(mask, [polygon], 255, lineType=cv2.LINE_AA)
         return cv2.GaussianBlur(mask, (0, 0), 0.75)
 
     # Compatibility fallback for older asset bundles without geometry metadata.
@@ -1835,6 +1884,27 @@ def component_geometries_from_mask(panel_mask):
 
 
 def solar_render_metadata_array_geometries(panel_mask, metadata):
+    location_id = ((metadata or {}).get("composite") or {}).get("location_id", "grass_open")
+    items = solar_render_geometry_items(location_id)
+    if items:
+        height, width = panel_mask.shape
+        result = {}
+        for item in items:
+            polygon = (np.asarray(item["polygon"]) * [width, height]).tolist()
+            modules = {}
+            quads = item.get("module_polygons")
+            if not quads:
+                fallback = {"box": polygon_bounds(polygon), "polygon": polygon}
+                quads = [(np.asarray(module_outer_polygon(m)) / [width, height]).tolist()
+                         for m in array_module_polygons(fallback).values()]
+            for number, quad in enumerate(quads, 1):
+                outer = (np.asarray(quad) * [width, height]).tolist()
+                active = active_module_polygon(outer)
+                modules[number] = {"module_number": number, "outer_polygon": outer, "polygon": outer,
+                                   "active_polygon": active, "box": polygon_bounds(outer), "active_box": polygon_bounds(active)}
+            result[(int(item["row"]), int(item["col"]))] = {"box": polygon_bounds(polygon), "polygon": polygon,
+                                                              "modules": modules, "orientation": "landscape"}
+        return result
     transforms = ((metadata or {}).get("topology") or {}).get("array_transforms") or []
     row_strings = ((metadata or {}).get("topology") or {}).get("row_strings") or []
     components = component_geometries_from_mask(panel_mask)
@@ -1867,6 +1937,8 @@ def solar_render_metadata_array_geometries(panel_mask, metadata):
 
 
 def array_module_polygons(region):
+    if region.get("modules"):
+        return region["modules"]
     array_polygon = region.get("polygon") or box_polygon(region["box"])
     inset = 0.065
     module_gap = 0.014
@@ -1965,10 +2037,7 @@ def rendered_fault_cell_from_record(location_id, record, selected_row_id, select
 
     module_number = int(record_cell.get("module_number_in_panel") or 1)
     module_number = max(1, min(SOLAR_PANEL_MODULES, module_number))
-    region = {
-        "box": array_geometry["box"],
-        "polygon": array_geometry.get("polygon") or box_polygon(array_geometry["box"]),
-    }
+    region = array_geometry
     module_geometry = array_module_polygons(region)[module_number]
     cell_row = int(record_cell.get("module_cell_row") or 1)
     cell_col = int(record_cell.get("module_cell_col") or 1)
@@ -2024,6 +2093,7 @@ def solar_render_thermal_base_field(location_id, rendered):
     temp = thermal_background_realism(
         np.empty((rendered.height, rendered.width), np.float32), rendered, location_id
     )
+    background_scalar = temp.copy() if st.session_state.get("thermal_renderer_mode") != "Legacy Thermal (Fallback)" else None
     scene_drift = thermal_scene_drift(temp.shape, seed_for(location_id, "healthy-thermal-scene"))
 
     panel_mask = solar_render_panel_mask(rendered, location_id).astype(np.float32) / 255.0
@@ -2045,17 +2115,18 @@ def solar_render_thermal_base_field(location_id, rendered):
 
     healthy_module_support = np.zeros(temp.shape, np.uint8)
     healthy_module_geometry = []
+    source_gray = cv2.cvtColor(np.asarray(rendered.convert("RGB")), cv2.COLOR_RGB2GRAY).astype(np.float32)
     for key, geometry in array_geometries.items():
         # Geometry supplies physical modules only. There is no filled table
         # rectangle and no thermal subdivision painted inside any module.
-        region = {"box": geometry["box"], "polygon": geometry["polygon"]}
+        region = geometry
         for number, module in array_module_polygons(region).items():
             cv2.fillConvexPoly(healthy_module_support, np.rint(module_outer_polygon(module)).astype(np.int32), 255)
             healthy_module_geometry.append(module_outer_polygon(module))
             composite_healthy_thermal_module(
                 temp, module_outer_polygon(module), scene_drift,
                 seed_for(location_id, key, number, "healthy-module"),
-                panel_min, panel_max, panel_mask,
+                panel_min, panel_max, panel_mask, source_gray=source_gray,
             )
 
     temp = thermal_boundary_response(
@@ -2065,6 +2136,11 @@ def solar_render_thermal_base_field(location_id, rendered):
         module_geometries=healthy_module_geometry,
     )
     temp = thermal_refine_background_materials(temp, rendered, location_id, healthy_module_geometry)
+    if background_scalar is not None:
+        for start in range(0, temp.shape[0], 128):
+            rows = slice(start, start + 128)
+            outside = healthy_module_support[rows] == 0
+            temp[rows][outside] = background_scalar[rows][outside]
     return temp.astype(np.float32), array_geometries
 
 
@@ -2254,36 +2330,41 @@ def close_fault_visibility_cell(cell, fault_type):
 
 def finalize_solar_render_thermal_image(location_id, base_temp, array_geometries, selected_row_id, selected_cell_id, fault_records=None, scene_distance="far"):
     temp = np.array(base_temp, dtype=np.float32, copy=True)
-    records = fault_records or []
-    close_visibility_tints = []
-    if records:
-        for record in records:
-            cell = rendered_fault_cell_from_record(location_id, record, selected_row_id, selected_cell_id, array_geometries)
-            if cell is None:
-                continue
-            fault_type = canonical_fault_type(record["fault_type"])
-            fault_scale = record.get("fault_scale", DEFAULT_FAULT_SCALE)
-            close_surface_fault = str(scene_distance).lower() == "close" and fault_type in (
-                SURFACE_OBSTRUCTION_FAULTS | SOILING_FAULTS | CRACKING_FAULTS
-            )
-            if close_surface_fault:
-                # These surface faults use clean vector/field masks after palette
-                # mapping. Reapplying the small reference patch here introduced
-                # grid and label artifacts from the source-bank thumbnails.
-                close_visibility_tints.append((close_fault_visibility_cell(cell, fault_type), fault_type, fault_scale))
-            else:
-                temp = apply_thermal_fault(
-                    temp,
-                    cell,
-                    fault_type,
-                    fault_scale,
-                )
+    records = thermal_records_for_distance(fault_records, scene_distance)
+    fault_support = np.zeros(temp.shape, np.uint8) if records else None
+    for record in records:
+        cell = rendered_fault_cell_from_record(location_id, record, selected_row_id, selected_cell_id, array_geometries)
+        if cell is None:
+            continue
+        fault_type = canonical_fault_type(record["fault_type"])
+        # Resolve bank morphology in the physical module plane, then project its
+        # scalar residual through the same active polygon used by selection.
+        # Axis-aligned cell boxes distort diagonal modules and spill onto roofs.
+        polygon = cell["active_module_polygon"]
+        cv2.fillConvexPoly(fault_support, np.rint(polygon).astype(np.int32), 255, lineType=cv2.LINE_8)
+        module = {"module_id": f"{location_id}:{record.get('row_id')}:{cell.get('module_number')}",
+                  "active_polygon_rgb": polygon, "outer_polygon_rgb": polygon,
+                  "canonical_size": real_farm_canonical_size(polygon),
+                  "mask_source": "MANUAL_FINAL_POLYGON", "refinement_status": "accepted"}
+        observation = {"observation_id": record.get("target_cell_id"), "module_id": module["module_id"],
+                       "severity": int(record.get("fault_scale", DEFAULT_FAULT_SCALE)),
+                       "local_uv": [(int(cell.get("module_cell_col") or 1)-0.5)/CUSTOM_MODULE_CELL_COLS,
+                                    (int(cell.get("module_cell_row") or 1)-0.5)/CUSTOM_MODULE_CELL_ROWS]}
+        temp = real_farm_apply_production_fault(temp, module, observation, fault_type, in_place=True)
 
-    temp = apply_sensor_model(temp, location_id, scene_distance)
-    thermal_image = thermal_display_rgb_from_scalar(temp, location_id, scene_distance)
-    if close_visibility_tints:
-        thermal_rgb = apply_thermal_fault_tints(np.asarray(thermal_image.convert("RGB")), close_visibility_tints)
-        thermal_image = Image.fromarray(thermal_rgb)
+    pv_support = np.zeros(temp.shape, np.uint8)
+    for geometry in array_geometries.values():
+        for module in array_module_polygons(geometry).values():
+            cv2.fillConvexPoly(pv_support, np.rint(module_outer_polygon(module)).astype(np.int32), 255)
+    temp = apply_sensor_model(temp, location_id, "far", pv_support)
+    if records:
+        healthy_acquisition = apply_sensor_model(base_temp, location_id, "far", pv_support)
+        for start in range(0, temp.shape[0], 128):
+            rows = slice(start, start + 128)
+            outside = fault_support[rows] == 0
+            temp[rows][outside] = healthy_acquisition[rows][outside]
+        del healthy_acquisition, fault_support
+    thermal_image = thermal_display_rgb_from_scalar(temp, location_id, "far")
     return thermal_image
 
 
@@ -2331,7 +2412,7 @@ def draw_solar_render_overlays(image, location_id, selected_row_id, selected_cel
     return output.convert("RGB")
 
 
-@st.cache_data(show_spinner=False, max_entries=12)
+@st.cache_data(show_spinner=False, max_entries=2)
 def cached_native_thermal_master(location_id, render_signature):
     """Authoritative Generated healthy scalar scene at source resolution."""
     rendered = solar_render_image(location_id, None)
@@ -2380,19 +2461,38 @@ def cached_module_field_thermal_scene(location_id, render_size, fault_key, rende
 
 
 def module_field_image(location_id, view, selected_row_id, selected_cell_id, fault_records=None, show_grid=True, scene_distance="far"):
+    if view == "thermal" and reference_demo_selected():
+        thermal = reference_demo_generated(location_id, module_field_static_canvas_size(location_id, view))
+        return draw_solar_render_overlays(thermal, location_id, selected_row_id, selected_cell_id, [], show_grid)
+    if view == "thermal":
+        fault_records = thermal_records_for_distance(fault_records, scene_distance, selected_row_id, selected_cell_id)
     render_size = module_field_static_canvas_size(location_id, view)
     rendered = None if view == "thermal" else solar_render_image(location_id, render_size)
     if rendered is not None and view == "rgb":
         return draw_solar_render_overlays(rendered, location_id, selected_row_id, selected_cell_id, fault_records, show_grid)
     if view == "thermal":
-        thermal = cached_module_field_thermal_scene(
-            location_id,
-            render_size,
-            source_fault_key(fault_records),
-            solar_render_cache_signature(location_id, render_size),
-            scene_distance,
-        )
+        # Simulate and acquire once at native geometry resolution. Far is a
+        # downsample of this image; Close crops it, so neither changes the fault.
+        thermal = cached_close_source_scene(location_id, "thermal", source_fault_key(fault_records), solar_render_cache_signature(location_id))
         if thermal is not None:
+            thermal = thermal.copy()
+            thermal.thumbnail(render_size, Image.Resampling.LANCZOS)
+            if fault_records:
+                # The final preview downsample must respect the same physical
+                # support too; filtering can otherwise mix fault pixels into a
+                # neighboring gap after the native scalar mask was enforced.
+                rgb_preview = solar_render_image(location_id, thermal.size)
+                geometries = solar_render_metadata_array_geometries(
+                    solar_render_panel_mask(rgb_preview, location_id), load_solar_render_metadata(location_id))
+                if geometries:
+                    support = np.zeros((thermal.height,thermal.width),np.uint8)
+                    for record in fault_records:
+                        cell = rendered_fault_cell_from_record(location_id,record,selected_row_id,selected_cell_id,geometries)
+                        if cell is not None:
+                            cv2.fillConvexPoly(support,np.rint(cell["active_module_polygon"]).astype(np.int32),255,lineType=cv2.LINE_8)
+                    healthy = cached_close_source_scene(location_id,"thermal",(),solar_render_cache_signature(location_id)).copy()
+                    healthy.thumbnail(render_size,Image.Resampling.LANCZOS)
+                    thermal = Image.composite(thermal,healthy,Image.fromarray(support,"L"))
             return draw_solar_render_overlays(thermal, location_id, selected_row_id, selected_cell_id, fault_records, show_grid)
         rendered = solar_render_image(location_id, render_size)
     if rendered is not None and view == "thermal":
@@ -3253,6 +3353,10 @@ def ui_css():
         div[data-testid="stRadio"] label, div[data-testid="stSelectbox"] label, div[data-testid="stNumberInput"] label, div[data-testid="stTextInput"] label {
           color:#cbd5e1 !important; font-weight:700;
         }
+        [data-testid="stMetricValue"], [data-testid="stMetricLabel"] p,
+        [data-testid="stWidgetLabel"] p, [data-testid="stFileUploader"] label p {
+          color:#dbeafe !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -3396,7 +3500,7 @@ def array_regions_from_image(location_id, rgb_scene):
             geometry = geometries.get((row_num, col_num))
             if not geometry:
                 continue
-            modules = array_module_polygons({"box": geometry["box"], "polygon": geometry["polygon"]})
+            modules = array_module_polygons(geometry)
             regions.append(
                 {
                     "key": f"R{row_num}-A{col_num:02d}",
@@ -3742,8 +3846,8 @@ def render_array_module_selector(
         scene_image_obj,
         region,
         pad_ratio=0.14,
-        target_width=1280,
-        max_scale=16,
+        target_width=None,
+        max_scale=1,
     )
     uri = data_uri(display)
     width, height = display.size
@@ -3860,7 +3964,7 @@ def render_array_module_selector(
         <div class="pv-array-crop">{''.join(svg)}</div>
         <style>
           .pv-array-crop {{ width:100%; overflow:hidden; border:1px solid #20324a; border-radius:14px; background:#020617; }}
-          .pv-array-crop svg {{ width:{width}px; max-width:100%; height:auto; display:block; margin:auto; }}
+          .pv-array-crop svg {{ width:100%; max-width:100%; height:auto; display:block; margin:auto; }}
           .pv-array-crop .pv-cell-hit:hover polygon {{
             stroke-opacity:0;
             fill-opacity:.001;
@@ -3876,6 +3980,75 @@ def render_array_module_selector(
 
 def export_current_view_bytes(image):
     return image_png_bytes(image.convert("RGB"))
+
+
+def generated_export_geometry(location_id, scene, regions, region_size, records):
+    """Export the applied effects and physical polygons in exported-image pixels."""
+    geometries = {}
+    modules = []
+    support = np.zeros((scene.height, scene.width), np.uint8)
+    for source_region in regions:
+        region = scale_region_to_image(source_region, region_size, scene.size)
+        row, col = int(region["row"]), int(region["col"])
+        geometries[(row,col)] = region
+        for number, module in array_module_polygons(region).items():
+            outer, active = module_outer_polygon(module), module_active_polygon(module)
+            modules.append({"module_id": f"R{row}-A{col:02d}-M{number}", "row":row, "array":col,
+                            "module_number_in_panel":number, "outer_polygon_px":outer,
+                            "active_polygon_px":active, "coordinate_space":"exported_scene_pixels"})
+            cv2.fillConvexPoly(support, np.rint(active).astype(np.int32), 255, lineType=cv2.LINE_8)
+    projected = []
+    for source in thermal_records_for_distance(records, "far"):
+        record = dict(source)
+        cell = rendered_fault_cell_from_record(location_id, record, record.get("row_id"), record.get("target_cell_id"), geometries)
+        if cell is None:
+            continue
+        x1,y1,x2,y2 = polygon_bounds(cell["source_polygon"])
+        record["target_cell_bbox_px"] = {"x1":x1,"y1":y1,"x2":x2,"y2":y2}
+        record["bbox_px"] = dict(cell["active_module_bbox_px"])
+        record["cell_polygon_px"] = cell["source_polygon"]
+        record["module_polygon_px"] = cell["active_module_polygon"]
+        record["module_id"] = f"R{row_number_from_id(location_id,record['row_id'])}-A{int(cell.get('panel_number') or 1):02d}-M{int(cell.get('module_number_in_panel') or 1)}"
+        record["fault_bbox_px"] = record["visible_fault_bbox_px"] = cell["active_module_bbox_px"]
+        record["annotation_geometry"] = "physical_module_support_bounds; not pixel fault segmentation"
+        record["coordinate_space"] = "exported_scene_pixels"
+        record["renderer_class"] = "PRODUCTION_REFERENCE" if canonical_fault_type(record.get("fault_type")) in {"SingleHotSpot","SingleDiode","SingleByPassed"} else "SYNTHETIC_DIAGNOSTIC"
+        record["radiometric"] = False
+        record["image_size"] = list(scene.size)
+        fx,fy = polygon_centroid(cell["source_polygon"])
+        record["fault_origin_px"] = {"x":fx,"y":fy}
+        bounds = record["bbox_px"]
+        cx,cy = (bounds["x1"]+bounds["x2"])*0.5,(bounds["y1"]+bounds["y2"])*0.5
+        if canonical_fault_type(record["fault_type"]) in (set(HOTSPOT_FAULTS) | set(SURFACE_OBSTRUCTION_FAULTS) | set(DIODE_FAULTS)):
+            cx, cy = fx, fy
+        record["center_px"] = {"x":cx,"y":cy}
+        record["center_normalized"] = {"x":cx/scene.width,"y":cy/scene.height}
+        projected.append(record)
+    return projected, modules, Image.fromarray(support,"L")
+
+
+def generated_geometry_dataset(location, view, row, cell, records, scene, rgb, crop, bounds, modules, support, healthy=None):
+    metadata = scene_metadata(location,view,row,cell,records)
+    metadata.update({"image_size":list(scene.size), "coordinate_space":"exported_scene_pixels",
+                     "crop_bounds_px":list(bounds), "crop_contents":"selected array context",
+                     "renderer":st.session_state.get("thermal_renderer_mode","Current Thermal"),
+                     "relative_simulation":True, "radiometric":False,
+                     "fault_bounds":"physical module support, not pixel fault segmentation",
+                     "cell_geometry":"synthetic electrical layout"})
+    package = BytesIO()
+    with zipfile.ZipFile(package,"w",compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("pv_scene.png",image_png_bytes(scene))
+        archive.writestr("source_rgb.png",image_png_bytes(rgb))
+        archive.writestr("selected_crop.png",image_png_bytes(crop))
+        archive.writestr("cropped_row.png",image_png_bytes(crop))
+        archive.writestr("faults.json",json.dumps(json_safe_export_value(records),indent=2))
+        archive.writestr("faults.csv",fault_records_csv(records))
+        archive.writestr("metadata.json",json.dumps(json_safe_export_value(metadata),indent=2))
+        archive.writestr("module_geometry.json",json.dumps(json_safe_export_value(modules),indent=2))
+        archive.writestr("pv_union_mask.png",image_png_bytes(support))
+        if healthy is not None:
+            archive.writestr("healthy_thermal.png",image_png_bytes(healthy))
+    return package.getvalue()
 
 
 def parse_panel_search(text):
@@ -3920,7 +4093,7 @@ def top_summary_bar(location, view, metadata, active_faults):
 
 def main():
     st.set_page_config(page_title="PV Array Fault Tool", layout="wide")
-    if qp_get("section") == "legacy":
+    if qp_get("section") == "legacy" and not reference_demo_selected() and qp_get("thermal_renderer", "current") != "reference":
         legacy_main()
         return
 
@@ -3942,11 +4115,14 @@ def main():
         if chosen_source != base_source:
             qp_set(base_source=chosen_source)
             st.rerun()
+        if base_source != "real_farm" or st.session_state.get("real_farm_section", "Thermal Camera") != "Thermal Camera":
+            reference_demo_selector()
 
     if base_source == "real_farm":
         real_farm_main()
         return
 
+    st.session_state.pop("real_farm_generated_cache_released", None)
     location = selected_location()
     view = qp_get("view", "thermal")
     if view not in ("rgb", "thermal"):
@@ -4025,7 +4201,11 @@ def main():
 
     fault_scale = DEFAULT_FAULT_SCALE
     records = records_for_location(location["id"], view)
-    metadata = scene_metadata(location, view, selected_row, selected_cell, records)
+    experimental_thermal = reference_demo_selected()
+    if experimental_thermal:
+        reference_demo_notice()
+        records = []
+    metadata = scene_metadata(location, view, selected_row, selected_cell, thermal_records_for_distance(records, "far"))
     inspection_mode = st.session_state.get("inspection_crop_mode", "Current")
     inspection_geometry = st.session_state.get("inspection_geometry", "Natural")
     if inspection_geometry not in ("Natural", "Rectified"):
@@ -4152,7 +4332,7 @@ def main():
             cell_active=1,
         ))
 
-    top_summary_bar(location, view, metadata, len(records))
+    top_summary_bar(location, view, metadata, metadata["fault_count"])
 
     if section == "Scene Setup":
         scene = get_scene()
@@ -4222,7 +4402,7 @@ def main():
         scene = get_scene()
         regions = get_regions()
         selected_region = get_selected_region()
-        show_fault_boxes = bool(st.session_state.get("show_fault_boxes", True))
+        show_fault_boxes = bool(st.session_state.get("show_fault_boxes", False))
         show_cell_map = bool(st.session_state.get("show_cell_map", False))
         if focus_mode:
             if st.button("Exit Full Screen", use_container_width=False):
@@ -4259,16 +4439,32 @@ def main():
                     if cell_active:
                         crumb += f' &gt; {esc(selected_cell_id)}'
                     st.markdown(f'<div class="pv-focus-title">{crumb}</div>', unsafe_allow_html=True)
+                    active_names = []
+                    for active_record in thermal_records_for_distance(records, "close"):
+                        if active_record.get("row_id") != selected_row_id:
+                            continue
+                        target = cell_by_id(location["id"], selected_row_id, active_record["target_cell_id"])
+                        if int(target.get("panel_number") or 1) != int(selected_region["col"]):
+                            continue
+                        kind = canonical_fault_type(active_record["fault_type"])
+                        label = fault_display_name(kind)
+                        if kind in REAL_FARM_SYNTHETIC_DIAGNOSTIC_MODELS:
+                            label += " · synthetic / unvalidated"
+                        active_names.append(label)
+                    st.caption(" | ".join(active_names) if active_names else "Healthy · no active faults")
                     if inspection_mode == "Compare":
                         if thermal_scene is None:
                             thermal_scene = get_thermal_scene()
                         show_crop_pair(rgb_scene, thermal_scene, selected_region.get("polygon") or box_polygon(selected_region["box"]), "RGB", "Thermal", 0.075)
                     else:
+                        native_scene = close_source_scene(location["id"], "thermal" if inspection_mode == "Thermal" else "rgb" if inspection_mode == "RGB" else view,
+                                                          selected_row_id, selected_cell_id, records, crop_scene)
+                        native_region = scale_region_to_image(selected_region, crop_scene.size, native_scene.size)
                         render_array_module_selector(
                             location,
                             view,
-                            crop_scene,
-                            selected_region,
+                            native_scene,
+                            native_region,
                             selected_module if module_selected else 0,
                             selected_cell_id if cell_active else None,
                             records,
@@ -4312,7 +4508,7 @@ def main():
                     st.markdown('<div class="pv-context-thumb">', unsafe_allow_html=True)
                     st.image(scene_context_image(scene, selected_region), use_container_width=True)
                     st.markdown("</div>", unsafe_allow_html=True)
-                    if st.button("Back to Field", use_container_width=True):
+                    if st.button("Far View", use_container_width=True):
                         qp_set(**navigation_params(
                             location["id"],
                             view,
@@ -4348,7 +4544,7 @@ def main():
                 elif selected_region:
                     st.write(f"**{current_array_key}**")
                     st.caption(f"Row {selected_region['row']} | Array {selected_region['col']} | {selected_region.get('orientation', 'unknown')} | String {selected_region.get('string_id') or 'n/a'}")
-                    array_fault_count = fault_count_for_region(records, selected_region)
+                    array_fault_count = fault_count_for_region(thermal_records_for_distance(records,"far"), selected_region)
                     st.caption(f"4 modules | {array_fault_count} fault(s)")
                 if inspection_state != "scene" and module_selected:
                     st.write(f"**Module:** {selected_module}")
@@ -4482,7 +4678,7 @@ def main():
                     scout_max = max(1, min(50, int(metadata.get("total_cells") or 1)))
                     scout_count = st.number_input("Count", min_value=1, max_value=scout_max, value=min(3, scout_max), step=1, key="modern_random_fault_count")
                     scout_seed = st.number_input("Seed", min_value=0, max_value=999999, value=42, step=1, key="modern_random_fault_seed")
-                    if st.button("Generate Observations", use_container_width=True, disabled=not scout_types):
+                    if st.button("Generate Observations", use_container_width=True, disabled=experimental_thermal or not scout_types):
                         available_cells = fault_target_cells(location["id"])
                         if not available_cells:
                             st.warning("No available cells for this scene.")
@@ -4512,13 +4708,15 @@ def main():
                         if fault_type not in far_observation_types
                     ]
                     fault_type = st.selectbox("Diagnostic Fault Type", available_fault_types, format_func=fault_display_name, key="new_fault_type")
+                    if fault_type in REAL_FARM_SYNTHETIC_DIAGNOSTIC_MODELS:
+                        st.caption("Synthetic relative diagnostic morphology; not a production-validated diagnosis or measured temperature.")
                     severity = st.number_input(
                         "Severity", min_value=1, max_value=10,
                         value=int(DEFAULT_FAULT_SCALE), step=1, key="generated_fault_severity",
                     )
                     add_col, clear_col = st.columns(2)
                     with add_col:
-                        if st.button("Apply Fault", type="primary", use_container_width=True):
+                        if st.button("Apply Fault", type="primary", use_container_width=True, disabled=experimental_thermal):
                             push_fault_history()
                             existing = [
                                 record for record in st.session_state.get("panel_cell_fault_records", [])
@@ -4681,9 +4879,11 @@ def main():
             st.markdown("</div></div>", unsafe_allow_html=True)
         with analysis_col:
             st.markdown('<div class="pv-card"><div class="pv-section-title">AI Classifier Check</div>', unsafe_allow_html=True)
-            if view == "thermal":
+            if view == "thermal" and not experimental_thermal:
                 scene = get_thermal_scene()
                 render_classifier_check(scene)
+            elif experimental_thermal:
+                st.caption("Fault classification is unsupported for the experimental healthy renderer.")
             else:
                 st.caption("Switch to Thermal view to run the classifier check on the current thermal scene.")
             st.markdown("</div>", unsafe_allow_html=True)
@@ -4717,18 +4917,28 @@ def main():
     elif section == "Export":
         scene = get_scene()
         selected_region = get_selected_region()
+        if experimental_thermal:
+            st.markdown("#### Experimental healthy export")
+            st.download_button("Export Experimental Healthy View", export_current_view_bytes(scene),
+                               file_name=f"{location['id']}_reference_healthy.png", mime="image/png")
+            st.caption("Healthy preview PNG only. Switch to Current Thermal for fault datasets and metadata.")
+            return
         st.markdown('<div class="pv-card"><div class="pv-section-title">Export</div>', unsafe_allow_html=True)
-        crop_image, _ = crop_from_polygon(scene, selected_region.get("polygon") or box_polygon(selected_region["box"]), 0.075) if selected_region else (scene, (0, 0, scene.width, scene.height))
+        export_records, export_modules, export_support = generated_export_geometry(
+            location["id"], scene, get_regions(), get_rgb_scene().size, records)
+        export_region = scale_region_to_image(selected_region,get_rgb_scene().size,scene.size) if selected_region else None
+        crop_image, crop_bounds = crop_from_polygon(scene, export_region.get("polygon") or box_polygon(export_region["box"]), 0.075) if export_region else (scene, (0, 0, scene.width, scene.height))
         export_cols = st.columns(4)
         with export_cols[0]:
             st.download_button("Export Current View", export_current_view_bytes(scene), file_name=f"{location['id']}_{view}_scene.png", mime="image/png", use_container_width=True)
         with export_cols[1]:
             st.download_button("Export Selected Crop", export_current_view_bytes(crop_image), file_name=f"{location['id']}_{current_array_key}_{view}.png", mime="image/png", use_container_width=True)
         with export_cols[2]:
-            st.download_button("Export CSV", fault_records_csv(records), file_name="faults.csv", mime="text/csv", use_container_width=True)
+            st.download_button("Export CSV", fault_records_csv(export_records), file_name="faults.csv", mime="text/csv", use_container_width=True)
         with export_cols[3]:
-            terrain = module_field_background(location["id"], view, module_field_static_canvas_size(location["id"], view), selected_row_id)
-            st.download_button("Export Dataset", export_package_bytes(location, view, selected_row, selected_cell, records, terrain, scene), file_name="pv_fault_dataset.zip", mime="application/zip", use_container_width=True)
+            healthy_export = module_field_image(location["id"], "thermal", selected_row_id, selected_cell_id, [], show_grid=False) if view == "thermal" else None
+            dataset = generated_geometry_dataset(location, view, selected_row, selected_cell, export_records, scene, get_rgb_scene(), crop_image, crop_bounds, export_modules, export_support, healthy_export)
+            st.download_button("Export Dataset", dataset, file_name="pv_fault_dataset.zip", mime="application/zip", use_container_width=True, on_click="ignore")
         st.markdown("</div>", unsafe_allow_html=True)
 
     elif section == "Settings":
@@ -4737,7 +4947,7 @@ def main():
         st.write(f"Custom layout: `{custom_layout_enabled()}`")
         st.write(f"Rows: `{custom_row_count(location['id'])}`")
         st.write(f"Nominal arrays per row: `{custom_panels_per_row(location['id'])}`")
-        if st.button("Open Legacy Interface", use_container_width=True):
+        if st.button("Open Legacy Interface", use_container_width=True, disabled=experimental_thermal):
             qp_set(**navigation_params(location["id"], view, selected_row_id, selected_cell_id, section="legacy"))
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
