@@ -5314,8 +5314,8 @@ def real_farm_main_impl():
         return
     state["source_rgb_pixel_sha256"] = identity
 
-    if section == "Thermal Camera":
-        real_farm_camera_workflow(state, image)
+    if section in {"Thermal Camera", "Thermal", "Faults"}:
+        real_farm_camera_workflow(state, image, "Faults" if section == "Faults" else "Thermal")
         return
 
     modules = state.setdefault("modules", [])

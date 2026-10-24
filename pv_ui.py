@@ -4115,7 +4115,7 @@ def main():
         if chosen_source != base_source:
             qp_set(base_source=chosen_source)
             st.rerun()
-        if base_source != "real_farm" or st.session_state.get("real_farm_section", "Thermal Camera") != "Thermal Camera":
+        if base_source != "real_farm":
             reference_demo_selector()
 
     if base_source == "real_farm":
