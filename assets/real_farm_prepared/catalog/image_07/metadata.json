@@ -1,0 +1,26 @@
+{
+  "id": "image_07",
+  "number": 7,
+  "label": "07 - 7.jpg (372 x 248)",
+  "rgb": "catalog/image_07/source.jpg",
+  "rgb_file_sha256": "39f2b5ad0ae848ac18cd148d70fb67eb616d4f307aa941c6b41ac62f176e14ce",
+  "rgb_pixel_sha256": "c829da5700f364ab692acbcbedde8f19d807c3e500ab1469e8c4d89519eb57f4",
+  "image_size": [
+    372,
+    248
+  ],
+  "project": "catalog/image_07/geometry.json",
+  "project_sha256": "79de307b5132733fab3b598a5724c632e74c4ac89c652444e9ee488fa78c7b04",
+  "pv_mask": "catalog/image_07/pv_mask.png",
+  "pv_mask_sha256": "4440ff98fce662341293a48d10b2c5ae411c583e5ef221745ee6cf82cdd7e528",
+  "thermal": "catalog/image_07/healthy_thermal.png",
+  "thermal_sha256": "d984ca0a9fa73f5fce95938ef2e3dcd6f1c73503f6ac823b2acc122bee228606",
+  "ignore_mask": "catalog/image_07/ignore_mask.png",
+  "ignore_mask_sha256": "221887aea12b33a791234a13166e49e6441348460b0b608e3431ecf9d3385b1a",
+  "module_count": 709,
+  "status": "LOW RESOLUTION - ALL FRAME PROPOSALS PROVISIONAL",
+  "frozen": false,
+  "pinned": true,
+  "training_user_verified": false,
+  "thermal_kind": "saved synthetic relative thermal; not measured temperature"
+}

@@ -198,6 +198,8 @@ def navigation_params(location_id, view, selected_pv, selected_cell, **overrides
         "selected_cell": selected_cell,
     }
     current_inspect = qp_get("inspect", None)
+    if qp_get("thermal_renderer", "current") in {"reference", "legacy"}:
+        params["thermal_renderer"] = qp_get("thermal_renderer")
     if current_inspect in ("far", "close"):
         params["inspect"] = current_inspect
     params.update(layout_query_values(location_id))

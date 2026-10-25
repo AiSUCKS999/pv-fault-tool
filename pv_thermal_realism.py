@@ -5,7 +5,7 @@ represent irradiance, ventilation and material response. Geometry and fault
 provenance are deliberately independent of this layer.
 """
 
-THERMAL_REALISM_VERSION = "continuous-ir-reference-v13-materials-v12-frames"
+THERMAL_REALISM_VERSION = "meeting-repair-native-v3"
 THERMAL_SCALAR_DISPLAY_RANGE = (24.0, 254.0)
 
 
@@ -27,7 +27,7 @@ def thermal_coherent_field(shape, seed, grid=(7, 9)):
                              borderType=cv2.BORDER_REFLECT_101)
     field -= float(field.mean())
     field /= max(1e-6, float(field.std()))
-    return cv2.resize(field, (width, height), interpolation=cv2.INTER_CUBIC).astype(np.float32)
+    return cv2.resize(field, (width, height), interpolation=cv2.INTER_CUBIC)
 
 
 def thermal_scene_drift(shape, seed):
@@ -37,7 +37,10 @@ def thermal_scene_drift(shape, seed):
     local = thermal_coherent_field(shape, seed_for(seed, "ventilation"), (18, 24))
     x = np.linspace(-1, 1, width, dtype=np.float32)[None, :]
     y = np.linspace(-1, 1, height, dtype=np.float32)[:, None]
-    return (broad * 1.5 + local * 2.8 + x * 4.0 - y * 2.5).astype(np.float32)
+    for start in range(0, height, 128):
+        rows = slice(start, start + 128)
+        broad[rows] = broad[rows] * 1.5 + local[rows] * 2.8 + x * 4.0 - y[rows] * 2.5
+    return broad
 
 
 def thermal_surface_microtexture(shape, seed):
@@ -57,7 +60,7 @@ def thermal_surface_microtexture(shape, seed):
     return cv2.resize(roughness, (shape[1], shape[0]), interpolation=cv2.INTER_CUBIC)
 
 
-def thermal_background_realism(base, image, location_id, material_masks=None):
+def thermal_background_realism(base, image, location_id, material_masks=None, sunlit_terrain=False, pv_capture=False):
     """Material/exposure response, independent of the module temperature range.
 
     RGB supplies material and shadow evidence, not output thermal colors. All
@@ -72,10 +75,11 @@ def thermal_background_realism(base, image, location_id, material_masks=None):
             for key, value in material_masks.items()
         }
         small = thermal_background_realism(
-            np.empty((size[1], size[0]), np.float32), image.resize(size), location_id, masks
+            np.empty((size[1], size[0]), np.float32), image.resize(size), location_id, masks,
+            sunlit_terrain=sunlit_terrain, pv_capture=pv_capture
         )
         return cv2.resize(small, (width, height), interpolation=cv2.INTER_CUBIC)
-    rgb = np.asarray(image.convert("RGB").resize((width, height)), dtype=np.uint8)
+    rgb = np.asarray((image if image.mode == "RGB" else image.convert("RGB")).resize((width, height)), dtype=np.uint8)
     red, green, blue = [rgb[:, :, i].astype(np.float32) for i in range(3)]
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     scale = max(1.0, max(height, width) / 1600.0)
@@ -97,11 +101,11 @@ def thermal_background_realism(base, image, location_id, material_masks=None):
     # Sun-exposed soil, paving and roofs can exceed ventilated PV temperatures.
     # Moist vegetation and water respond differently. No PV-relative remapping,
     # background mean target, or scene-wide contrast compression is applied.
-    soil = 190.0 + luma * 28.0 + drift * 0.35 + broad * 1.8 + fine * 3.0 + microtexture
+    soil = (198.0 if sunlit_terrain else 190.0) + luma * 28.0 + drift * 0.35 + broad * 1.8 + fine * 3.0 + microtexture
     # Vegetation loses solar loading through moisture/evaporation. A small
     # material-specific offset separates it from ventilated PV without a
     # scene-wide background suppression or PV-relative contrast rule.
-    grass = 141.0 + luma * 49.0 + drift * 0.35 + broad * 1.5 + fine * 2.8 + microtexture * 1.15
+    grass = (188.0 if sunlit_terrain else 141.0) + luma * 49.0 + drift * 0.35 + broad * 1.5 + fine * 2.8 + microtexture * 1.15
     roof = 178.0 + luma * 39.0 + drift * 0.35 + broad * 1.4 + fine * 1.5 + microtexture * 0.35
     hard_surface = 176.0 + luma * 36.0 + drift * 0.35 + broad * 1.1 + fine * 1.4 + microtexture * 0.30
     water_temp = 79.0 + luma * 12.0 + drift * 0.48 + broad * 1.3
@@ -125,7 +129,7 @@ def thermal_background_realism(base, image, location_id, material_masks=None):
         if "pv_scene_candidate" in material_masks:
             # Unaccepted blue objects are background, not synthetic PV modules.
             candidate = cv2.GaussianBlur((material_masks["pv_scene_candidate"] > 0).astype(np.float32), (0, 0), 0.8 * scale)
-            result = result * (1 - candidate) + (112 + drift * 0.5) * candidate
+            result = result * (1 - candidate) + ((176.0 if pv_capture else 112.0) + drift * 0.5) * candidate
             water *= 1 - candidate
     # Distributed surface cooling (moisture/shade) opens orange/darker regions
     # within exposed hot land instead of shifting every ground pixel together.
@@ -155,7 +159,7 @@ def thermal_refine_background_materials(scalar, image, location_id, module_geome
     height, width = source.shape
     ratio = min(1.0, 1600.0 / max(height, width))
     size = (max(16, int(round(width * ratio))), max(16, int(round(height * ratio))))
-    rgb = np.asarray(image.convert("RGB").resize(size), np.uint8)
+    rgb = np.asarray((image if image.mode == "RGB" else image.convert("RGB")).resize(size), np.uint8)
     red, green, blue = [rgb[:, :, i].astype(np.float32) for i in range(3)]
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
     smooth = cv2.GaussianBlur(gray, (0, 0), 1.0)
@@ -201,7 +205,10 @@ def thermal_refine_background_materials(scalar, image, location_id, module_geome
         # target is involved in this bounded structural correction.
         shadow = np.clip((0.23 - smooth / 255.0) / 0.18, 0, 1)
         delta = 22.0 * np.tanh(delta / 22.0) * (1 - shadow * 0.85)
-    delta = cv2.resize(delta.astype(np.float32), (width, height), interpolation=cv2.INTER_CUBIC)
+    # Release bounded material-analysis planes before allocating native fields.
+    del rgb, red, green, blue, gray, smooth, medium, detail, exposure
+    del fine, broad, micro, vegetation, cooling, land_noise
+    delta = cv2.resize(delta.astype(np.float32, copy=False), (width, height), interpolation=cv2.INTER_CUBIC)
     support = np.zeros(source.shape, np.uint8)
     for geometry in module_geometries if module_geometries is not None else []:
         points = np.asarray(geometry, np.float32)
@@ -210,11 +217,14 @@ def thermal_refine_background_materials(scalar, image, location_id, module_geome
     distance = cv2.distanceTransform(1 - support, cv2.DIST_L2, 3)
     pixel_scale = max(1.0, max(height, width) / 2400.0)
     guard = max(26.0, 32.0 * pixel_scale) if location_id == "real_farm" else max(28.0, max(height, width) / 48.0)
-    blend = np.clip((distance - guard) / max(12.0, guard * 0.5), 0, 1)
-    blend = blend * blend * (3.0 - 2.0 * blend)
     result = source.copy()
-    editable = blend > 0
-    result[editable] = np.clip(source[editable] + delta[editable] * blend[editable], 0, 255)
+    for start in range(0, height, 128):
+        rows = slice(start, start + 128)
+        blend = np.clip((distance[rows] - guard) / max(12.0, guard * 0.5), 0, 1)
+        blend = blend * blend * (3.0 - 2.0 * blend)
+        editable = blend > 0
+        roi = result[rows]
+        roi[editable] = np.clip(source[rows][editable] + delta[rows][editable] * blend[editable], 0, 255)
     return result
 
 
@@ -234,7 +244,7 @@ def thermal_pv_operating_range(location_id):
     }.get(location_id, (164, 196))
 
 
-def healthy_thermal_module_field(size, seed, panel_min=164, panel_max=196):
+def legacy_healthy_thermal_module_field(size, seed, panel_min=164, panel_max=196, edge_cooling_scale=1.0, interior_detail=0.15):
     """One uninterrupted module plane; no cell/quadrant warm templates."""
     width, height = size
     x = np.linspace(0, 1, width, dtype=np.float32)[None, :]
@@ -273,11 +283,20 @@ def healthy_thermal_module_field(size, seed, panel_min=164, panel_max=196):
     excursion = max(12.0, float(panel_max - panel_min) * 0.60)
     field = midpoint + excursion * np.tanh((field - midpoint) / excursion)
 
+    # Retain the earlier scalar edge model with restrained interior variation.
+    if st.session_state.get("thermal_renderer_mode") != "Legacy Thermal (Fallback)":
+        plane = midpoint + slope * ((x - 0.5) * np.cos(angle) + (y - 0.5) * np.sin(angle))
+        field = midpoint + (plane - midpoint) * 0.55 + (field - plane) * interior_detail
+
     # Four unequal boundary responses, varying slowly ALONG each edge as well
     # as inward. Cooling is distance-based, not a constant purple frame.
     short = float(min(width, height))
     common_width = float(rng.uniform(0.017, 0.031)) * short
     common_strength = float(rng.uniform(21.0, 33.0))
+    current_model = st.session_state.get("thermal_renderer_mode") != "Legacy Thermal (Fallback)"
+    if current_model:
+        common_width *= 1.15
+        common_strength *= 1.65
     cooling_x = np.zeros((height, width), np.float32)
     cooling_y = np.zeros((height, width), np.float32)
     diffusion_x = np.zeros((height, width), np.float32)
@@ -306,12 +325,18 @@ def healthy_thermal_module_field(size, seed, panel_min=164, panel_max=196):
         # fixed. Width and strength change smoothly along the same boundary.
         local_strength = np.clip(0.80 + edge_irregularity * 0.38, 0.04, 1.50)
         local_width = edge_width * np.clip(0.95 + edge_spread * 0.32, 0.40, 1.85)
+        if current_model:
+            strength = common_strength * np.clip(strength / common_strength, 0.90, 1.15)
+            local_strength = np.clip(0.90 + edge_irregularity * 0.10, 0.65, 1.15)
+            local_width = edge_width * np.clip(1.0 + edge_spread * 0.10, 0.75, 1.25)
         response = strength * asymmetry * local_strength * np.exp(-(distance / local_width) ** 1.10)
         # A weaker, wider inward conduction shoulder joins the cool frame to
         # the glass face. Reuse the existing edge variations so no new noise,
         # layout templates or random draws disturb the approved interior.
         diffusion_width = np.maximum(local_width * 3.1, short * 0.050)
-        diffusion = strength * asymmetry * local_strength * 0.28 * np.exp(
+        if current_model:
+            diffusion_width = np.maximum(local_width * 2.3, short * 0.018)
+        diffusion = strength * asymmetry * local_strength * (0.20 if current_model else 0.28) * np.exp(
             -(distance / diffusion_width) ** 1.45
         )
         if side < 2:
@@ -328,14 +353,16 @@ def healthy_thermal_module_field(size, seed, panel_min=164, panel_max=196):
         ) * 0.15, 0.15, 0.90,
     )
     edge_exchange = cooling_x + cooling_y - corner_mix * np.minimum(cooling_x, cooling_y)
-    field -= edge_exchange
-    field -= diffusion_x + diffusion_y - corner_mix * np.minimum(diffusion_x, diffusion_y)
+    field -= edge_exchange * edge_cooling_scale
+    field -= (diffusion_x + diffusion_y - corner_mix * np.minimum(diffusion_x, diffusion_y)) * edge_cooling_scale
     # Frames/seams have a different apparent IR response from the glass face.
     # Couple through the existing irregular edge-distance fields, entirely
     # inside the physical module. Nothing is painted on surrounding ground.
     frame_apparent = float(rng.uniform(109.0, 127.0))
+    if current_model:
+        frame_apparent -= 14.0
     frame_exchange = (1 - np.exp(-edge_exchange / 22.0)) * 0.90
-    field -= np.maximum(field - frame_apparent, 0) * frame_exchange
+    field -= np.maximum(field - frame_apparent, 0) * frame_exchange * edge_cooling_scale
     return field.astype(np.float32)
 
 
@@ -373,7 +400,7 @@ def thermal_elevation_response(scalar, support_mask, seed, location_id=None, geo
 
     rgb = None
     if source_image is not None:
-        rgb = np.asarray(source_image.convert("RGB").resize(size), np.float32)
+        rgb = np.asarray((source_image if source_image.mode == "RGB" else source_image.convert("RGB")).resize(size), np.float32)
     # One synthetic illumination direction per Generated scene, independent of
     # module rotation/selection. For Real Farm, use original RGB shade evidence
     # outside the tables, not the desired PV/background temperature contrast.
@@ -451,10 +478,14 @@ def thermal_elevation_response(scalar, support_mask, seed, location_id=None, geo
         shade_fraction, ambient = 0.10, 77.0
     cooling = np.clip(coverage, 0, 1) * np.maximum(surface - ambient, 0) * shade_fraction * outside
     cooling = cv2.resize(cooling, (w, h), interpolation=cv2.INTER_LINEAR)
-    return (scalar - cooling * (support_mask == 0)).astype(np.float32)
+    result = np.empty_like(scalar, dtype=np.float32)
+    for start in range(0, h, 128):
+        rows = slice(start, start + 128)
+        result[rows] = scalar[rows] - cooling[rows] * (support_mask[rows] == 0)
+    return result
 
 
-def thermal_module_frame_continuity(scalar, support_mask, geometries, seed=None):
+def thermal_module_frame_continuity(scalar, support_mask, geometries, seed=None, edge_cooling_scale=1.0):
     """Resolve all four geometry sides in scalar space before the camera PSF.
 
     A narrow, irregular cooling ceiling repairs weak thermal frame segments;
@@ -513,7 +544,9 @@ def thermal_module_frame_continuity(scalar, support_mask, geometries, seed=None)
             frame_seed = seed_for(frame_seed, seed)
         variation = thermal_coherent_field(shape, frame_seed, (5, 7))
         width_variation = thermal_coherent_field(shape, seed_for(frame_seed, "width"), (4, 6))
-        frame_width = min(short * 0.10, max(1.35 * pixel_scale, min(short * 0.025, 2.8 * pixel_scale)))
+        legacy = st.session_state.get("thermal_renderer_mode") == "Legacy Thermal (Fallback)"
+        frame_width = (min(short * 0.10, max(1.35 * pixel_scale, min(short * 0.025, 2.8 * pixel_scale)))
+                       if legacy else max(0.65, min(short * 0.012, 3.2)))
         local_width = frame_width * np.clip(1.0 + width_variation * 0.14, 0.76, 1.24)
         apparent = 115.0 + np.clip(variation * 7.0, -11.0, 11.0)
         # In cool/shaded modules the same physical rim still needs a small
@@ -523,7 +556,12 @@ def thermal_module_frame_continuity(scalar, support_mask, geometries, seed=None)
         # response under the unchanged PSF. Bound this pre-optics compensation
         # by local scalar rim/face contrast; never sharpen the finished image.
         bleed = np.maximum(rim_reference - face_reference, 0) * 0.35
-        apparent = np.maximum(42.0, np.minimum(apparent, face_reference - 18.0 - bleed))
+        apparent = (np.maximum(42.0, np.minimum(apparent, face_reference - 18.0 - bleed))
+                    if legacy else np.minimum(99.0 + variation * 4.0, face_reference - 25.0))
+        # Camera previews retain a slight frame contrast without forcing every
+        # perimeter down to the deep-purple legacy apparent-temperature floor.
+        if edge_cooling_scale != 1.0:
+            apparent = face_reference + (apparent - face_reference) * edge_cooling_scale
         # The rising scalar ceiling limits the repair to a narrow smooth rim.
         # Min-composition preserves naturally stronger edges and intersections
         # without doubled cooling or uniform corner dots at shared seams.
@@ -534,7 +572,7 @@ def thermal_module_frame_continuity(scalar, support_mask, geometries, seed=None)
 
 
 def thermal_boundary_response(scalar, support_mask, seed, location_id=None, geometries=None, source_image=None,
-                              module_geometries=None):
+                              module_geometries=None, edge_cooling_scale=1.0):
     """Thermal, not geometric, imperfection at the authoritative PV boundary.
 
     Local module temperatures influence separator contrast; a spatially varying
@@ -549,19 +587,36 @@ def thermal_boundary_response(scalar, support_mask, seed, location_id=None, geom
     scale = max(0.8, max(h, w) / 2100.0)
     distance = cv2.distanceTransform(inside, cv2.DIST_L2, 3)
     distance += cv2.distanceTransform(1 - inside, cv2.DIST_L2, 3)
-    uneven = thermal_coherent_field(scalar.shape, seed_for(seed, "boundary-transfer"), (65, 90))
     fine = thermal_coherent_field(scalar.shape, seed_for(seed, "boundary-local-transfer"), (110, 150))
-    band = np.exp(-distance / (1.7 * scale * np.clip(1 + fine * 0.25, 0.55, 1.65)))
+    # The distance plane becomes the band; row expressions preserve float32
+    # operation order without allocating several more native-size planes.
+    band = distance
+    for start in range(0, h, 128):
+        rows = slice(start, start + 128)
+        band[rows] = np.exp(-band[rows] / (1.7 * scale * np.clip(1 + fine[rows] * 0.25, 0.55, 1.65)))
+    uneven = thermal_coherent_field(scalar.shape, seed_for(seed, "boundary-transfer"), (65, 90))
     pv_weight = cv2.GaussianBlur(inside.astype(np.float32), (0, 0), 2.2 * scale)
-    pv_average = cv2.GaussianBlur(scalar * inside, (0, 0), 2.2 * scale) / np.maximum(pv_weight, 0.02)
-    relaxation = np.clip(0.22 + uneven * 0.16 + fine * 0.12, 0.0, 0.55) * band * np.clip(pv_weight * 3, 0, 1)
-    out = scalar + np.clip(pv_average - scalar, 0, 48) * relaxation
+    out = np.empty_like(scalar)
+    np.multiply(scalar, inside, out=out)
+    cv2.GaussianBlur(out, (0, 0), 2.2 * scale, dst=out)
+    for start in range(0, h, 128):
+        rows = slice(start, start + 128)
+        pv_average = out[rows] / np.maximum(pv_weight[rows], 0.02)
+        relaxation = np.clip(0.22 + uneven[rows] * 0.16 + fine[rows] * 0.12, 0.0, 0.55) * band[rows] * np.clip(pv_weight[rows] * 3, 0, 1)
+        out[rows] = scalar[rows] + np.clip(pv_average - scalar[rows], 0, 48) * relaxation
+        band[rows] *= np.clip(0.30 + uneven[rows] * 0.09 + fine[rows] * 0.13, 0.04, 0.65)
+    del distance, uneven, fine, pv_weight, pv_average, relaxation, inside
     softened = cv2.GaussianBlur(out, (0, 0), 1.05 * scale)
-    mix = band * np.clip(0.30 + uneven * 0.09 + fine * 0.13, 0.04, 0.65)
-    healthy = (out * (1 - mix) + softened * mix).astype(np.float32)
-    healthy = thermal_elevation_response(healthy, support_mask, seed, location_id, geometries, source_image)
+    for start in range(0, h, 128):
+        rows = slice(start, start + 128)
+        mix = band[rows]
+        out[rows] = out[rows] * (1 - mix) + softened[rows] * mix
+    del softened, band, mix
+    healthy = thermal_elevation_response(out, support_mask, seed, location_id, geometries, source_image)
+    del out
     return thermal_module_frame_continuity(
-        healthy, support_mask, module_geometries if module_geometries is not None else geometries
+        healthy, support_mask, module_geometries if module_geometries is not None else geometries,
+        edge_cooling_scale=edge_cooling_scale
     )
 
 
@@ -574,7 +629,7 @@ def thermal_context_on_module(scene_drift, points, size):
                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
 
 
-def composite_healthy_thermal_module(temp, points, scene_drift, seed, panel_min, panel_max, support_mask=None):
+def composite_healthy_thermal_module(temp, points, scene_drift, seed, panel_min, panel_max, support_mask=None, source_gray=None):
     """Project one healthy plane into a scene ROI; masks/geometry stay unchanged."""
     points = np.asarray(points, dtype=np.float32)
     height, width = temp.shape
@@ -588,6 +643,13 @@ def composite_healthy_thermal_module(temp, points, scene_drift, seed, panel_min,
     local = healthy_thermal_module_field(size, seed, panel_min, panel_max)
     local += thermal_context_on_module(scene_drift, points, size)
     canonical = np.asarray([[0, 0], [local_width - 1, 0], [local_width - 1, local_height - 1], [0, local_height - 1]], dtype=np.float32)
+    if source_gray is not None and st.session_state.get("thermal_renderer_mode") != "Legacy Thermal (Fallback)":
+        to_local = cv2.getPerspectiveTransform(points, canonical)
+        observed = cv2.warpPerspective(source_gray, to_local, size, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+        detail = observed - cv2.GaussianBlur(observed, (0, 0), 1.0)
+        # Retain source-supported seams, not an invented electrical cell grid.
+        detail /= max(2.0, float(np.percentile(np.abs(detail), 96)))
+        local -= np.clip(detail, 0, 1) * 9.0
     matrix = cv2.getPerspectiveTransform(canonical, points - np.asarray([x1, y1], dtype=np.float32))
     roi_size = (int(x2 - x1), int(y2 - y1))
     # Replicate the cooled edge rather than interpolating scalar values with zero.
@@ -597,3 +659,24 @@ def composite_healthy_thermal_module(temp, points, scene_drift, seed, panel_min,
         support *= support_mask[y1:y2, x1:x2]
     roi = temp[y1:y2, x1:x2]
     roi[:] = roi * (1 - support) + warped * support
+
+
+def thermal_records_for_distance(records, scene_distance, selected_row_id=None, selected_cell_id=None):
+    """Resolve one active effect per target identically in Far, Close and export.
+
+    A saved diagnosis replaces its scout hotspot; it never stacks on that hotspot.
+    Viewing distance must not change the simulated fault or silently hide it.
+    """
+    observations = set(FAR_SCOUT_FAULT_TYPES) | set(HOTSPOT_FAULTS)
+    targets = {}
+    for record in records or []:
+        key = (record.get("location_id"), record.get("row_id"), record.get("target_cell_id"))
+        previous = targets.get(key)
+        if previous is None or canonical_fault_type(record.get("fault_type", "")) not in observations:
+            targets[key] = record
+    return list(targets.values())
+
+
+def healthy_thermal_module_field(size, seed, panel_min=164, panel_max=196, edge_cooling_scale=1.0, interior_detail=0.15):
+    """Restore the scalar frame exchange and inward diffusion before mapping."""
+    return legacy_healthy_thermal_module_field(size, seed, panel_min, panel_max, edge_cooling_scale=edge_cooling_scale, interior_detail=interior_detail)

@@ -12,7 +12,11 @@ _SECTION_FILES = [
     "pv_render_rgb.py",
     "pv_thermal_realism.py",
     "pv_render_thermal.py",
+    "pv_reference_demo.py",
     "pv_real_farm.py",
+    "pv_real_farm_camera.py",
+    "pv_real_farm_catalog.py",
+    "pv_real_thermal_input.py",
     "pv_ui.py",
 ]
 

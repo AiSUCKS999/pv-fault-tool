@@ -1,0 +1,26 @@
+{
+  "id": "image_01",
+  "number": 1,
+  "label": "01 - 1.png (837 x 471)",
+  "rgb": "catalog/image_01/source.png",
+  "rgb_file_sha256": "26bd9ca51619c0cbe861dc62659112f8b802ffc2657b0b4e703cf190b3a5ed73",
+  "rgb_pixel_sha256": "e5dcaa0d7b387e320be2d362e877159375f667804ae27283e82338927eae79e9",
+  "image_size": [
+    837,
+    471
+  ],
+  "project": "catalog/image_01/geometry.json",
+  "project_sha256": "5f56bedca0f412ed93069a235698c0511ba8c1de83fd9ad9dbf6af47a1175f8a",
+  "pv_mask": "catalog/image_01/pv_mask.png",
+  "pv_mask_sha256": "2f8516e62210df5efb24397d3e12ca373c619a253ac04a43c7d7547b79103bd1",
+  "thermal": "catalog/image_01/healthy_thermal.png",
+  "thermal_sha256": "5494cacb457f76c6b6ee75570c285daec32bc5e5641848c5106109c01c9e3a50",
+  "ignore_mask": "catalog/image_01/ignore_mask.png",
+  "ignore_mask_sha256": "b7dc6eae3a6d3faafd83fead4732f251446817132f23635828330f089c1e5850",
+  "module_count": 180,
+  "status": "APPROVED FOR SIMULATION",
+  "frozen": true,
+  "pinned": true,
+  "training_user_verified": false,
+  "thermal_kind": "saved synthetic relative thermal; not measured temperature"
+}
