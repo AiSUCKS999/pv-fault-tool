@@ -20,7 +20,7 @@ def real_farm_camera_structure_checks(state,image,candidates):
     if candidates and reviewed>=len(candidates)*.75:return {}
     signature=real_farm_geometry_signature(state.get("modules",[]))
     cached=state.get("camera_structure_check",{})
-    if cached.get("source")==source and cached.get("geometry")==signature and cached.get("version")==2:return cached["rejected"]
+    if cached.get("source")==source and cached.get("geometry")==signature and cached.get("version")==3:return cached["rejected"]
     rgb=real_farm_rgb_array(image);rejected={}
     for module in candidates:
         q=np.float32(module["active_polygon_rgb"])
@@ -46,9 +46,9 @@ def real_farm_camera_structure_checks(state,image,candidates):
             rejected[module["module_id"]]="No repeated internal cell structure in both directions; physical module unresolved"
     initial_rejections=len(rejected)
     unreliable=bool(candidates and initial_rejections/len(candidates)>.25)
-    if unreliable:
-        rejected={m["module_id"]:"Scene-level cell/module confusion; automatic geometry withheld" for m in candidates}
-    state["camera_structure_check"]={"version":2,"source":source,"geometry":signature,"rejected":rejected,
+    # A weak region must not veto unrelated modules that pass this same check.
+    # Preserve individual rejections and all subsequent placement safeguards.
+    state["camera_structure_check"]={"version":3,"source":source,"geometry":signature,"rejected":rejected,
         "cell_scale_rejections":initial_rejections,"scene_geometry_unreliable":unreliable,
         "method":"internal_structure_safety_gate_not_module_verification"}
     return rejected
@@ -155,6 +155,7 @@ def real_farm_camera_local_target(state,image,point,allow_point=False):
     target["provenance"].update(created_by="Exploratory camera target",geometry_method="LOCAL_RGB_SUPPORT" if resolved else "PV_POINT_FOOTPRINT_ONLY")
     return target
 
+
 def real_farm_camera_simulation_targets(state,image,candidates,credible):
     """Camera-only recovery; canonical modules/reviews/verified export untouched."""
     identity=real_farm_source_identity(image)
@@ -176,6 +177,7 @@ def real_farm_camera_simulation_targets(state,image,candidates,credible):
                 cache["targets"].append(target);break
     return [t for t in cache["targets"] if t.get("source_rgb_pixel_sha256")==identity]
 
+
 def real_farm_camera_polygon_target(state,image,polygon,anchor=None):
     """Rebuild only an exploratory target's transform after corner editing."""
     if not real_farm_mechanical_validation(polygon,image.size)["mechanically_valid"]:return None
@@ -196,6 +198,7 @@ def real_farm_camera_polygon_target(state,image,polygon,anchor=None):
     target["provenance"].update(created_by="Exploratory camera target",geometry_method="SELECTED_RGB_POLYGON")
     target["confidence"].update(label="PROVISIONAL_SIMULATION_ONLY",module_polygon="SELECTED_RGB_POLYGON")
     return target
+
 
 def real_farm_camera_pick_target(state,image,selected):
     """One click and confirmation, without editing the farm's annotation set."""
@@ -245,6 +248,7 @@ def real_farm_camera_pick_target(state,image,selected):
 
     return refresh
 
+
 def real_farm_camera_new_observation(state,image,target,severity=7):
     observations=state.setdefault("camera_observations",[])
     observation=real_farm_add_module_observation([target],observations,target["module_id"],severity,42)
@@ -260,6 +264,7 @@ def real_farm_camera_new_observation(state,image,target,severity=7):
     state["camera_select_observation_queue"]=observation["observation_id"]
     return observation
 
+
 def real_farm_camera_observation_source(state,image):
     source=real_farm_source_identity(image)
     observations=state.setdefault("camera_observations",[])
@@ -274,6 +279,7 @@ def real_farm_camera_observation_source(state,image):
         observation.setdefault("source_rgb_pixel_sha256",source)
         if observation.get("diagnostic_fault_type")=="SingleHotSpot":observation["diagnostic_fault_type"]=None
         observation.update(simulation_only=True,training_verified=False)
+
 
 def real_farm_camera_observation_field(layers,observations):
     """Existing fault engine; retain bounded native footprint evidence per RFH."""
@@ -301,6 +307,7 @@ def real_farm_camera_observation_field(layers,observations):
             "reference_id":observation.get("production_reference_ids",{}).get(diagnosis)}
         if diagnosis=="SingleHotSpot":observation["hotspot_footprint_rgb"]=json.loads(json.dumps(observation["footprint_rgb"]))
     return field
+
 
 def real_farm_camera_observation_controls(state,image,targets,view):
     observations=state["camera_observations"]
@@ -330,8 +337,20 @@ def real_farm_camera_observation_controls(state,image,targets,view):
             format_func=lambda code:"Thermal Hotspot Symptom / Unassigned" if code=="SingleHotSpot" else real_farm_diagnostic_label(code),
             key=f"{key}_{chosen}_diagnosis")
         severity=st.slider("Observation severity",1,10,int(observation.get("severity",7)),key=f"{key}_{chosen}_severity")
-        observation.update(diagnostic_fault_type=None if diagnosis=="SingleHotSpot" else diagnosis,severity=severity)
         st.caption("Reference-backed morphology · synthetic placement and relative intensity" if diagnosis in {"SingleHotSpot","SingleDiode","SingleByPassed"} else "Synthetic diagnostic pattern · unvalidated")
+        apply_col,remove_col=st.columns(2)
+        if apply_col.button("Generate / Apply Fault",type="primary",use_container_width=True,
+                            key=f"{key}_{chosen}_apply"):
+            observation.update(diagnostic_fault_type=None if diagnosis=="SingleHotSpot" else diagnosis,severity=severity)
+            state["updated_at"]=real_farm_now()
+        if remove_col.button("Remove / Reset Fault",disabled=not observation.get("diagnostic_fault_type"),
+                             use_container_width=True,key=f"{key}_{chosen}_remove"):
+            observation["diagnostic_fault_type"]=None
+            observation.pop("applied_faults",None)
+            st.session_state.pop(f"{key}_{chosen}_diagnosis",None)
+            st.session_state.pop(f"{key}_{chosen}_severity",None)
+            state["updated_at"]=real_farm_now()
+            st.rerun()
     diagnosis=observation.get("diagnostic_fault_type")
     st.caption("Current diagnosis: "+(real_farm_diagnostic_label(diagnosis) if diagnosis else "Unassigned hotspot symptom"))
     return observation
@@ -339,13 +358,38 @@ def real_farm_camera_observation_controls(state,image,targets,view):
 
 def real_farm_camera_saved_geometry(state,image):
     """Reuse the newest matching local project; never replace edited live work."""
-    capture=state.get("camera_capture",{})
-    if state.get("modules") and not (
-        capture.get("geometry")==real_farm_geometry_signature(state["modules"])
-        and not state.get("geometry_review_triage")
-        and state.get("camera_analysis_source")==real_farm_source_identity(image)
-    ):return False
+    # A camera refresh must not replace live geometry or erase observations.
+    if state.get("modules"):return False
     identity=real_farm_source_identity(image)
+    if state.get("camera_prepared_source")==identity:return False
+    prepared_root=ROOT/"assets"/"real_farm_prepared"
+    index=prepared_root/"index.json"
+    if index.is_file():
+        try:
+            entry=json.loads(index.read_text(encoding="utf-8")).get("sources",{}).get(identity)
+            if entry and entry.get("image_size")==list(image.size):
+                path=(prepared_root/entry["project"]).resolve()
+                if not path.is_relative_to(prepared_root.resolve()):raise ValueError("Prepared project leaves dataset directory")
+                if hashlib.sha256(path.read_bytes()).hexdigest()!=entry["project_sha256"]:raise ValueError("Prepared project hash changed")
+                project=real_farm_load_project(path)
+                if project.get("source_rgb_pixel_sha256")!=identity or project.get("image")!={"width":image.width,"height":image.height}:raise ValueError("Prepared project/source mismatch")
+                origin_type="prepared_source_matched_project"
+                # A later correction saved through the existing review workflow
+                # takes precedence over an older prepared copy of this source.
+                newer=[] if entry.get("frozen") or entry.get("pinned") else sorted(REAL_FARM_PROJECT_DIR.glob("*.json"),key=lambda p:p.stat().st_mtime,reverse=True)
+                for saved in newer:
+                    if saved.stat().st_mtime<=path.stat().st_mtime:continue
+                    try:updated=real_farm_load_project(saved)
+                    except (OSError,ValueError):continue
+                    if updated.get("source_rgb_pixel_sha256")==identity and updated.get("image")==project["image"] and updated.get("modules"):
+                        project,path,origin_type=updated,saved,"saved_source_matched_project"
+                        break
+                for key in ("modules","module_tables","geometry_review_triage","full_farm_review","bounded_review","physical_geometry_review_required","panel_detection_method","camera_simulation","camera_geometry_partial","dataset_preparation","camera_preparation_response"):
+                    if key in project:state[key]=project[key]
+                state.update(camera_prepared_source=identity,camera_geometry_origin={"type":origin_type,"path":str(path),"source":identity,"status":entry["status"] if origin_type=="prepared_source_matched_project" else "SAVED GEOMETRY"},camera_recovery_message="",camera_observations=[])
+                return True
+        except (OSError,ValueError,KeyError,TypeError) as exc:
+            state["camera_recovery_message"]="Prepared geometry could not be reused: "+str(exc)
     paths=sorted(REAL_FARM_PROJECT_DIR.glob("*.json"),key=lambda p:p.stat().st_mtime,reverse=True)
     for path in paths:
         try:project=real_farm_load_project(path)
@@ -353,19 +397,39 @@ def real_farm_camera_saved_geometry(state,image):
         if project.get("source_rgb_pixel_sha256")!=identity or project.get("image")!={"width":image.width,"height":image.height}:continue
         if not project.get("modules"):continue
         for key in ("modules","module_tables","geometry_review_triage","full_farm_review","bounded_review",
-                    "physical_geometry_review_required","panel_detection_method"):
+                    "physical_geometry_review_required","panel_detection_method","camera_preparation_response"):
             if key in project:state[key]=project[key]
         state["camera_geometry_origin"]={"type":"saved_source_matched_project","path":str(path),"source":identity}
         state["camera_recovery_message"]=""
         state["camera_observations"]=[]
         return True
+    # Existing corrected baselines are also saved geometry. Do not rerun a
+    # coarse recovery on their exact source and lose physical module splits.
+    registry=ROOT/"assets"/"geometry_reviews"/"real_farm_iteration4.json"
+    if registry.exists():
+        records=json.loads(registry.read_text(encoding="utf-8-sig")).get("sources",[])
+        baseline_root=(ROOT/"artifacts"/"real_farm_geometry_iteration4").resolve()
+        for record in records:
+            if record.get("rgb_sha256")!=identity or record.get("image_size")!=list(image.size):continue
+            scene=record.get("scene","")
+            if not scene or Path(scene).name!=scene or scene in {".",".."}:continue
+            # Retain the project's existing D: junction for the Long baseline.
+            baseline=baseline_root/scene/"after_modules.json"
+            if not baseline.is_file():continue
+            modules=json.loads(baseline.read_text(encoding="utf-8-sig"))
+            if not isinstance(modules,list) or not modules:continue
+            state.update(modules=modules,physical_geometry_review_required=True,
+                panel_detection_method="SOURCE_MATCHED_SAVED_GEOMETRY",
+                camera_geometry_origin={"type":"saved_source_matched_baseline","path":str(baseline),"source":identity},
+                camera_recovery_message="",camera_observations=[])
+            return True
     return False
 
 
 def real_farm_camera_analyze(state,image,progress):
     """Recover once for a fresh upload; never replace existing reviewed geometry."""
     real_farm_camera_saved_geometry(state,image)
-    if not state.get("modules"):
+    if not state.get("modules") and state.get("camera_prepared_source")!=real_farm_source_identity(image):
         if real_farm_source_is_reviewed(image):
             result=real_farm_legacy_recover_full_farm(state,image,progress)
         else:
@@ -399,38 +463,327 @@ def real_farm_camera_warm_background(layers,image,modules):
         layers["master_scalar"][rows] += delta*weight
 
 
+def real_farm_camera_surface_regions(image):
+    """Camera-only PV surface envelopes, never individual module annotations."""
+    from pv_module_recovery import material_mask
+    rgb=real_farm_rgb_array(image)
+    support=material_mask(rgb)
+    # Same local PV evidence as click placement; retain glass under cyan glare.
+    for start in range(0,image.height,128):
+        rows=slice(start,start+128)
+        r,g,b=(rgb[rows,:,i].astype(np.int16) for i in range(3))
+        support[rows]=np.maximum(support[rows],np.uint8((b>=g-4)&(b>r+6))*255)
+    # Existing native 3px grouping, not preview-scale dilation or grid slicing.
+    support=cv2.morphologyEx(support,cv2.MORPH_CLOSE,np.ones((3,3),np.uint8))
+    contours,_=cv2.findContours(support,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    regions=[]
+    for contour in contours:
+        if cv2.contourArea(contour)<120:continue
+        q=cv2.boxPoints(cv2.minAreaRect(contour))
+        # Keep the actual table transform across the image boundary. Raster
+        # ROIs clip its visible support; clamping corners shears the surface.
+        if not real_farm_mechanical_validation(q,image.size)["mechanically_valid"]:continue
+        record=real_farm_module_record("SURFACE-"+str(len(regions)+1),q.tolist(),image.size,inset_ratio=0.,provenance_note="camera_surface_envelope_not_a_module")
+        # Keep the actual contour, including occlusion holes, inside its envelope.
+        # Bright neutral frames/glare inside this connected PV hull are not
+        # holes in the glass. Preserve vegetation and genuine dark occlusions.
+        low=np.maximum(0,np.floor(q.min(0)).astype(int));high=np.minimum(image.size,np.ceil(q.max(0)).astype(int)+1)
+        x1,y1=low;x2,y2=high
+        local=support[y1:y2,x1:x2].copy()
+        hsv=cv2.cvtColor(rgb[y1:y2,x1:x2],cv2.COLOR_RGB2HSV)
+        hull=np.zeros(local.shape,np.uint8)
+        cv2.fillConvexPoly(hull,cv2.convexHull(contour).reshape(-1,2)-low,255)
+        local[(hull>0)&(hsv[:,:,1]<48)&(hsv[:,:,2]>82)]=255
+        # Blue cast shadows are not glass. Use a lower-tail compatibility
+        # guard relative to the brighter observed glass, not the former 5th
+        # percentile cutoff that bisected normal cell texture. This is support
+        # classification only; RGB brightness never sets the thermal signal.
+        gray=cv2.cvtColor(rgb[y1:y2,x1:x2],cv2.COLOR_RGB2GRAY)
+        observed=gray[local>0]
+        if len(observed):local[gray<.7*float(np.percentile(observed,75))]=0
+        # Update the one shared support plane; attachment crops its own ROI.
+        support[y1:y2,x1:x2]=local
+        real_farm_attach_instance_support(record,support)
+        record.update(camera_surface_only=True,camera_table_surface=True,requires_physical_review=False,physical_module_unresolved=False)
+        regions.append(record)
+    return regions
+
+
+def real_farm_camera_source_frames(layers,image,regions):
+    """Map only observed neutral frame/cell ridges into the existing cool response.
+
+    Known cell fragments must not create their own procedural perimeter. Sample
+    the established healthy model's frame response instead of inventing lines.
+    Work in native source ROIs; fine source structure is never enlarged first.
+    """
+    rgb=real_farm_rgb_array(image);field=layers["master_scalar"]
+    for region in regions:
+        q=np.float32(region["outer_polygon_rgb"])
+        x1,y1=np.maximum(0,np.floor(q.min(0)).astype(int))
+        x2,y2=np.minimum([image.width,image.height],np.ceil(q.max(0)).astype(int)+1)
+        part=rgb[y1:y2,x1:x2]
+        if not part.size:continue
+        neutral=part.min(2).astype(np.float32)
+        # Positive source ridges locate real reflective frames/busbars. This
+        # changes apparent frame response, not a brightness-to-temperature map.
+        detail=np.maximum(neutral-cv2.GaussianBlur(neutral,(0,0),1.0),0)
+        visible=real_farm_module_mask(image.size,[region],True,(int(x1),int(y1),int(x2),int(y2)))>0
+        values=detail[visible]
+        if not len(values):continue
+        ridge=np.clip(detail/max(2.,float(np.percentile(values,98))),0,1)
+        # Suppress texture inside blue glass; retain neutral physical structures.
+        chroma=part.max(2).astype(float)-part.min(2)
+        ridge*=np.clip((65.-chroma)/45.,0,1)*visible
+        model=healthy_thermal_module_field((128,192),seed_for(tuple(q.ravel()),"source-frame-response"),164,196,interior_detail=.65)
+        frame=float(np.median(np.r_[model[0,:],model[-1,:],model[:,0],model[:,-1]]))
+        roi=field[y1:y2,x1:x2]
+        roi-=np.maximum(roi-frame,0)*ridge
+    return field
+
+
+def real_farm_camera_module_edge_response(layers,image,modules,require_frame_evidence=False,edge_width_fraction=None):
+    """Thin, inner-only physical-frame cooling; no geometry or mask changes.
+
+    One max-strength response at shared seams/corners prevents doubled borders.
+    Uncertain polygons receive cooling only at existing source-supported ridges.
+    All samples read the unchanged healthy field before sparse min-composition.
+    """
+    field=layers["master_scalar"];visible=layers["pv_module_union_mask"]
+    rgb=real_farm_rgb_array(image);updates=[]
+    for module in modules:
+        outer=np.float32(module.get("outer_polygon_rgb",[]))
+        active=np.float32(module.get("active_polygon_rgb",[]))
+        if outer.shape!=(4,2) or active.shape!=(4,2):continue
+        short=float(min(np.linalg.norm(np.roll(outer,-1,axis=0)-outer,axis=1)))
+        if short<4:continue
+        low=np.maximum(0,np.floor(outer.min(0)).astype(int)-3)
+        high=np.minimum(image.size,np.ceil(outer.max(0)).astype(int)+4)
+        x1,y1=low;x2,y2=high
+        shape=(int(y2-y1),int(x2-x1))
+        if min(shape)<=0:continue
+        yy,xx=np.mgrid[:shape[0],:shape[1]].astype(np.float32)
+        distance=np.full(shape,np.inf,np.float32)
+        inset=np.zeros(shape,np.float32)
+        frame_evidence=np.ones(shape,np.float32)
+        if require_frame_evidence:
+            part=rgb[y1:y2,x1:x2]
+            neutral=part.min(2).astype(np.float32)
+            ridge=np.clip((neutral-cv2.GaussianBlur(neutral,(0,0),1.0))/8.,0,1)
+            chroma=part.max(2).astype(np.float32)-neutral
+            frame_evidence=ridge*np.clip((82.-chroma)/50.,0,1)
+        for i in range(4):
+            a,b=outer[i]-low,outer[(i+1)%4]-low;edge=b-a
+            t=np.clip(((xx-a[0])*edge[0]+(yy-a[1])*edge[1])/max(float(edge@edge),1e-6),0,1)
+            d=np.hypot(xx-a[0]-t*edge[0],yy-a[1]-t*edge[1])
+            if require_frame_evidence:
+                # Do not cool an uncertain diagonal/cell-fragment edge merely
+                # because it crosses a few real frames. Require sustained
+                # source ridge support along that existing polygon side.
+                along=np.linspace(.08,.92,max(8,int(np.linalg.norm(edge))))
+                ex=np.clip(np.rint(a[0]+along*edge[0]).astype(int),0,shape[1]-1)
+                ey=np.clip(np.rint(a[1]+along*edge[1]).astype(int),0,shape[0]-1)
+                if np.mean(frame_evidence[ey,ex]>.25)<.45:continue
+            rim=np.linalg.norm(active[i]-outer[i])*(1-t)+np.linalg.norm(active[(i+1)%4]-outer[(i+1)%4])*t
+            inset=np.where(d<distance,rim,inset);distance=np.minimum(distance,d)
+        inside=np.zeros(shape,np.uint8)
+        cv2.fillConvexPoly(inside,np.rint(outer-low).astype(np.int32),1)
+        seed=seed_for(tuple(np.round(outer,2).ravel()),"physical-frame-continuity")
+        variation=thermal_coherent_field(shape,seed,(5,7))
+        widths=thermal_coherent_field(shape,seed_for(seed,"width"),(4,6))
+        # Source-native pixel width follows projected dimensions. The rim and
+        # inner diffusion form ONE band, not separate outer/active outlines.
+        width=np.clip(short*.04,.8,2.)
+        if edge_width_fraction is not None:
+            # A source-bound frame measurement can retain its projected width
+            # at native resolution instead of the small-preview two-pixel cap.
+            width=np.clip(short*float(edge_width_fraction),.8,max(2.,short*.06))
+        width*=np.clip(1+widths*.12,.8,1.2)
+        reach=np.minimum(short*.12,np.maximum(width*2.,inset+width))
+        t=np.clip(distance/np.maximum(reach,.1),0,1)
+        weight=(1-t)*(1-t)*(1+2*t)
+        weight*=np.clip(.92+variation*.08,.72,1.)
+        if require_frame_evidence:weight*=frame_evidence
+        weight*=np.uint8((inside>0)&(visible[y1:y2,x1:x2]>0))
+        roi=field[y1:y2,x1:x2]
+        # Same apparent-frame response as the existing continuity model.
+        ceiling=roi-np.maximum(roi-(99.+variation*4.),0)*weight
+        y,x=np.nonzero(ceiling<roi)
+        updates.append((y+y1,x+x1,ceiling[y,x]))
+    for y,x,ceiling in updates:field[y,x]=np.minimum(field[y,x],ceiling)
+    return field
+
+
+def real_farm_camera_physical_rim_support(layers,image,modules):
+    """Keep confirmed frame material out of the substrate composition.
+
+    Extend the adjacent healthy PV field across its physical rim before the
+    existing edge response. Read one unchanged plane; average shared rims.
+    Active glass, occlusion holes and exterior pixels are never replaced.
+    """
+    if not modules:return
+    quads=np.concatenate([np.float32(m["outer_polygon_rgb"]) for m in modules])
+    low=np.maximum(0,np.floor(quads.min(0)).astype(int)-1)
+    high=np.minimum(image.size,np.ceil(quads.max(0)).astype(int)+2)
+    x1,y1=map(int,low);x2,y2=map(int,high)
+    if x2<=x1 or y2<=y1:return
+    field=layers["master_scalar"];original=field[y1:y2,x1:x2].copy()
+    bounds=(x1,y1,x2,y2);total=np.zeros_like(original);count=np.zeros(original.shape,np.uint8)
+    all_glass=real_farm_module_mask(image.size,modules,active=True,bounds=bounds)>0
+    for module in modules:
+        active=real_farm_module_mask(image.size,[module],active=True,bounds=bounds)>0
+        if not np.any(active):continue
+        outer=real_farm_module_mask(image.size,[module],active=False,bounds=bounds)>0
+        rim=outer&~all_glass
+        for hole in module.get("refined_mask_holes_rgb",[]):
+            excluded=np.zeros(original.shape,np.uint8)
+            cv2.fillPoly(excluded,[np.rint(np.float32(hole)-low).astype(np.int32)],1)
+            rim[excluded>0]=False
+        _,labels=cv2.distanceTransformWithLabels(np.uint8(~active),cv2.DIST_L2,5,labelType=cv2.DIST_LABEL_PIXEL)
+        yy,xx=np.nonzero(active);lookup=np.zeros(int(labels.max())+1,np.float32)
+        lookup[labels[yy,xx]]=original[yy,xx]
+        total[rim]+=lookup[labels[rim]];count[rim]+=1
+    valid=count>0;field[y1:y2,x1:x2][valid]=total[valid]/count[valid]
+
+
+def real_farm_camera_uncovered_surfaces(layers,image,modules):
+    """Render isolated source-supported PV omissions, without annotation repair.
+
+    An absent detector polygon must not assign normal glass the generic cool
+    blue-object background prior. Reuse the existing healthy surface model only
+    for a module-sized, source-supported gap between comparable PV surfaces.
+    These envelopes never enter selectable geometry or verified export labels.
+    """
+    from pv_module_recovery import material_mask
+    if not modules:return
+    rgb=real_farm_rgb_array(image)
+    outer=real_farm_module_mask(image.size,modules,active=False)
+    missing=cv2.bitwise_and(material_mask(rgb),cv2.bitwise_not(outer))
+    missing=cv2.morphologyEx(missing,cv2.MORPH_CLOSE,np.ones((3,3),np.uint8))
+    missing[outer>0]=0
+    contours,_=cv2.findContours(missing,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    quads=[np.float32(m["outer_polygon_rgb"]) for m in modules]
+    typical=float(np.median([cv2.contourArea(q) for q in quads]))
+    centers=np.array([q.mean(0) for q in quads])
+    regions=[]
+    for contour in contours:
+        area=cv2.contourArea(contour)
+        if not .55*typical<=area<=1.8*typical:continue
+        x,y,w,h=cv2.boundingRect(contour)
+        # Partial image-edge surfaces and thin inter-table strips are not gaps.
+        if x<=0 or y<=0 or x+w>=image.width or y+h>=image.height:continue
+        q=cv2.boxPoints(cv2.minAreaRect(contour))
+        lengths=np.linalg.norm(np.roll(q,-1,axis=0)-q,axis=1)
+        short=float(min(lengths))
+        if area/max(cv2.contourArea(q),1)<.8:continue
+        adjacent=[]
+        for side in range(4):
+            points=q[side]+np.linspace(.2,.8,9)[:,None]*(q[(side+1)%4]-q[side])
+            # Check existing physical surfaces just beyond each proposed side.
+            outward=points-q.mean(0)
+            outward/=np.maximum(np.linalg.norm(outward,axis=1)[:,None],1.)
+            points=np.rint(points+outward*max(3.,short*.08)).astype(int)
+            points=np.clip(points,[0,0],[image.width-1,image.height-1])
+            adjacent.append(np.mean(outer[points[:,1],points[:,0]]>0)>.5)
+        if not ((adjacent[0] and adjacent[2]) or (adjacent[1] and adjacent[3])):continue
+        # Do not reinterpret a genuinely dark/shaded/covered surface as healthy.
+        neighbors=np.argsort(np.linalg.norm(centers-q.mean(0),axis=1))[:3]
+        level=[]
+        for index in neighbors:
+            center=np.rint(centers[index]).astype(int)
+            level.append(float(np.median(rgb[max(0,center[1]-3):center[1]+4,max(0,center[0]-3):center[0]+4])))
+        local=rgb[y:y+h,x:x+w];support=missing[y:y+h,x:x+w]>0
+        if not .7<=float(np.median(local[support]))/max(float(np.median(level)),1.)<=1.4:continue
+        # Same support rule as existing camera surface envelopes: neutral
+        # reflective frame pixels inside the PV hull are not substrate holes.
+        hull=np.zeros((h,w),np.uint8)
+        cv2.fillConvexPoly(hull,cv2.convexHull(contour).reshape(-1,2)-[x,y],255)
+        hsv=cv2.cvtColor(local,cv2.COLOR_RGB2HSV)
+        visible=(hull>0)&(hsv[:,:,1]<48)&(hsv[:,:,2]>82)&(outer[y:y+h,x:x+w]==0)
+        missing[y:y+h,x:x+w][visible]=255
+        record=real_farm_module_record("SURFACE-GAP-"+str(len(regions)+1),q.tolist(),image.size,inset_ratio=0.,provenance_note="camera_surface_envelope_not_a_module")
+        real_farm_attach_instance_support(record,missing)
+        record.update(camera_surface_only=True,requires_physical_review=False,physical_module_unresolved=False)
+        regions.append(record)
+    if not regions:return
+    # Native source coordinates and the established scalar renderer: no palette
+    # edits, flat fills, new fault models, or changes to existing module pixels.
+    scalar,support=real_farm_module_scalar_layer(image,regions,interior_detail=.65)
+    real_farm_camera_module_edge_response({"master_scalar":scalar,"pv_module_union_mask":support},image,regions)
+    support[outer>0]=0
+    field=layers["master_scalar"]
+    for start in range(0,image.height,128):
+        rows=slice(start,start+128);valid=support[rows]>0
+        field[rows][valid]=scalar[rows][valid]
+        layers["pv_module_union_mask"][rows][valid]=255
+    layers["camera_uncovered_surface_count"]=len(regions)
+
+
 def real_farm_camera_build_layers(state,image):
     candidates,credible=real_farm_camera_candidates(state,image)
+    response=state.get("camera_preparation_response",{})
+    native_frames=(response.get("mode")=="native_physical_frames" and
+        response.get("source")==real_farm_source_identity(image) and
+        response.get("geometry")==real_farm_geometry_signature(state.get("modules",[])))
     # The established renderer consumes ephemeral simulation geometry. Clearing
     # its rendering gate on COPIES does not approve stored annotation geometry.
     structure_rejected=real_farm_camera_structure_checks(state,image,candidates)
     render_modules=[]
-    for module in candidates:
-        if module["module_id"] in structure_rejected:continue
+    # A known-unreliable proposal must not create a synthetic physical frame.
+    # Saved supported geometry retains the established per-module path.
+    uncertain=bool(state.get("camera_geometry_partial")) or not candidates or len(structure_rejected)/len(candidates)>.25
+    surfaces=real_farm_camera_surface_regions(image) if uncertain else []
+    for module in credible if uncertain else candidates:
         if module.get("mask_source")=="SEARCH_ROI" or module.get("refinement_status","accepted")!="accepted":continue
         if not real_farm_mechanical_validation(module.get("outer_polygon_rgb",[]),image.size)["mechanically_valid"]:continue
-        item=dict(module)
-        item.update(requires_physical_review=False,physical_module_unresolved=False)
+        item=dict(module);item.update(requires_physical_review=False,physical_module_unresolved=False)
+        if native_frames and module["module_id"] in response.get("physical_frame_support_ids",[]):
+            item["camera_native_raster_support"]=True
         render_modules.append(item)
-    # Recover the established native scene path; the experimental reference
-    # profile imposed one cool PV mean and a hot generic substrate everywhere.
-    # Defaults match the retained pre-experiment established-renderer output.
-    layers=real_farm_build_thermal_master(image,render_modules,include_material_masks=False)
-    real_farm_camera_warm_background(layers,image,candidates)
+    if native_frames and not uncertain:
+        # A source-bound, inspected small-module preparation supplies physical
+        # perimeters. Use one native frame response instead of stacking the
+        # canonical edge field, rim reconciliation and continuity cooling.
+        # The existing source background and module interiors remain in use.
+        layers=real_farm_build_thermal_master(image,render_modules,include_material_masks=False,interior_detail=.65,edge_cooling_scale=0.)
+        if response.get("source_cell_ridges_are_neutral_glass") is not True:
+            real_farm_camera_source_frames(layers,image,render_modules)
+        rim_ids=set(response.get("physical_frame_support_ids",[]))
+        if rim_ids:real_farm_camera_physical_rim_support(layers,image,[m for m in render_modules if m["module_id"] in rim_ids])
+        real_farm_camera_module_edge_response({"master_scalar":layers["master_scalar"],
+            "pv_module_union_mask":real_farm_module_mask(image.size,render_modules,active=False)},image,render_modules,
+            edge_width_fraction=response.get("physical_frame_width_fraction"))
+    elif uncertain:
+        # Reuse the active thermal model on source-supported surface envelopes.
+        # No envelope is promoted to a selectable/verified physical module.
+        layers=real_farm_build_thermal_master(image,surfaces,include_material_masks=False,interior_detail=.65,edge_cooling_scale=0.)
+        # Preserve the existing material/exposure field. Forcing the sunlit
+        # preset over every uncertain upload was saturating all ground lanes.
+        real_farm_camera_source_frames(layers,image,surfaces)
+    else:
+        layers=real_farm_build_thermal_master(image,render_modules,include_material_masks=False,interior_detail=.65)
+        real_farm_camera_warm_background(layers,image,candidates)
+        real_farm_reconcile_frame_rims(layers["master_scalar"],image,render_modules)
+        real_farm_camera_uncovered_surfaces(layers,image,render_modules)
+    # Cell-grid proposals are not physical module perimeters. In uncertain
+    # scenes keep the source-frame response above, without stamping proposal
+    # edges into the thermal signal. Supported module scenes retain their rims.
+    if not uncertain and not native_frames:real_farm_camera_module_edge_response(layers,image,candidates)
+    layers["camera_surface_mode"]=bool(uncertain)
     for field in ("background_scalar","pv_scalar","accepted_parent_regions","rejected_modules","material_masks"):
         layers.pop(field,None)
+    layers["camera_composited_pv_mask"]=layers["pv_module_union_mask"]
     if structure_rejected or not candidates:
         layers["pv_module_union_mask"]=np.maximum(layers["pv_module_union_mask"],real_farm_material_masks(image)["pv_scene_candidate"])
     values=layers["master_scalar"]
     layers.update(accepted_modules=credible,camera_candidates=candidates,
         camera_source=real_farm_source_identity(image),proxy_acquired=False,
         mode="SYNTHETIC_RELATIVE_THERMAL_PROXY",
-        scalar_audit={"model":"Current Thermal: established native material/scene/module renderer",
+        scalar_audit={"model":"Current Thermal: native source-supported surfaces" if uncertain else "Current Thermal: established native material/scene/module renderer",
             "signal_units":"synthetic relative signal; not measured temperature",
             "native_canvas":list(image.size),"display_range":layers["display_range"],
             "p1_median_p99":[round(float(v),3) for v in np.percentile(values,[1,50,99])],
             "clipped_fraction":float(np.mean((values<=0)|(values>=255)))},
-        camera_material_revision="real-background-sunlit-v13")
+        camera_material_revision="real-native-source-surfaces-v24-edges-v1-gap-v1-table-v2")
     return layers
 
 
@@ -540,7 +893,9 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
         for widget_key in list(st.session_state):
             if widget_key.startswith("real_farm_camera_"):st.session_state.pop(widget_key,None)
         st.session_state["real_farm_camera_ui_source"]=source
-    key=(source,real_farm_geometry_signature(state.get("modules",[])),"real-background-sunlit-v13-workflow-v1")
+    frame_width=state.get("camera_preparation_response",{}).get("physical_frame_width_fraction")
+    render_revision="real-native-source-surfaces-v24-edges-v1-gap-v1-table-v2"+(f"-frame-width-{float(frame_width):.6f}" if frame_width is not None else "")
+    key=(source,real_farm_geometry_signature(state.get("modules",[])),render_revision)
     cached=st.session_state.get("real_farm_camera_layers")
     generate=st.button("Generate Thermal",type="primary",use_container_width=True) if section=="Thermal" or not cached else False
     if generate:
@@ -558,7 +913,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
                 state["camera_recovery_message"]=str(exc)
                 status.write("Module recovery incomplete. Whole-scene camera capture remains available.")
             layers=real_farm_camera_build_layers(state,image)
-            key=(source,real_farm_geometry_signature(state.get("modules",[])),"real-background-sunlit-v13-workflow-v1")
+            key=(source,real_farm_geometry_signature(state.get("modules",[])),render_revision)
             st.session_state["real_farm_camera_layers"]=(key,layers)
             state["camera_capture"]={"source":source,"geometry":key[1],"native_size":list(image.size),
                 "automatic_candidates":len(layers["camera_candidates"]),"fault_position_candidates":len(layers["accepted_modules"]),
@@ -566,6 +921,14 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             status.update(label="Thermal ready",state="complete",expanded=False)
         cached=(key,layers)
     if not cached or cached[0][0]!=source:
+        if section=="Faults" and state.get("modules"):
+            candidates,credible=real_farm_camera_candidates(state,image)
+            provisional=real_farm_camera_simulation_targets(state,image,candidates,credible)
+            selected=next(iter(credible+provisional),None)
+            real_farm_camera_observation_source(state,image)
+            st.caption("Saved geometry loaded. You can select a PV polygon now; Generate Thermal to view its hotspot.")
+            if real_farm_camera_pick_target(state,image,selected):st.rerun()
+            st.caption(f"{len(state.get('camera_observations',[]))} hotspot observations · Generate Thermal to view")
         st.image(image,caption=f"Original RGB · {image.width} × {image.height}",use_container_width=True)
         return
     if cached[0]!=key:
@@ -597,15 +960,21 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             format_func=lambda value:value+(" · PROVISIONAL" if value.startswith("SIM-") else ""))
     else:mid=None
     selected=next((m for m in targets if m["module_id"]==mid),None)
-    refresh=real_farm_camera_pick_target(state,image,selected) if section=="Faults" else False
+    placement=st.radio("Hotspot placement",["Manual Select","Random Hotspots"],horizontal=True,key="real_farm_camera_placement") if section=="Faults" else "Manual Select"
+    refresh=real_farm_camera_pick_target(state,image,selected) if section=="Faults" and placement=="Manual Select" else False
     if selected and selected.get("simulation_only"):
         st.caption("PROVISIONAL — exploratory simulation; excluded from verified training labels.")
     real_farm_camera_observation_source(state,image)
     observations=state["camera_observations"]
     if section=="Faults":
-        if st.button("Add hotspot observation",disabled=not mid,use_container_width=True):
+        if placement=="Random Hotspots":
+            refresh=real_farm_camera_random_controls(state,image,credible) or refresh
+            observations=state["camera_observations"]
+        elif st.button("Add hotspot observation",disabled=not mid,use_container_width=True):
             real_farm_camera_new_observation(state,image,selected)
         if st.button("Clear Camera Faults",disabled=not observations):
+            real_farm_camera_forget_observation_widgets(state,observations)
+            state.pop("camera_random_batch",None)
             state["camera_observations"]=[];observations=[]
     target_lookup={m["module_id"]:m for m in targets}
     for observation in observations:
@@ -671,7 +1040,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
         st.json(layers.get("scalar_audit",{}))
         if layers.get("acquisition_audit"):
             st.download_button("Download scalar comparison",json.dumps(layers["acquisition_audit"],indent=2),file_name="camera_scalar_comparison.json",mime="application/json")
-        st.download_button("Download exact scalar PV mask",export_current_view_bytes(Image.fromarray(layers.get("camera_composited_pv_mask",layers["pv_module_union_mask"]))),file_name="scalar_PV_mask_UNVERIFIED.png",mime="image/png")
+        st.download_button("Download exact scalar PV mask",export_current_view_bytes(Image.fromarray(layers["camera_composited_pv_mask"])),file_name="scalar_PV_mask_UNVERIFIED.png",mime="image/png")
         st.download_button("Download module outlines",export_current_view_bytes(real_farm_annotated_preview(image,candidates,max_width=image.width,show_labels=False)),file_name="module_proposals_UNVERIFIED.png",mime="image/png")
         st.download_button("Download original RGB",export_current_view_bytes(image),file_name="original_RGB.png",mime="image/png")
         st.download_button("Download pre-palette proxy codes",export_current_view_bytes(Image.fromarray(np.uint8(np.clip(layers["master_scalar"],0,255)))),file_name="synthetic_proxy_codes_NOT_TEMPERATURE.png",mime="image/png")

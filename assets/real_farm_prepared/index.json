@@ -1,0 +1,257 @@
+{
+  "schema_version": 2,
+  "sources": {
+    "e5dcaa0d7b387e320be2d362e877159375f667804ae27283e82338927eae79e9": {
+      "id": "image_01",
+      "project": "catalog/image_01/geometry.json",
+      "project_sha256": "5f56bedca0f412ed93069a235698c0511ba8c1de83fd9ad9dbf6af47a1175f8a",
+      "image_size": [
+        837,
+        471
+      ],
+      "status": "APPROVED FOR SIMULATION",
+      "frozen": true,
+      "pinned": true,
+      "pv_mask": "catalog/image_01/pv_mask.png",
+      "pv_mask_sha256": "2f8516e62210df5efb24397d3e12ca373c619a253ac04a43c7d7547b79103bd1",
+      "thermal": "catalog/image_01/healthy_thermal.png",
+      "thermal_sha256": "5494cacb457f76c6b6ee75570c285daec32bc5e5641848c5106109c01c9e3a50",
+      "rgb": "catalog/image_01/source.png",
+      "rgb_file_sha256": "26bd9ca51619c0cbe861dc62659112f8b802ffc2657b0b4e703cf190b3a5ed73"
+    },
+    "5d6f318f656ed84df2fadbac236832aa0ba14aa8ea0359d9fb4727140e88e253": {
+      "id": "image_02",
+      "project": "catalog/image_02/geometry.json",
+      "project_sha256": "805275b77a7083c4bb3d0a40e04b350e3883391678c723eba70fc707632f09e5",
+      "image_size": [
+        594,
+        516
+      ],
+      "status": "APPROVED FOR SIMULATION",
+      "frozen": true,
+      "pinned": true,
+      "pv_mask": "catalog/image_02/pv_mask.png",
+      "pv_mask_sha256": "171d35f9f2ce86ed74458cc4da03ee5bd545e1f98e50b3c4ba818f8f1c3b2f2d",
+      "thermal": "catalog/image_02/healthy_thermal.png",
+      "thermal_sha256": "4991fa810a22e7d93a452b0ac1c4d004f94f932800838adde7ba6a06b98d0949",
+      "rgb": "catalog/image_02/source.jpeg",
+      "rgb_file_sha256": "f1e74a231f1f94079316d65d4de65551354b5526577336fb94bfd25f345838bb"
+    },
+    "eb6bc1c7bb2a989f54fa770e5284ed684d787073e6775c24238819515eb9f0fb": {
+      "id": "image_03",
+      "project": "catalog/image_03/geometry.json",
+      "project_sha256": "eae8bd1ef240c04f3dfcd61311284fb4227d6dab0fd08e051b4b8361d4ae4036",
+      "image_size": [
+        1112,
+        357
+      ],
+      "status": "APPROVED FOR SIMULATION",
+      "frozen": true,
+      "pinned": true,
+      "pv_mask": "catalog/image_03/pv_mask.png",
+      "pv_mask_sha256": "e7c2673685bb417ed8e534b48b1a497489df7d827d808faea17ce644b152a874",
+      "thermal": "catalog/image_03/healthy_thermal.png",
+      "thermal_sha256": "413c3f6abe6f1ada514d9cd749dd7898fbd1bf7a2c84eba4043a34e2fa616a19",
+      "rgb": "catalog/image_03/source.png",
+      "rgb_file_sha256": "aeffcb030459b323d8b6803a622701a746c791e6d291cd5f4f6083ff0b44a661"
+    },
+    "a60cd0913c2d3e6f6a96b351963547deca972e59424b796baa99b9bc02292a8b": {
+      "id": "image_04",
+      "project": "catalog/image_04/geometry.json",
+      "project_sha256": "6ab522c0f33517ede726815bcc9f35d5233a8da1f624ee4f8b3969c60c12d012",
+      "image_size": [
+        678,
+        452
+      ],
+      "status": "APPROVED FOR SIMULATION",
+      "frozen": true,
+      "pinned": true,
+      "pv_mask": "catalog/image_04/pv_mask.png",
+      "pv_mask_sha256": "5a168c5d697b24986d68c72e034815233abb3065ff22fddae662fe1122eb5221",
+      "thermal": "catalog/image_04/healthy_thermal.png",
+      "thermal_sha256": "26ee602d18f5b9c2a36466685c4052ae2f183f28ba5062c673992c1df260680e",
+      "rgb": "catalog/image_04/source.jpeg",
+      "rgb_file_sha256": "72e6bc5c0c610493a8cd19879171c81906c604437944c879dd686f63a30d6275"
+    },
+    "6670637b489dca3eab25e3da23d74405b98360ed73f3970b0a5b7759479c4597": {
+      "id": "image_05",
+      "project": "catalog/image_05/geometry.json",
+      "project_sha256": "1b6163eaf4950832da4c135a8b170f69fe0b48ae6e6538c7b1d37297be2f24dc",
+      "image_size": [
+        741,
+        762
+      ],
+      "status": "APPROVED FOR SIMULATION",
+      "frozen": true,
+      "pinned": true,
+      "pv_mask": "catalog/image_05/pv_mask.png",
+      "pv_mask_sha256": "a885cdc82618f5ce68fd27beceb67f2cdfc230e14c49734d8b985a6b9c1b6824",
+      "thermal": "catalog/image_05/healthy_thermal.png",
+      "thermal_sha256": "12151fe3c5905e4f5ae27e7ece1c4ff2e1c00c7bafda45043297cfafbc363d1e",
+      "rgb": "catalog/image_05/source.png",
+      "rgb_file_sha256": "98d5fded00993c260bde93e100703237ba85e59d51efd7ddb82a64f642d62290"
+    },
+    "dd41d4c7143832b767a0bb00e86a709473b39fb6105d1fb47ef37f402786a9c1": {
+      "id": "image_06",
+      "project": "catalog/image_06/geometry.json",
+      "project_sha256": "bdc28c5d2acf1d5024fa5143a394a1915f246f7a13277273d4035e4cc62a05af",
+      "image_size": [
+        860,
+        492
+      ],
+      "status": "APPROVED FOR SIMULATION",
+      "frozen": true,
+      "pinned": true,
+      "pv_mask": "catalog/image_06/pv_mask.png",
+      "pv_mask_sha256": "5de5e0737fa383fea6e0b5069c40ef99898a99c4de5a575f327d50b3e2775824",
+      "thermal": "catalog/image_06/healthy_thermal.png",
+      "thermal_sha256": "a36037c792b2ccc2e7d9c0ae25450e8d4f1214b9c678c3771aaa6e6a83eb6b89",
+      "rgb": "catalog/image_06/source.png",
+      "rgb_file_sha256": "3641de05a0a7c826de3b32f5a723ee6a41e3c083f559593d8368c15dcd4a2a84"
+    },
+    "c829da5700f364ab692acbcbedde8f19d807c3e500ab1469e8c4d89519eb57f4": {
+      "id": "image_07",
+      "project": "catalog/image_07/geometry.json",
+      "project_sha256": "79de307b5132733fab3b598a5724c632e74c4ac89c652444e9ee488fa78c7b04",
+      "image_size": [
+        372,
+        248
+      ],
+      "status": "LOW RESOLUTION - ALL FRAME PROPOSALS PROVISIONAL",
+      "frozen": false,
+      "pinned": true,
+      "pv_mask": "catalog/image_07/pv_mask.png",
+      "pv_mask_sha256": "4440ff98fce662341293a48d10b2c5ae411c583e5ef221745ee6cf82cdd7e528",
+      "thermal": "catalog/image_07/healthy_thermal.png",
+      "thermal_sha256": "d984ca0a9fa73f5fce95938ef2e3dcd6f1c73503f6ac823b2acc122bee228606",
+      "rgb": "catalog/image_07/source.jpg",
+      "rgb_file_sha256": "39f2b5ad0ae848ac18cd148d70fb67eb616d4f307aa941c6b41ac62f176e14ce"
+    },
+    "b69dbe5a3347eb10c54793646262e6b89a54dd24cff11a2dbe8fe803e749341c": {
+      "id": "image_08",
+      "project": "catalog/image_08/geometry.json",
+      "project_sha256": "0ed59fdfa654bd4e47184c31b077a88b923f4f941d2c79205aeebf112f0fceba",
+      "image_size": [
+        394,
+        700
+      ],
+      "status": "PREPARED FOR SIMULATION",
+      "frozen": false,
+      "pinned": true,
+      "pv_mask": "catalog/image_08/pv_mask.png",
+      "pv_mask_sha256": "d895f536b5b61ed0625d30d715c998b64873d72178a58fa27ca1fec85e7cedec",
+      "thermal": "catalog/image_08/healthy_thermal.png",
+      "thermal_sha256": "d4e0834f68f52e30fed862aa0ec6d85f6a786cf6ceb989dbc19ccc2a0323b60e",
+      "rgb": "catalog/image_08/source.jpg",
+      "rgb_file_sha256": "5125ef000dafbdacca83c90636488a4221a44fe66211bde9321b496dc2031517"
+    },
+    "227f1047e8fcdcd387f3aa4d2de8e9dc05e43c733bca68581bfd53df06c38c05": {
+      "id": "image_09",
+      "project": "catalog/image_09/geometry.json",
+      "project_sha256": "42bf732df406c5ce529cdec07e9e3755f7ae2e1f5cf31ce87ddccdac0e4dd254",
+      "image_size": [
+        900,
+        514
+      ],
+      "status": "PREPARED FOR SIMULATION",
+      "frozen": false,
+      "pinned": true,
+      "pv_mask": "catalog/image_09/pv_mask.png",
+      "pv_mask_sha256": "5610e88d8a310f90df2b7def34a8b0a59e994c1b7a87237f1042b223843007c8",
+      "thermal": "catalog/image_09/healthy_thermal.png",
+      "thermal_sha256": "251e118a437ecf9027dca4cedef551317f4144a9ae8ba56988faf41f9f31cc60",
+      "rgb": "catalog/image_09/source.jpg",
+      "rgb_file_sha256": "7305aded58451312172f05fded8f8cb6fbe36fb4242a01c45f0b1c1511ad80ea"
+    },
+    "1b70d9837679cd878abc35720110773f0200ba3c3065ab074dc32144f94400ef": {
+      "id": "image_10",
+      "project": "catalog/image_10/geometry.json",
+      "project_sha256": "47315b187f303e7fa4eb5e15f937a1cc4bbcc6b8782aa0680a74f77aefdf931e",
+      "image_size": [
+        596,
+        335
+      ],
+      "status": "PREPARED FOR SIMULATION",
+      "frozen": false,
+      "pinned": true,
+      "pv_mask": "catalog/image_10/pv_mask.png",
+      "pv_mask_sha256": "b9cac463da97e452df65c151a1678e13c01897ff3f1d97febe33d9420daea81e",
+      "thermal": "catalog/image_10/healthy_thermal.png",
+      "thermal_sha256": "d480fcdc628957e99328b215a853e2dae22c67249dc347ee64f31599576fe9b3",
+      "rgb": "catalog/image_10/source.jpeg",
+      "rgb_file_sha256": "75bbbab8348ddb91fd56c0e1c604d20bb36379c56a419bada2db0275ce0246b8"
+    },
+    "e724c45c59fc060a581772f881eca2da2f6c679c8c0188a32332dce362b0e67b": {
+      "id": "image_11",
+      "project": "catalog/image_11/geometry.json",
+      "project_sha256": "17d89985d6a26f6f0df048adf0baa606f702a679c2d87aecd3aed49ef66895b9",
+      "image_size": [
+        4096,
+        2160
+      ],
+      "status": "PREPARED FOR SIMULATION",
+      "frozen": false,
+      "pinned": true,
+      "pv_mask": "catalog/image_11/pv_mask.png",
+      "pv_mask_sha256": "b289b443c792e97c4ffaa1cd2525d054bb645ed01f1bc33471d6c0978fb67ea9",
+      "thermal": "catalog/image_11/healthy_thermal.png",
+      "thermal_sha256": "c2f146545da31f8ea905eca7de67b30639b0176f9bf67f42bc0fcd65375bebaf",
+      "rgb": "catalog/image_11/source.jpg",
+      "rgb_file_sha256": "a71806386428cfac98b71be99075bb7ebb62793dabe741f7513e6bb2d4f7aaa4"
+    },
+    "9f8f30c6911f3d3e5d63988698f1f87fc22165550d33d67712a8de9a29015e24": {
+      "id": "image_12",
+      "project": "catalog/image_12/geometry.json",
+      "project_sha256": "91117a83a43ea30acfd3045f115a74232ffa80d6531788b9fe995d01cfe08781",
+      "image_size": [
+        4000,
+        2250
+      ],
+      "status": "NEEDS REVIEW",
+      "frozen": false,
+      "pinned": true,
+      "pv_mask": "catalog/image_12/pv_mask.png",
+      "pv_mask_sha256": "2b18595eda6df85eb8c82f90103e15f6086df84134c2df4965f24f63dfd01160",
+      "thermal": "catalog/image_12/healthy_thermal.png",
+      "thermal_sha256": "d512b86f1baf3721f67dba7addf8ca7ae28c4111356589169c1442189014efd8",
+      "rgb": "catalog/image_12/source.jpg",
+      "rgb_file_sha256": "c6a4eafd73c3f79de713601602a2d1cb4dcdd6270a37ab3cc4f0511019a4dcc7"
+    },
+    "def05aae75354f5cf8d6880d4efd745cb82ded87270ce6c9e5995b2e1456b1b4": {
+      "id": "image_13",
+      "project": "catalog/image_13/geometry.json",
+      "project_sha256": "37d0706e101ddc5b6af90f6cdce66aba22f95dcd7eb401339539ec5b521fff6a",
+      "image_size": [
+        3992,
+        2242
+      ],
+      "status": "NEEDS REVIEW",
+      "frozen": false,
+      "pinned": true,
+      "pv_mask": "catalog/image_13/pv_mask.png",
+      "pv_mask_sha256": "06cbc73299d78033136dada2d059a6d17de1b0647bce11b91c7b129755433b36",
+      "thermal": "catalog/image_13/healthy_thermal.png",
+      "thermal_sha256": "217fe08ef8c453890a26de48ed60bd4448004c3e96ccb2c035929c1ba25f7a90",
+      "rgb": "catalog/image_13/source.jpg",
+      "rgb_file_sha256": "71ae1e692a78268c5fe68575171dad325a6e43ed1b8bc5b931078b75792836ab"
+    },
+    "3e0b5725b59caefd25978fa8657dbad09fab52b6fd6e90eaa909a04cd69f90ee": {
+      "id": "image_14",
+      "project": "catalog/image_14/geometry.json",
+      "project_sha256": "83b5e76fe0885a7b6197ff10128fa6cbf3257a4308731abefda1a0319e94a18f",
+      "image_size": [
+        4742,
+        3159
+      ],
+      "status": "PREPARED FOR SIMULATION",
+      "frozen": false,
+      "pinned": true,
+      "pv_mask": "catalog/image_14/pv_mask.png",
+      "pv_mask_sha256": "07ad0ef105e85554b21bade6dc8de9740c8e3f60f891680ae62800dfe94e9266",
+      "thermal": "catalog/image_14/healthy_thermal.png",
+      "thermal_sha256": "424b8dee0d44cd4db0064a92fe896b520f34176c6a7a17745e968a1fffbd3ce3",
+      "rgb": "catalog/image_14/source.jpg",
+      "rgb_file_sha256": "b257653b9549d0bcfca276ad56ac9ff46a0a5a22951d06375f3559d3ab0b65a2"
+    }
+  }
+}

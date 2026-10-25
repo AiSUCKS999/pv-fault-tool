@@ -139,6 +139,7 @@ def production_hotspot_residuals():
                 "source_dataset": meta.get("source_dataset"),
                 "morphology_family": meta.get("morphology_family", "SUBMODULE_REGION"),
                 "compact_core_family": (float(meta.get("mask_residual_agreement", {}).get("max_component_elongation", 99)) <= 4.0 and int(meta.get("mask_residual_agreement", {}).get("support_component_count", 0)) == 1),
+                "resolved_core": all(int(np.ptp(axis)) + 1 >= 4 for axis in np.nonzero((support > .10) & (residual > .04))) if np.any((support > .10) & (residual > .04)) else False,
                 "residual": residual,
                 "support": support,
             }
@@ -157,6 +158,10 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale, reference_i
         # Single hotspots use the approved compact-core family. Long line-like
         # reference anomalies remain available through explicit reference pins.
         residuals = [item for item in residuals if item.get("compact_core_family")] or residuals
+        # A two-pixel-wide source core cannot preserve irregular morphology at
+        # Far sampling. Prefer resolved APPROVED compact cores; explicit pins
+        # retain their original reference. No residual gain or footprint change.
+        residuals = [item for item in residuals if item.get("resolved_core")] or residuals
     if not residuals:
         if trace is not None:
             trace["failure_reason"] = "hotspot_production_bank_empty"
@@ -299,6 +304,10 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale, reference_i
             "source_support": trace_source_support,
             "fallback_used": False,
         })
+        if fault_type == "SingleHotSpot":
+            # Expose the existing module-relative placement envelope. Real
+            # Farm fits active reference support, rather than its padding.
+            trace["placement_bbox_px"] = [int(x1), int(y1), int(x2), int(y2)]
     return applied
 
 

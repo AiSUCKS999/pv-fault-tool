@@ -15,7 +15,7 @@ REAL_FARM_EXPORT_DIR = REAL_FARM_ROOT / "exports"
 REAL_FARM_VERSION = "RF-1"
 REAL_FARM_SOURCE_MODE = "REAL_FARM_IMAGE"
 REAL_FARM_CONFIDENCE_LEVEL = "LEVEL_1_MODULE_ONLY"
-REAL_FARM_WORKFLOW_SECTIONS = ["Thermal Camera", "Farm Setup", "Thermal", "Faults", "Review", "Export"]
+REAL_FARM_WORKFLOW_SECTIONS = ["Farm Setup", "Thermal", "Faults", "Review", "Export"]
 
 REAL_FARM_GEOMETRY_NOTICE_EXPLANATIONS = {
     "near_boundary_or_partial_crop": "One or more corners touch or extend past the image edge; the visible portion remains usable.",
@@ -416,8 +416,11 @@ def real_farm_load_project(path_or_file):
         data = path_or_file.read()
         if isinstance(data, bytes):
             data = data.decode("utf-8")
-        return json.loads(data)
-    return json.loads(Path(path_or_file).read_text(encoding="utf-8"))
+        project=json.loads(data)
+    else:project=json.loads(Path(path_or_file).read_text(encoding="utf-8"))
+    source=project.get("source_rgb_path")
+    if source and not Path(source).is_absolute():project["source_rgb_path"]=str(ROOT/source)
+    return project
 
 
 def real_farm_load_saved_review_project(path):
@@ -3623,6 +3626,11 @@ def real_farm_module_scalar_layer(image, modules, background_scalar=None, edge_c
         # Geometry, rather than collection index/selection, pins module texture.
         module_seed = seed_for(tuple(np.round(points, 2).ravel()), "healthy-module")
         pv_local = healthy_thermal_module_field((local_width, local_height), module_seed, 164, 196, edge_cooling_scale=edge_cooling_scale, interior_detail=interior_detail)
+        if module.get("camera_table_surface"):
+            # A camera envelope may contain many physical modules. Do not
+            # assign the entire row one module's random healthy offset.
+            # Retain its spatial field and the shared scene drift below.
+            pv_local += 179.0 - float(np.median(pv_local))
         pv_local += thermal_context_on_module(scene_drift, points, (local_width, local_height))
         local_gray = cv2.warpPerspective(gray, to_local, (local_width, local_height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
         seam = np.abs(cv2.Laplacian(cv2.GaussianBlur(local_gray, (0, 0), 0.8), cv2.CV_32F))
@@ -3636,7 +3644,10 @@ def real_farm_module_scalar_layer(image, modules, background_scalar=None, edge_c
         module_mask = real_farm_module_mask(
             image.size, [module], active=True, bounds=(x1, y1, x2, y2)
         ).astype(np.float32) / 255.0
-        support = np.clip(warped_support * module_mask, 0, 1)
+        # A confirmed native mask includes boundary pixels by pixel area.
+        # Their centers can lie just outside the continuous source homography;
+        # the replicated scalar edge is valid there, not a zero-valued hole.
+        support = np.clip(module_mask if module.get("camera_native_raster_support") else warped_support * module_mask, 0, 1)
         scalar_sum[y1:y2, x1:x2] += warped_scalar * support
         weight_sum[y1:y2, x1:x2] += support
     # Accumulation is finished: turn the sum into the returned PV plane.
@@ -3648,6 +3659,74 @@ def real_farm_module_scalar_layer(image, modules, background_scalar=None, edge_c
         roi[~valid] = 0
         roi[union_mask[rows] == 0] = 0
     return scalar_sum, union_mask
+
+
+def real_farm_reconcile_frame_rims(scalar, image, modules):
+    """Remove substrate leakage between the existing outer and glass edges.
+
+    Sample the unmodified scalar on both boundaries, then connect their
+    existing cool response across the physical rim only. Glass, occlusion
+    holes, genuine inter-table gaps and all authoritative masks stay intact.
+    """
+    height, width = scalar.shape
+    rgb = real_farm_rgb_array(image)
+    updates = []
+    for module in modules:
+        outer = np.asarray(module.get("outer_polygon_rgb", []), np.float32)
+        active = np.asarray(module.get("active_polygon_rgb", []), np.float32)
+        if outer.shape != (4, 2) or active.shape != (4, 2):continue
+        low = np.maximum(0, np.floor(outer.min(0)).astype(int) - 1)
+        high = np.minimum([width, height], np.ceil(outer.max(0)).astype(int) + 2)
+        if np.any(high <= low):continue
+        rim = np.zeros((high[1]-low[1], high[0]-low[0]), np.uint8)
+        cv2.fillConvexPoly(rim, np.rint(outer-low).astype(np.int32), 1)
+        support = real_farm_module_mask(image.size, [module], active=True,
+            bounds=(int(low[0]),int(low[1]),int(high[0]),int(high[1])))
+        if not np.any(support):continue
+        rim[support > 0] = 0
+        for hole in module.get("refined_mask_holes_rgb", []):
+            if len(hole) >= 3:cv2.fillPoly(rim, [np.rint(np.float32(hole)-low).astype(np.int32)], 0)
+        yy, xx = np.nonzero(rim)
+        if not len(xx):continue
+        xx, yy = xx+low[0], yy+low[1]
+        color = rgb[yy, xx].astype(np.int16)
+        visible = ~((color[:,1] > color[:,0]+8) & (color[:,1] > color[:,2]+5))
+        xx, yy = xx[visible], yy[visible]
+        pixels = np.column_stack((xx, yy)).astype(np.float32)
+        # Refined support can stop on bright metal before the nominal inset.
+        # Those perimeter pixels are still frame material, not hot substrate.
+        pv_distance, labels = cv2.distanceTransformWithLabels(
+            np.uint8(support == 0), cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL)
+        sy, sx = np.nonzero(support)
+        lookup = np.zeros(int(labels.max())+1, np.float32)
+        lookup[labels[sy,sx]] = scalar[sy+low[1],sx+low[0]]
+        local_y, local_x = yy-low[1], xx-low[0]
+        face = lookup[labels[local_y,local_x]]
+        to_face = pv_distance[local_y,local_x]
+        nearest = np.full(len(xx), np.inf, np.float32)
+        ceiling = np.full(len(xx), np.inf, np.float32)
+        for side in range(4):
+            a, b = outer[side], outer[(side+1)%4]
+            edge = b-a
+            fraction = np.clip(((pixels-a) @ edge)/max(float(edge@edge), 1e-6), 0, 1)
+            outside = a + fraction[:,None]*edge
+            distance = np.sum((pixels-outside)**2, axis=1)
+            weight = np.sqrt(distance)/np.maximum(np.sqrt(distance)+to_face, 1e-6)
+            oq = np.clip(np.rint(outside).astype(int), [0,0], [width-1,height-1])
+            response = scalar[oq[:,1],oq[:,0]]*(1-weight) + face*weight
+            ceiling = np.where(distance < nearest, response, ceiling)
+            nearest = np.minimum(nearest, distance)
+        # Use the existing frame-continuity sampling collar. Do not turn an
+        # interior missing-support/occlusion region into a frame surface.
+        short = float(np.min(np.linalg.norm(np.roll(outer,-1,axis=0)-outer,axis=1)))
+        collar = min(max(6.0,short*.10),short*.25)
+        keep = nearest <= collar*collar
+        updates.append((yy[keep], xx[keep], ceiling[keep]))
+    # All samples above read the original field. Min-composition makes shared
+    # rims independent of module order and preserves naturally colder detail.
+    for yy, xx, ceiling in updates:
+        scalar[yy, xx] = np.minimum(scalar[yy, xx], ceiling)
+    return scalar
 
 
 def real_farm_display_range(master_scalar):
@@ -4030,6 +4109,30 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
     else:
         trace.setdefault("renderer_class", "PRODUCTION_REFERENCE")
     delta_local = faulted_local - base_local
+    if fault_type == "SingleHotSpot" and trace.get("placement_bbox_px"):
+        original_support = np.asarray(trace["canonical_support"], np.float32)
+        ys, xs = np.nonzero((original_support > .05) & (delta_local > delta_local.max() * .04))
+        if len(xs):
+            bx1, by1, bx2, by2 = trace["placement_bbox_px"]
+            support_width, support_height = int(np.ptp(xs)) + 1, int(np.ptp(ys)) + 1
+            # The shared engine fits a PADDED reference crop to this envelope,
+            # shrinking its active anomaly a second time. Restore the existing
+            # physical-module-relative footprint, with no gain or new texture.
+            footprint_scale = max(1.0, min((bx2-bx1)/support_width, (by2-by1)/support_height))
+            cy, cx = np.unravel_index(np.argmax(delta_local), delta_local.shape)
+            transform = np.float32([[footprint_scale, 0, cx*(1-footprint_scale)],
+                                    [0, footprint_scale, cy*(1-footprint_scale)]])
+            delta_local = cv2.warpAffine(delta_local, transform, (width, height), flags=cv2.INTER_LINEAR)
+            trace["canonical_support"] = cv2.warpAffine(original_support, transform, (width, height), flags=cv2.INTER_LINEAR)
+            trace["canonical_residual"] = delta_local
+            trace["footprint_mapping"] = {
+                "method": "active_reference_support_to_existing_module_envelope",
+                "scale": round(float(footprint_scale), 6),
+                "support_size_before": [support_width, support_height],
+                "requested_module_envelope": [bx2-bx1, by2-by1],
+                "preserved_core_anchor_local": [int(cx), int(cy)],
+                "residual_gain": 1.0,
+            }
     if realism and not production_only:
         realism_seed = seed_for(
             module.get("module_id"), observation.get("observation_id"), fault_type,
@@ -4059,7 +4162,15 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
     module_mask = real_farm_module_mask((width_rgb, height_rgb), [module], active=True, bounds=(x1,y1,x2,y2)).astype(np.float32) / 255.0
     support = np.clip(support_rgb * module_mask, 0, 1)
     output_roi = output[y1:y2, x1:x2]
-    output_roi += delta_rgb * support
+    applied_delta = delta_rgb * support
+    if fault_type == "SingleHotSpot":
+        # Keep the approved residual's graded core instead of flattening all
+        # values above the available signal headroom into one white plateau.
+        # This changes no footprint, reference pixels, geometry or local UV.
+        headroom = np.maximum(255.0 - output_roi, 1e-5)
+        positive = np.maximum(applied_delta, 0)
+        applied_delta = np.minimum(applied_delta, 0) + headroom * np.tanh(positive / headroom)
+    output_roi += applied_delta
     np.clip(output_roi, 0, 255, out=output_roi)
     production_support_local = np.asarray(trace.get("canonical_support", np.abs(delta_local) > 1e-5), dtype=np.float32)
     production_support_rgb = cv2.warpPerspective(
@@ -4086,11 +4197,14 @@ def real_farm_apply_production_fault(master_scalar, module, observation, fault_t
         "warped_roi_bounds_rgb": [int(x1),int(y1),int(x2),int(y2)],
         "scalar_peak_before_warp": round(float(np.max(np.abs(delta_local), initial=0.0)), 6),
         "scalar_peak_after_warp": round(float(np.max(np.abs(delta_rgb * module_mask), initial=0.0)), 6),
+        "scalar_peak_applied": round(float(np.max(np.abs(applied_delta), initial=0.0)), 6),
         "support_area_before_warp": int(np.count_nonzero(production_support_local > 0.05)),
         "support_area_after_warp": int(np.count_nonzero(production_support_rgb > 0.05)),
         "fallback_used": bool(trace.get("fallback_used", False)),
         "production_fault_render_failed": bool(trace.get("production_fault_render_failed", False)),
     }
+    if trace.get("footprint_mapping"):
+        debug_metadata["footprint_mapping"] = trace["footprint_mapping"]
     if fault_type == "SingleByPassed":
         debug_metadata.update({
             "reference_mapping": trace.get("reference_mapping", "portrait_electrical_plane"),
@@ -5181,67 +5295,60 @@ def real_farm_split_module(state, image, selected, axis, fraction, gap):
     state["updated_at"] = real_farm_now()
 
 
+def real_farm_geometry_history_controls():
+    undo_col,redo_col=st.columns(2)
+    if undo_col.button("Undo",use_container_width=True,key="real_farm_editor_undo",disabled=not st.session_state.get("real_farm_undo_stack")):
+        current=st.session_state.get("real_farm_state")
+        if current:st.session_state.setdefault("real_farm_redo_stack",[]).append(json.loads(json.dumps(current)))
+        real_farm_restore(st.session_state["real_farm_undo_stack"].pop())
+        st.rerun()
+    if redo_col.button("Redo",use_container_width=True,key="real_farm_editor_redo",disabled=not st.session_state.get("real_farm_redo_stack")):
+        current=st.session_state.get("real_farm_state")
+        if current:st.session_state.setdefault("real_farm_undo_stack",[]).append(json.loads(json.dumps(current)))
+        real_farm_restore(st.session_state["real_farm_redo_stack"].pop())
+        st.rerun()
+
+
 def real_farm_main_impl():
-    # Keep native image bytes while fitting their flex container to the page.
-    st.markdown('<style>[data-testid="stImageContainer"]{max-width:100%;min-width:0}</style>', unsafe_allow_html=True)
+    st.markdown('<style>[data-testid="stImageContainer"]{max-width:100%;min-width:0}</style>',unsafe_allow_html=True)
     st.markdown("## Real PV Farm Image")
-    st.session_state.setdefault("real_farm_undo_stack", [])
-    st.session_state.setdefault("real_farm_redo_stack", [])
-
+    st.session_state.setdefault("real_farm_undo_stack",[])
+    st.session_state.setdefault("real_farm_redo_stack",[])
+    previous=st.session_state.get("real_farm_section","Farm Setup")
+    if previous=="Thermal Camera":previous="Thermal"
+    if previous not in REAL_FARM_WORKFLOW_SECTIONS:previous="Farm Setup"
+    st.session_state["real_farm_section"]=previous
+    st.session_state["thermal_renderer_mode"]="Current Thermal"
     with st.sidebar:
-        st.button("New Real Farm Project", use_container_width=True, on_click=real_farm_new_project)
-        with st.expander("Advanced tools", expanded=st.session_state.get("real_farm_section", "Thermal Camera") != "Thermal Camera"):
-            section = st.radio(
-                "Real Farm workflow", REAL_FARM_WORKFLOW_SECTIONS,
-                format_func=lambda value: "Advanced Geometry Review" if value == "Farm Setup" else value,
-                key="real_farm_section", label_visibility="collapsed",
-            )
-            undo_col, redo_col = st.columns(2)
-            with undo_col:
-                if st.button("Undo Geometry", use_container_width=True, disabled=not st.session_state.get("real_farm_undo_stack")):
-                    current = st.session_state.get("real_farm_state")
-                    if current:
-                        st.session_state.setdefault("real_farm_redo_stack", []).append(json.loads(json.dumps(current)))
-                    real_farm_restore(st.session_state["real_farm_undo_stack"].pop())
+        st.button("New Real Farm Project",use_container_width=True,on_click=real_farm_new_project)
+        section=st.radio("Real Farm workflow",REAL_FARM_WORKFLOW_SECTIONS,key="real_farm_section",label_visibility="collapsed")
+    uploaded=None
+    project_upload=None
+    advanced=None
+    if section=="Farm Setup" or st.session_state.get("real_farm_image") is None:
+        prepared=real_farm_catalog_entries()
+        choices={e["id"]:e["label"] for e in prepared}
+        chosen=st.selectbox("Prepared RGB image",["upload",*choices],format_func=lambda key:choices.get(key,"Upload your own RGB"),
+            key="real_farm_prepared_picker",on_change=real_farm_catalog_selected)
+        if chosen=="upload":
+            uploaded=st.file_uploader("Upload RGB solar-farm photograph",type=["png","jpg","jpeg","tif","tiff"],key="real_farm_rgb_upload")
+    if section=="Farm Setup":
+        advanced=st.expander("Advanced Geometry Review",expanded=False)
+        with advanced:
+            if not st.session_state.get("real_farm_state"):
+                examples=st.columns(2)
+                examples[0].button("Load Dense (526)",on_click=real_farm_load_reviewed_example,args=("Dense",))
+                examples[1].button("Load Long (444)",on_click=real_farm_load_reviewed_example,args=("Long",))
+                demo_path=ROOT/"artifacts/thermal_realism_v13_background/dense_source_preview.png"
+                if demo_path.exists() and st.button("Load meeting example"):
+                    reference_demo_load_local_image()
                     st.rerun()
-            with redo_col:
-                if st.button("Redo Geometry", use_container_width=True, disabled=not st.session_state.get("real_farm_redo_stack")):
-                    current = st.session_state.get("real_farm_state")
-                    if current:
-                        st.session_state.setdefault("real_farm_undo_stack", []).append(json.loads(json.dumps(current)))
-                    real_farm_restore(st.session_state["real_farm_redo_stack"].pop())
-                    st.rerun()
-
-    uploaded = None
-    project_upload = None
-    if section == "Thermal Camera":
-        source_mode=st.radio("Scene input",["Real thermal image","RGB synthetic proxy"],horizontal=True,key="real_farm_camera_input")
-        if source_mode=="Real thermal image":
-            real_farm_real_thermal_workflow()
-            return
-        uploaded = st.file_uploader("Upload one real RGB aerial/drone image", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=False, key="real_farm_rgb_upload")
-    elif section == "Farm Setup":
-        if not st.session_state.get("real_farm_state"):
-            st.caption("Existing reviewed examples retain their native source detail and corrected physical module geometry.")
-            example_columns = st.columns(2)
-            example_columns[0].button("Load reviewed Dense — 526 modules", on_click=real_farm_load_reviewed_example, args=("Dense",))
-            example_columns[1].button("Load reviewed Long — 444 modules", on_click=real_farm_load_reviewed_example, args=("Long",))
-        demo_path = ROOT / "artifacts" / "thermal_realism_v13_background" / "dense_source_preview.png"
-        if not st.session_state.get("real_farm_state") and demo_path.exists():
-            if st.button("Load local meeting demo image", use_container_width=False):
-                reference_demo_load_local_image()
-                st.rerun()
-        upload_col, load_col = st.columns([0.62, 0.38])
-        with upload_col:
-            uploaded = st.file_uploader("Upload one real RGB aerial/drone image", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=False, key="real_farm_rgb_upload")
-        with load_col:
-            project_upload = st.file_uploader("Load RF-1 geometry JSON", type=["json"], accept_multiple_files=False, key="real_farm_project_upload")
+            project_upload=st.file_uploader("Load RF-1 geometry JSON",type=["json"],key="real_farm_project_upload")
             saved=sorted(REAL_FARM_PROJECT_DIR.glob("*.json")) if REAL_FARM_PROJECT_DIR.exists() else []
             if saved:
-                choice=st.selectbox("Saved local geometry project",saved,format_func=lambda p:p.stem,key="real_farm_saved_project_picker")
+                choice=st.selectbox("Saved geometry project",saved,format_func=lambda p:p.stem,key="real_farm_saved_project_picker")
                 st.button("Load saved review project",on_click=real_farm_load_saved_review_project,args=(str(choice),))
-            if st.session_state.get("real_farm_saved_project_error"):
-                st.error(st.session_state.pop("real_farm_saved_project_error"))
+            if st.session_state.get("real_farm_saved_project_error"):st.error(st.session_state.pop("real_farm_saved_project_error"))
 
     upload_identity = (uploaded.name, hashlib.sha256(uploaded.getvalue()).hexdigest()) if uploaded is not None else None
     if uploaded is not None and upload_identity != st.session_state.get("real_farm_uploaded_identity"):
@@ -5252,6 +5359,7 @@ def real_farm_main_impl():
             st.session_state["real_farm_image"] = image
             st.session_state["real_farm_image_path"] = str(path)
             st.session_state["real_farm_state"] = real_farm_default_state(path, image, uploaded.name, digest)
+            real_farm_camera_saved_geometry(st.session_state["real_farm_state"],image)
             st.session_state["real_farm_selected_module"] = None
             for key in (
                 "real_farm_modules", "real_farm_accepted_modules", "real_farm_final_pv_mask",
@@ -5314,10 +5422,26 @@ def real_farm_main_impl():
         return
     state["source_rgb_pixel_sha256"] = identity
 
-    if section in {"Thermal Camera", "Thermal", "Faults"}:
-        real_farm_camera_workflow(state, image, "Faults" if section == "Faults" else "Thermal")
+    if section in {"Thermal","Faults"}:
+        real_farm_camera_workflow(state,image,section=section)
         return
-
+    if section=="Farm Setup":
+        if st.button("Detect PV Modules Automatically",type="primary"):
+            with st.status("Analyzing PV modules…",expanded=False) as progress:
+                real_farm_camera_analyze(state,image,progress.write)
+                progress.update(label="Module analysis ready",state="complete",expanded=False)
+        if state.get("modules"):
+            st.caption(f"{len(state['modules'])} module proposals · use Thermal to generate a preview. Training labels remain unverified.")
+        else:st.caption("Thermal generation also runs module analysis automatically. No polygon drawing is required.")
+        show_outlines=st.checkbox("Show Module Outlines",value=bool(state.get("camera_geometry_origin")),key="real_farm_setup_outlines")
+        preview=real_farm_annotated_preview(image,state.get("modules",[]),None,max_width=min(image.width,1400),show_labels=False) if show_outlines else image
+        st.image(preview,caption=f"Original RGB · {image.width} × {image.height}",use_container_width=True)
+        entry=next((e for e in real_farm_catalog_entries() if e["rgb_pixel_sha256"]==identity),None)
+        if entry:
+            st.caption(f"Saved preparation: {entry['status']} · {entry['module_count']} module proposals · geometry is not user-verified training ground truth")
+            with st.expander("Saved PV mask and thermal preview"):
+                st.image(str(real_farm_catalog_asset(entry['pv_mask'])),caption="Saved exact PV support mask",use_container_width=True)
+                st.image(str(real_farm_catalog_asset(entry['thermal'])),caption="Saved synthetic thermal preparation · not a measured temperature image",use_container_width=True)
     modules = state.setdefault("modules", [])
     for module in modules:
         if "mask_source" not in module:
@@ -5343,16 +5467,20 @@ def real_farm_main_impl():
             for m in modules:
                 if str(m.get("mask_source", "")).startswith("AUTO"):
                     m["requires_physical_review"] = True
-    if section != "Farm Setup":
-        real_farm_sync_live_geometry(state, image)
-        real_farm_fault_workflow(state, image, modules, section=section)
+    if section!="Farm Setup":
+        real_farm_sync_live_geometry(state,image)
+        real_farm_fault_workflow(state,image,modules,section=section)
         return
+    with advanced:
+        real_farm_advanced_geometry_panel(state,image,modules,identity)
 
+
+def real_farm_advanced_geometry_panel(state,image,modules,identity):
+    image_size=(image.width,image.height)
     recovered_for_ui = real_farm_recovered_modules(modules, include_unaccepted=True, image_size=image.size)
     recovery_columns = st.columns([0.72, 0.28])
     recovery_columns[0].caption(
-        "Normal workflow: recover all modules, review the full-farm mask, then generate thermal. "
-        "The search region is only a location hint and is never thermalized."
+        "Optional geometry correction and training-label verification. Thermal previews do not require approval."
     )
     st.selectbox("Automatic recovery method",["Existing recovery (review required)","Region-local hybrid (experimental)"],key="real_farm_recovery_method")
     if st.session_state.get("real_farm_recovery_method")=="Region-local hybrid (experimental)":
@@ -5468,12 +5596,13 @@ def real_farm_main_impl():
     real_farm_table_batch_panel(state, image)
     real_farm_verified_subset_panel(state, image)
 
-    st.info("Inspect the outlines before thermal generation. Use Manual Geometry Correction below for missed, merged or misplaced modules. Each saved polygon represents ONE physical module.")
+    st.caption("Inspect physical boundaries before verified training export. Geometry correction is optional for thermal preview.")
     if state.get("physical_geometry_review_required"):
         st.warning("Automatic geometry on this image requires review. A candidate can end on a cell line or span several modules. Save only polygons following ONE physical outer frame. Each saved module immediately becomes available for thermal and faults; the other candidates stay excluded.")
     if state.get("pending_geometry_observations"):
         st.info(f"{len(state['pending_geometry_observations'])} saved fault assignment(s) are retained pending physical-module review. Saving the corrected module restores its assignment.")
-    with st.expander("Manual Geometry Correction — add, resize or remove individual modules", expanded=True):
+    with st.expander("Geometry Editor", expanded=True):
+        real_farm_geometry_history_controls()
         st.caption("Select a module below, then drag its green corner handles onto the physical frame. Save updates thermal and export immediately. Draw a missed module with four perimeter clicks.")
         st.caption("Confirm a small neighboring group to provide healthy thermal context for diagnosis. Unreviewed candidates remain outside the PV mask.")
         if modules:

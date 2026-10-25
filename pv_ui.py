@@ -2328,7 +2328,7 @@ def close_fault_visibility_cell(cell, fault_type):
     return item
 
 
-def finalize_solar_render_thermal_image(location_id, base_temp, array_geometries, selected_row_id, selected_cell_id, fault_records=None, scene_distance="far"):
+def finalize_solar_render_thermal_image(location_id, base_temp, array_geometries, selected_row_id, selected_cell_id, fault_records=None, scene_distance="far", acquisition_size=None):
     temp = np.array(base_temp, dtype=np.float32, copy=True)
     records = thermal_records_for_distance(fault_records, scene_distance)
     fault_support = np.zeros(temp.shape, np.uint8) if records else None
@@ -2364,6 +2364,12 @@ def finalize_solar_render_thermal_image(location_id, base_temp, array_geometries
             outside = fault_support[rows] == 0
             temp[rows][outside] = healthy_acquisition[rows][outside]
         del healthy_acquisition, fault_support
+    if acquisition_size:
+        height,width=temp.shape
+        ratio=min(1.,acquisition_size[0]/width,acquisition_size[1]/height)
+        if ratio<1.:
+            temp=cv2.resize(temp,(max(1,round(width*ratio)),max(1,round(height*ratio))),interpolation=cv2.INTER_AREA)
+    # Spatial detector integration precedes the fixed shared level/span and LUT.
     thermal_image = thermal_display_rgb_from_scalar(temp, location_id, "far")
     return thermal_image
 
@@ -2443,21 +2449,13 @@ def cached_solar_render_thermal_base(location_id, render_size, render_signature)
 
 @st.cache_data(show_spinner=False, max_entries=48)
 def cached_module_field_thermal_scene(location_id, render_size, fault_key, render_signature, scene_distance="far"):
-    cached_base = cached_solar_render_thermal_base(location_id, render_size, render_signature)
-    if cached_base is None:
-        return None
-    base_temp, array_geometries = cached_base
-    records = records_from_source_fault_key(fault_key)
-    render_row_id, render_cell_id = stable_fault_render_target(location_id, fault_key)
-    return finalize_solar_render_thermal_image(
-        location_id,
-        base_temp,
-        array_geometries,
-        render_row_id,
-        render_cell_id,
-        records,
-        scene_distance,
-    ).convert("RGB")
+    cached_base = cached_native_thermal_master(location_id, solar_render_cache_signature(location_id))
+    if cached_base is None:return None
+    base_temp,array_geometries=cached_base
+    records=records_from_source_fault_key(fault_key)
+    render_row_id,render_cell_id=stable_fault_render_target(location_id,fault_key)
+    return finalize_solar_render_thermal_image(location_id,base_temp,array_geometries,
+        render_row_id,render_cell_id,records,scene_distance,acquisition_size=render_size).convert("RGB")
 
 
 def module_field_image(location_id, view, selected_row_id, selected_cell_id, fault_records=None, show_grid=True, scene_distance="far"):
@@ -2471,29 +2469,12 @@ def module_field_image(location_id, view, selected_row_id, selected_cell_id, fau
     if rendered is not None and view == "rgb":
         return draw_solar_render_overlays(rendered, location_id, selected_row_id, selected_cell_id, fault_records, show_grid)
     if view == "thermal":
-        # Simulate and acquire once at native geometry resolution. Far is a
-        # downsample of this image; Close crops it, so neither changes the fault.
-        thermal = cached_close_source_scene(location_id, "thermal", source_fault_key(fault_records), solar_render_cache_signature(location_id))
+        # Inject the same native scalar fault as Close, integrate the Far
+        # detector plane, then palette-map. Never filter a colorized hotspot.
+        thermal=cached_module_field_thermal_scene(location_id,render_size,source_fault_key(fault_records),
+            solar_render_cache_signature(location_id),"far")
         if thermal is not None:
-            thermal = thermal.copy()
-            thermal.thumbnail(render_size, Image.Resampling.LANCZOS)
-            if fault_records:
-                # The final preview downsample must respect the same physical
-                # support too; filtering can otherwise mix fault pixels into a
-                # neighboring gap after the native scalar mask was enforced.
-                rgb_preview = solar_render_image(location_id, thermal.size)
-                geometries = solar_render_metadata_array_geometries(
-                    solar_render_panel_mask(rgb_preview, location_id), load_solar_render_metadata(location_id))
-                if geometries:
-                    support = np.zeros((thermal.height,thermal.width),np.uint8)
-                    for record in fault_records:
-                        cell = rendered_fault_cell_from_record(location_id,record,selected_row_id,selected_cell_id,geometries)
-                        if cell is not None:
-                            cv2.fillConvexPoly(support,np.rint(cell["active_module_polygon"]).astype(np.int32),255,lineType=cv2.LINE_8)
-                    healthy = cached_close_source_scene(location_id,"thermal",(),solar_render_cache_signature(location_id)).copy()
-                    healthy.thumbnail(render_size,Image.Resampling.LANCZOS)
-                    thermal = Image.composite(thermal,healthy,Image.fromarray(support,"L"))
-            return draw_solar_render_overlays(thermal, location_id, selected_row_id, selected_cell_id, fault_records, show_grid)
+            return draw_solar_render_overlays(thermal,location_id,selected_row_id,selected_cell_id,fault_records,show_grid)
         rendered = solar_render_image(location_id, render_size)
     if rendered is not None and view == "thermal":
         thermal = solar_render_thermal_image(location_id, rendered, selected_row_id, selected_cell_id, fault_records, scene_distance)
@@ -3891,20 +3872,21 @@ def render_array_module_selector(
         badge_w, badge_h = 27, 18
         badge_x = bx1 + 6
         badge_y = by1 + 6
-        svg.append(
-            f'<polygon points="{svg_points(display_polygon)}" '
-            f'fill="none" stroke="{stroke}" stroke-width="{stroke_width}" stroke-opacity="{stroke_opacity}" pointer-events="none"/>'
-            + (
-                f'<polygon points="{svg_points(display_polygon)}" fill="none" stroke="#ef4444" stroke-width="1.1" stroke-opacity=".84" pointer-events="none"/>'
-                f'<polygon points="{svg_points(display_active_polygon)}" fill="none" stroke="#22c55e" stroke-width=".9" stroke-opacity=".72" pointer-events="none"/>'
-                if debug_geometry else ""
+        if show_boxes or debug_geometry:
+            svg.append(
+                f'<polygon points="{svg_points(display_polygon)}" '
+                f'fill="none" stroke="{stroke}" stroke-width="{stroke_width}" stroke-opacity="{stroke_opacity}" pointer-events="none"/>'
+                + (
+                    f'<polygon points="{svg_points(display_polygon)}" fill="none" stroke="#ef4444" stroke-width="1.1" stroke-opacity=".84" pointer-events="none"/>'
+                    f'<polygon points="{svg_points(display_active_polygon)}" fill="none" stroke="#22c55e" stroke-width=".9" stroke-opacity=".72" pointer-events="none"/>'
+                    if debug_geometry else ""
+                )
+                + f'<g pointer-events="none" opacity="{".92" if active else ".66"}">'
+                f'<rect x="{badge_x:.1f}" y="{badge_y:.1f}" width="{badge_w}" height="{badge_h}" rx="5" ry="5" '
+                f'fill="#020617" fill-opacity=".64" stroke="#bae6fd" stroke-opacity=".35"/>'
+                f'<text x="{badge_x + badge_w / 2:.1f}" y="{badge_y + 13:.1f}" text-anchor="middle" font-size="10.5" '
+                f'font-family="Inter, Arial" fill="#e0f2fe" font-weight="700">M{module_number}</text></g>'
             )
-            + f'<g pointer-events="none" opacity="{".92" if active else ".66"}">'
-            f'<rect x="{badge_x:.1f}" y="{badge_y:.1f}" width="{badge_w}" height="{badge_h}" rx="5" ry="5" '
-            f'fill="#020617" fill-opacity=".64" stroke="#bae6fd" stroke-opacity=".35"/>'
-            f'<text x="{badge_x + badge_w / 2:.1f}" y="{badge_y + 13:.1f}" text-anchor="middle" font-size="10.5" '
-            f'font-family="Inter, Arial" fill="#e0f2fe" font-weight="700">M{module_number}</text></g>'
-        )
         for cell_no, cell_geometry in module_cell_polygons(module).items():
             _, target_cell = default_cell_for_array(location["id"], region["row"], region["col"], module_number, cell_no)
             target = f"?{urlencode(navigation_params(
@@ -3964,7 +3946,7 @@ def render_array_module_selector(
         <div class="pv-array-crop">{''.join(svg)}</div>
         <style>
           .pv-array-crop {{ width:100%; overflow:hidden; border:1px solid #20324a; border-radius:14px; background:#020617; }}
-          .pv-array-crop svg {{ width:100%; max-width:100%; height:auto; display:block; margin:auto; }}
+          .pv-array-crop svg {{ width:{width}px; max-width:100%; height:auto; display:block; margin:auto; }}
           .pv-array-crop .pv-cell-hit:hover polygon {{
             stroke-opacity:0;
             fill-opacity:.001;
@@ -4471,7 +4453,7 @@ def main():
                             show_fault_boxes,
                             show_cell_map,
                         )
-                    st.caption("Click the suspicious cell directly inside the real four-module array. The main image stays at full-array context.")
+                    st.caption("Close View uses native model detail with four physical modules; click a cell to select it.")
                     st.markdown("</div>", unsafe_allow_html=True)
                 else:
                     st.markdown('<div class="pv-canvas-card">', unsafe_allow_html=True)
