@@ -15,7 +15,7 @@ REAL_FARM_EXPORT_DIR = REAL_FARM_ROOT / "exports"
 REAL_FARM_VERSION = "RF-1"
 REAL_FARM_SOURCE_MODE = "REAL_FARM_IMAGE"
 REAL_FARM_CONFIDENCE_LEVEL = "LEVEL_1_MODULE_ONLY"
-REAL_FARM_WORKFLOW_SECTIONS = ["Farm Setup", "Thermal", "Faults", "Review", "Export"]
+REAL_FARM_WORKFLOW_SECTIONS = ["Farm Setup", "Thermal", "Faults", "Review", "Export", "DATA COLLECTION"]
 
 REAL_FARM_GEOMETRY_NOTICE_EXPLANATIONS = {
     "near_boundary_or_partial_crop": "One or more corners touch or extend past the image edge; the visible portion remains usable.",
@@ -5322,6 +5322,23 @@ def real_farm_main_impl():
     with st.sidebar:
         st.button("New Real Farm Project",use_container_width=True,on_click=real_farm_new_project)
         section=st.radio("Real Farm workflow",REAL_FARM_WORKFLOW_SECTIONS,key="real_farm_section",label_visibility="collapsed")
+    if section == "DATA COLLECTION":
+        from pv_data_collection import render_data_collection
+        prepared_entries = real_farm_catalog_entries()
+
+        def _prepare_real_farm_collection_case(case, source_id=None):
+            if not source_id:
+                raise ValueError("Choose the actual prepared RGB photograph for this scenario")
+            st.session_state["real_farm_prepared_picker"] = source_id
+            real_farm_catalog_selected()  # Existing identity-checked prepared-image loader.
+            st.session_state["pv_dc_active_case"] = dict(case, actual_prepared_catalog_id=source_id)
+            st.session_state["real_farm_section"] = "Faults"
+            state = st.session_state["real_farm_state"]
+            return f"Real Farm:{source_id}; RGB SHA-256:{state['source_rgb_pixel_sha256']}"
+
+        render_data_collection("Real Farm", on_prepare=_prepare_real_farm_collection_case,
+                               prepared_sources=prepared_entries)
+        return
     uploaded=None
     project_upload=None
     advanced=None
@@ -5423,6 +5440,14 @@ def real_farm_main_impl():
     state["source_rgb_pixel_sha256"] = identity
 
     if section in {"Thermal","Faults"}:
+        active_test = st.session_state.get("pv_dc_active_case")
+        if section == "Faults" and active_test and active_test.get("Source mode") == "Real Farm":
+            st.info(
+                f"DATA COLLECTION {active_test['Case ID']} · {active_test['Planned scenario']} · "
+                f"severity {active_test['Severity (1–10)'] or 'healthy'} · seed {active_test['Seed']}. "
+                "Use existing manual/random hotspot and Close View diagnosis controls. "
+                "Return to DATA COLLECTION to record videos, clean references and verified ground truth."
+            )
         real_farm_camera_workflow(state,image,section=section)
         return
     if section=="Farm Setup":

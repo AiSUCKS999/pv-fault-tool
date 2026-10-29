@@ -3226,7 +3226,7 @@ def legacy_main():
             st.caption("Thermal preview is generated when Camera view is set to Thermal.")
 
 
-WORKFLOW_SECTIONS = ["Scene Setup", "Layout", "Faults", "Review", "Export", "Settings", "Help"]
+WORKFLOW_SECTIONS = ["Scene Setup", "Layout", "Faults", "Review", "Export", "DATA COLLECTION", "Settings", "Help"]
 
 
 def ui_css():
@@ -4315,6 +4315,15 @@ def main():
         ))
 
     top_summary_bar(location, view, metadata, metadata["fault_count"])
+    active_test = st.session_state.get("pv_dc_active_case")
+    if section == "Faults" and active_test and active_test.get("Source mode") == "Generated":
+        st.info(
+            f"DATA COLLECTION {active_test['Case ID']} · {active_test['Planned scenario']} · "
+            f"row {active_test['Target row']}, array {active_test['Target array col']}, "
+            f"module {active_test['Module slot (1–4)']}, cell {active_test['Cell index (1–40)']} · "
+            f"severity {active_test['Severity (1–10)'] or 'healthy'} · seed {active_test['Seed']}. "
+            "Apply the intended fault with existing controls, then return to DATA COLLECTION to log/verify the capture."
+        )
 
     if section == "Scene Setup":
         scene = get_scene()
@@ -4895,6 +4904,33 @@ def main():
             else:
                 st.caption("Advanced metadata is loaded on demand to keep the Review page responsive.")
         st.markdown("</div>", unsafe_allow_html=True)
+
+    elif section == "DATA COLLECTION":
+        from pv_data_collection import generated_preparation_issue, render_data_collection
+
+        def _prepare_data_collection_case(case, _unused=None):
+            rows = int(float(case["Rows"]))
+            cols = int(float(case["Columns / row"]))
+            issue = generated_preparation_issue(case, max_custom_rows(location["id"]), max_custom_panels_per_row(location["id"]))
+            if issue:
+                raise ValueError(issue)
+            asset = ASSET_DIR / "solar-renders" / location["id"] / f"{rows}x{cols}.webp"
+            legacy_asset = ASSET_DIR / "solar-renders" / f"{rows}x{cols}.webp"
+            if not asset.is_file() and not (location["id"] == "grass_open" and legacy_asset.is_file()):
+                raise ValueError("The approved render for this size is unavailable; no substitute scene was prepared.")
+            target_row = int(case["Target row"])
+            row_id = f"{row_prefix(location['id'])}{target_row}"
+            st.session_state["pv_dc_active_case"] = case
+            st.session_state["thermal_renderer_mode"] = "Current Thermal"
+            qp_set(
+                location=location["id"], view="thermal", section="Faults", thermal_renderer="current",
+                custom_layout=1, row_count=rows, panels_per_row=cols,
+                selected_pv=row_id, selected_cell=f"{row_id}-C001",
+                selected_array="", selected_module="", cell_active=0,
+            )
+            return f"Generated:{location['id']}:{rows}x{cols}; planned target/fault require manual confirmation"
+
+        render_data_collection("Generated", on_prepare=_prepare_data_collection_case)
 
     elif section == "Export":
         scene = get_scene()
