@@ -1,0 +1,2 @@
+# Preserve the supplied scenario matrix byte-for-byte on every checkout.
+pv_data_collection_cases.csv -text

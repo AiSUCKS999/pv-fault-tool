@@ -3226,7 +3226,7 @@ def legacy_main():
             st.caption("Thermal preview is generated when Camera view is set to Thermal.")
 
 
-WORKFLOW_SECTIONS = ["Scene Setup", "Layout", "Faults", "Review", "Export", "Settings", "Help"]
+WORKFLOW_SECTIONS = ["Scene Setup", "Layout", "Faults", "Review", "Export", "DATA COLLECTION", "Settings", "Help"]
 
 
 def ui_css():
@@ -4315,6 +4315,9 @@ def main():
         ))
 
     top_summary_bar(location, view, metadata, metadata["fault_count"])
+    if section == "Faults":
+        from pv_data_collection import active_case_banner
+        active_case_banner("Generated")
 
     if section == "Scene Setup":
         scene = get_scene()
@@ -4895,6 +4898,15 @@ def main():
             else:
                 st.caption("Advanced metadata is loaded on demand to keep the Review page responsive.")
         st.markdown("</div>", unsafe_allow_html=True)
+
+    elif section == "DATA COLLECTION":
+        from pv_data_collection import render_data_collection
+        from pv_data_collection_prepare import prepare_generated, restore_previous
+
+        render_data_collection("Generated", on_prepare=lambda case, options: prepare_generated(globals(), case, options),
+            generated_scenes=LOCATIONS, selected_scene=location["id"],
+            on_restore_simulator=lambda: restore_previous(globals()),
+            on_restore_original=lambda: restore_previous(globals(), original=True))
 
     elif section == "Export":
         scene = get_scene()

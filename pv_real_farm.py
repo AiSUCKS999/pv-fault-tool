@@ -15,7 +15,7 @@ REAL_FARM_EXPORT_DIR = REAL_FARM_ROOT / "exports"
 REAL_FARM_VERSION = "RF-1"
 REAL_FARM_SOURCE_MODE = "REAL_FARM_IMAGE"
 REAL_FARM_CONFIDENCE_LEVEL = "LEVEL_1_MODULE_ONLY"
-REAL_FARM_WORKFLOW_SECTIONS = ["Farm Setup", "Thermal", "Faults", "Review", "Export"]
+REAL_FARM_WORKFLOW_SECTIONS = ["Farm Setup", "Thermal", "Faults", "Review", "Export", "DATA COLLECTION"]
 
 REAL_FARM_GEOMETRY_NOTICE_EXPLANATIONS = {
     "near_boundary_or_partial_crop": "One or more corners touch or extend past the image edge; the visible portion remains usable.",
@@ -5322,6 +5322,16 @@ def real_farm_main_impl():
     with st.sidebar:
         st.button("New Real Farm Project",use_container_width=True,on_click=real_farm_new_project)
         section=st.radio("Real Farm workflow",REAL_FARM_WORKFLOW_SECTIONS,key="real_farm_section",label_visibility="collapsed")
+    if section == "DATA COLLECTION":
+        from pv_data_collection import render_data_collection
+        from pv_data_collection_prepare import prepare_real, real_targets, restore_previous
+
+        render_data_collection("Real Farm", on_prepare=lambda case, options: prepare_real(globals(), case, options),
+            prepared_sources=real_farm_catalog_entries(), target_options=lambda source: real_targets(globals(), source),
+            on_restore_simulator=lambda: restore_previous(globals()),
+            on_restore_original=lambda: restore_previous(globals(), original=True))
+        return
+
     uploaded=None
     project_upload=None
     advanced=None
@@ -5423,6 +5433,8 @@ def real_farm_main_impl():
     state["source_rgb_pixel_sha256"] = identity
 
     if section in {"Thermal","Faults"}:
+        from pv_data_collection import active_case_banner
+        active_case_banner("Real Farm")
         real_farm_camera_workflow(state,image,section=section)
         return
     if section=="Farm Setup":
