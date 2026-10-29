@@ -29,7 +29,9 @@ TRACK_FIELDS = [
     "CLOSE clean reference", "Dataset / metadata ZIP", "Screen / device",
     "Capture distance / angle", "Notes / exceptions", "Updated UTC",
 ]
-STATUSES = ["Not started", "Prepared", "FAR captured", "CLOSE captured", "Captured", "Needs review", "Complete", "Skipped"]
+TRACK_FIELDS[-1:-1] = ["Preparation result", "Preparation details", "FAR preparation", "CLOSE preparation"]
+PREPARATION_FIELDS = set(TRACK_FIELDS[-5:-1])
+STATUSES = ["Not started", "Prepared", "Guided", "Blocked", "Unsupported", "FAR captured", "CLOSE captured", "Captured", "Needs review", "Complete", "Skipped"]
 
 
 @st.cache_data(show_spinner=False)
@@ -67,6 +69,9 @@ def _record_error(case, record):
         return "Unknown test status"
     if any(record[key] not in {"Yes", "No"} for key in TRACK_FIELDS[1:5]):
         return "Capture and verification flags must be Yes or No"
+    if record["Status"] == "Complete" and (record.get("Preparation result") in {"Blocked", "Unsupported"}
+            or (case["Source mode"] == "Generated" and generated_preparation_issue(case))):
+        return "This scenario is blocked or unsupported and cannot be marked Complete."
     if record["Status"] == "Complete" and (
         record["Exports saved?"] != "Yes" or record["GT verified?"] != "Yes"
         or any(case[f"{view} required?"] == "Yes" and record[f"{view} captured?"] != "Yes"
@@ -133,21 +138,44 @@ def _prepare_case(case, source_id, on_prepare):
     """A button callback runs before widgets, so existing workflow keys can change safely."""
     try:
         identity = on_prepare(case, source_id)
-    except (ValueError, OSError, StopIteration) as exc:
+    except (ValueError, OSError, StopIteration, RuntimeError) as exc:
         st.session_state["pv_dc_prepare_error"] = str(exc)
+        record = _current_record(case["Case ID"])
+        record.update(Status="Blocked", **{"Preparation result": "Blocked", "Preparation details": str(exc), "GT verified?": "No"})
+        _records()[case["Case ID"]] = record
         return
+    result = identity if isinstance(identity, dict) else {"identity": identity, "status": "Prepared", "details": {}}
+    identity = result["identity"]
     record = _current_record(case["Case ID"])
-    if record["Status"] == "Not started":
-        record["Status"] = "Prepared"
+    if record["Status"] == "Complete":
+        record["Status"] = "Needs review"
+    elif record["Status"] in {"Not started", "Prepared", "Guided", "Blocked"}:
+        record["Status"] = result["status"]
     elif record["Prepared scene identity"] and record["Prepared scene identity"] != identity:
         record["Status"] = "Needs review"
         record["GT verified?"] = "No"
     record["Prepared scene identity"] = identity
+    record["GT verified?"] = "No"
+    record["Preparation result"] = result["status"]
+    record["Preparation details"] = json.dumps(result["details"], ensure_ascii=False)
+    if result.get("phase"):
+        record["CLOSE preparation" if result["phase"] == "Close diagnosis" else "FAR preparation"] = record["Preparation details"]
     record["Updated UTC"] = datetime.now(timezone.utc).isoformat()
     _records()[case["Case ID"]] = record
 
 
-def render_data_collection(mode: str, on_prepare=None, prepared_sources=None):
+def active_case_banner(mode):
+    case = st.session_state.get("pv_dc_active_case", {})
+    if case.get("Source mode") != mode:
+        return
+    record = _current_record(case["Case ID"])
+    st.info(f"Last DATA COLLECTION preparation: {case['Case ID']} · {record['Preparation result']}. "
+            "Inspect the current scene before recording. Return to DATA COLLECTION for evidence, phase switching, logs and restoring the previous simulator.")
+    st.caption(record["Preparation details"])
+
+
+def render_data_collection(mode: str, on_prepare=None, prepared_sources=None, generated_scenes=None,
+                           selected_scene=None, target_options=None, on_restore_simulator=None, on_restore_original=None):
     """Render one tab. on_prepare(case, selected_source_id=None) is optional."""
     if mode not in {"Generated", "Real Farm"}:
         raise ValueError("Unknown PV data collection mode")
@@ -156,6 +184,14 @@ def render_data_collection(mode: str, on_prepare=None, prepared_sources=None):
     st.caption("Structured experimental acquisition plan: generated reference vs drone recording, FAR observation and CLOSE diagnosis. No synthetic labels are automatically treated as verified real measurements.")
     if error := st.session_state.pop("pv_dc_prepare_error", None):
         st.error(f"Preparation declined: {error}")
+    if on_restore_simulator and "pv_dc_before_preparation" in st.session_state:
+        st.button("Restore simulator from before the last preparation", on_click=on_restore_simulator,
+                  key=f"pv_dc_restore_simulator_{mode}")
+        st.caption("Preparing explicitly opens an isolated case. This button restores the immediately previous scene, faults and geometry.")
+    if on_restore_original and "pv_dc_original_simulator" in st.session_state:
+        st.button("Restore simulator from before DATA COLLECTION", on_click=on_restore_original,
+                  key=f"pv_dc_restore_original_{mode}")
+        st.caption("The original simulator context remains available across multiple case preparations in this session.")
 
     records = _records()
     complete = sum(_current_record(c["Case ID"])["Status"] == "Complete" for c in cases)
@@ -205,6 +241,16 @@ def render_data_collection(mode: str, on_prepare=None, prepared_sources=None):
     st.caption(f"{len(filtered)} matching cases • display limited to 150 rows for browser responsiveness")
     columns = ["Case ID", "Priority", "Scene / layout ID", "Topology", "Target row", "Target array col", "Planned scenario", "Severity (1–10)", "Seed"]
     shown = [{**{k: c.get(k, "") for k in columns}, "Status": _current_record(c["Case ID"])["Status"]} for c in filtered[:150]]
+    if mode == "Generated":
+        from pv_data_collection_prepare import generated_block
+        terrain = st.session_state.get("pv_dc_generated_scene", selected_scene)
+        for case, row in zip(filtered, shown):
+            row["Preparation support"] = ("Unsupported layout" if generated_preparation_issue(case)
+                else "Blocked: baseline failure" if generated_block(case, terrain)
+                else "Automatic layout/target/fault; guided seed and capture")
+    else:
+        for row in shown:
+            row["Preparation support"] = "Guided photo/module selection and thermal capture"
     st.dataframe(shown, use_container_width=True, hide_index=True)
     st.download_button("Export entire plan + tracking CSV (this mode)",
                        _as_csv([{**c, **_current_record(c["Case ID"])} for c in cases], CASE_FIELDS + TRACK_FIELDS),
@@ -229,25 +275,53 @@ def render_data_collection(mode: str, on_prepare=None, prepared_sources=None):
         st.write(f"CLOSE: `{selected['CLOSE diagnosis code']}` · required: `{selected['CLOSE required?']}`")
         st.write(f"Condition: `{selected['Condition ID']}`")
     preparation_issue = generated_preparation_issue(selected) if mode == "Generated" else None
-    if preparation_issue:
-        st.warning(preparation_issue)
     if mode == "Real Farm":
         st.info("RF01–RF14 are workbook photo slots, not guaranteed catalog IDs. Choose and record the actual prepared photograph; do not assume that catalog order matches these slots.")
-    st.caption("Preparing a case opens the existing simulator with Current Thermal. It does NOT silently place faults or change approved thermal/geometry rendering. Use the existing Faults controls to apply the specified scenario, then confirm the result.")
+    st.caption("Prepare resolves the selected layout and target, applies supported faults through the existing engine, and checks its rendered output. Ground truth remains unverified. Inspect the preparation evidence and record the actual FAR/CLOSE views.")
+    options = {}
+    if mode == "Generated" and generated_scenes:
+        scenes = {item["id"]: item["name"] for item in generated_scenes}
+        options["scene"] = st.selectbox("Actual generated scene", list(scenes),
+            index=list(scenes).index(selected_scene), format_func=lambda x: scenes[x], key="pv_dc_generated_scene")
+        from pv_data_collection_prepare import generated_block
+        preparation_issue = generated_block(selected, options["scene"])
+        st.info("The workbook specifies layout IDs, not terrain IDs. Select the intended terrain explicitly. The existing fixed-target engine cannot accept an independent morphology seed; that seed is recorded, not silently simulated.")
+    if selected["Scenario stage"] == "Close diagnosis":
+        options["phase"] = st.radio("Preparation phase", ["Far observation", "Close diagnosis"],
+                                    key=f"pv_dc_phase_{mode}", horizontal=True)
+        st.caption("Record FAR first, then return and prepare CLOSE. The existing diagnosis replaces the hotspot at that target; both preparation records remain in the log.")
     source_id = None
     if mode == "Real Farm" and prepared_sources:
         choices = {item["id"]: item.get("label", item["id"]) for item in prepared_sources}
-        source_id = st.selectbox("Actual prepared photograph for this test", list(choices), format_func=lambda x:choices[x], key=f"pv_dc_real_source_{mode}")
+        source_id = st.selectbox("Actual prepared photograph for this test", list(choices), index=None,
+                                placeholder="Choose the actual photograph for this workbook slot", format_func=lambda x:choices[x], key=f"pv_dc_real_source_{mode}")
+        options["source"] = source_id
+        if source_id and target_options and selected["Scenario stage"] != "Healthy":
+            try:
+                targets = target_options(source_id)
+                options["modules"] = st.multiselect("Target module(s) on visible PV support", targets,
+                    key=f"pv_dc_real_modules_{source_id}")
+                st.caption("Select one physical module, or at least two for multiple hotspots. Leave empty for a guided manual target workflow; no fault will be claimed as applied.")
+            except (ValueError, OSError) as exc:
+                preparation_issue = str(exc)
+        if not source_id:
+            preparation_issue = "Choose the actual prepared photograph before preparing this slot."
     if mode == "Real Farm" and not prepared_sources:
         preparation_issue = "No prepared photographs are available. Restore the approved catalog before preparing a case."
         st.warning(preparation_issue)
+    if preparation_issue:
+        st.warning(preparation_issue)
+        st.caption("Preparation: blocked/unsupported. Keep the original plan; review the required layout or source manually. No substitute fault or layout will be generated.")
     if on_prepare is not None:
         st.button("Prepare this case in the existing simulator", type="primary", key=f"pv_dc_prepare_{mode}",
-                  disabled=bool(preparation_issue), on_click=_prepare_case, args=(selected, source_id, on_prepare))
+                  disabled=bool(preparation_issue), on_click=_prepare_case, args=(selected, options, on_prepare))
 
     st.divider()
     st.markdown("#### Log the experiment and matching references")
     current = _current_record(selected_id)
+    if current["Preparation details"]:
+        st.write("Preparation result:", current["Preparation result"])
+        st.code(current["Preparation details"], language="json")
     with st.form(f"pv_dc_form_{mode}_{selected_id}_{st.session_state.get('pv_dc_form_revision', 0)}"):
         status = st.selectbox("Test status", STATUSES, index=STATUSES.index(current["Status"]) if current["Status"] in STATUSES else 0)
         flags = st.columns(4)
@@ -257,6 +331,9 @@ def render_data_collection(mode: str, on_prepare=None, prepared_sources=None):
         gt = flags[3].checkbox("Ground truth verified", value=current["GT verified?"] == "Yes")
         fields = {}
         for label in TRACK_FIELDS[5:-1]:
+            if label in PREPARATION_FIELDS:
+                fields[label] = current[label]
+                continue
             fields[label] = st.text_input(label, value=current.get(label, "")) if label != "Notes / exceptions" else st.text_area(label, value=current.get(label, ""), height=70)
         submitted = st.form_submit_button("Save case record", type="primary")
     if submitted:
@@ -264,7 +341,9 @@ def render_data_collection(mode: str, on_prepare=None, prepared_sources=None):
         rec = {"Status": status, "FAR captured?": "Yes" if far else "No", "CLOSE captured?": "Yes" if close else "No",
                "Exports saved?": "Yes" if exports else "No", "GT verified?": "Yes" if gt else "No", **fields,
                "Updated UTC": datetime.now(timezone.utc).isoformat()}
-        if error := _record_error(selected, rec):
+        if status == "Complete" and preparation_issue:
+            st.error("This selected setup is blocked/unsupported and cannot be marked Complete.")
+        elif error := _record_error(selected, rec):
             st.error(error)
         else:
             records[selected_id] = rec

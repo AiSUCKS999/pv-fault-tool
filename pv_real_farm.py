@@ -5324,21 +5324,14 @@ def real_farm_main_impl():
         section=st.radio("Real Farm workflow",REAL_FARM_WORKFLOW_SECTIONS,key="real_farm_section",label_visibility="collapsed")
     if section == "DATA COLLECTION":
         from pv_data_collection import render_data_collection
-        prepared_entries = real_farm_catalog_entries()
+        from pv_data_collection_prepare import prepare_real, real_targets, restore_previous
 
-        def _prepare_real_farm_collection_case(case, source_id=None):
-            if not source_id:
-                raise ValueError("Choose the actual prepared RGB photograph for this scenario")
-            st.session_state["real_farm_prepared_picker"] = source_id
-            real_farm_catalog_selected()  # Existing identity-checked prepared-image loader.
-            st.session_state["pv_dc_active_case"] = dict(case, actual_prepared_catalog_id=source_id)
-            st.session_state["real_farm_section"] = "Faults"
-            state = st.session_state["real_farm_state"]
-            return f"Real Farm:{source_id}; RGB SHA-256:{state['source_rgb_pixel_sha256']}"
-
-        render_data_collection("Real Farm", on_prepare=_prepare_real_farm_collection_case,
-                               prepared_sources=prepared_entries)
+        render_data_collection("Real Farm", on_prepare=lambda case, options: prepare_real(globals(), case, options),
+            prepared_sources=real_farm_catalog_entries(), target_options=lambda source: real_targets(globals(), source),
+            on_restore_simulator=lambda: restore_previous(globals()),
+            on_restore_original=lambda: restore_previous(globals(), original=True))
         return
+
     uploaded=None
     project_upload=None
     advanced=None
@@ -5440,14 +5433,8 @@ def real_farm_main_impl():
     state["source_rgb_pixel_sha256"] = identity
 
     if section in {"Thermal","Faults"}:
-        active_test = st.session_state.get("pv_dc_active_case")
-        if section == "Faults" and active_test and active_test.get("Source mode") == "Real Farm":
-            st.info(
-                f"DATA COLLECTION {active_test['Case ID']} · {active_test['Planned scenario']} · "
-                f"severity {active_test['Severity (1–10)'] or 'healthy'} · seed {active_test['Seed']}. "
-                "Use existing manual/random hotspot and Close View diagnosis controls. "
-                "Return to DATA COLLECTION to record videos, clean references and verified ground truth."
-            )
+        from pv_data_collection import active_case_banner
+        active_case_banner("Real Farm")
         real_farm_camera_workflow(state,image,section=section)
         return
     if section=="Farm Setup":

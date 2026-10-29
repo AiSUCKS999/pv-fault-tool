@@ -118,6 +118,18 @@ def test_generated_preparation_return_and_unsupported_layouts():
     assert not at.exception
 
 
+def test_baseline_affected_cases_are_visibly_blocked_for_rooftop():
+    at = app()
+    at.selectbox(key="pv_dc_scene_Generated").select("G06x06").run()
+    label = next(c["Planned scenario"] for c in dc._load_cases() if c["CLOSE diagnosis code"] == "SoilingDust")
+    at.selectbox(key="pv_dc_type_Generated").select(label).run()
+    at.selectbox(key="pv_dc_generated_scene").select("rooftop_warehouse").run()
+    assert len(at.selectbox(key="pv_dc_case_Generated").options) == 40
+    assert set(at.dataframe[0].value["Preparation support"]) == {"Blocked: baseline failure"}
+    assert at.button(key="pv_dc_prepare_Generated").disabled
+    assert not at.exception
+
+
 def test_real_preparation_uses_explicit_photo_and_keeps_logs():
     at = app("Real Farm")
     at.selectbox(key="pv_dc_priority_Real Farm").select("P0 – Essential").run()
@@ -135,6 +147,36 @@ def test_real_preparation_uses_explicit_photo_and_keeps_logs():
     assert record["GT verified?"] == "No"
     by_label(at.radio, "Real Farm workflow").set_value("DATA COLLECTION").run()
     assert at.session_state["pv_dc_records_v1"][cid] == record
+    assert not at.exception
+
+
+@pytest.mark.parametrize("mode,cid", [("Generated", "TC0007"), ("Real Farm", "TC0497")])
+def test_ui_prepares_actual_fault_and_preserves_case_selection_state(mode, cid):
+    at = app(mode)
+    at.selectbox(key=f"pv_dc_case_{mode}").select(cid).run()
+    if mode == "Generated":
+        at.radio(key="pv_dc_phase_Generated").set_value("Close diagnosis").run()
+    else:
+        at.selectbox(key="pv_dc_real_source_Real Farm").select("image_01").run()
+        modules = at.multiselect(key="pv_dc_real_modules_image_01")
+        modules.select(modules.options[0]).run()
+    at.button(key=f"pv_dc_prepare_{mode}").click().run()
+    assert not at.exception
+    if mode == "Generated":
+        actual = at.session_state["panel_cell_fault_records"][0]
+        assert actual["fault_type"] == "CellCracking" and actual["fault_scale"] == 3
+        assert actual["module_number_in_panel"] == 3 and actual["module_cell_number"] == 33
+    else:
+        actual = at.session_state["real_farm_state"]["camera_observations"][0]
+        assert actual["severity"] == 6 and actual["seed"] == 62496
+        assert actual["diagnostic_fault_type"] is None
+    navigation = "Workflow" if mode == "Generated" else "Real Farm workflow"
+    by_label(at.radio, navigation).set_value("DATA COLLECTION").run()
+    at.selectbox(key=f"pv_dc_case_{mode}").select("TC0001" if mode == "Generated" else "TC0496").run()
+    if mode == "Generated":
+        assert at.session_state["panel_cell_fault_records"][0] == actual
+    else:
+        assert at.session_state["real_farm_state"]["camera_observations"][0] == actual
     assert not at.exception
 
 
@@ -158,6 +200,8 @@ def test_existing_workflow_sections_still_open(mode):
 @pytest.mark.parametrize("mode,p0", [("Generated", 22), ("Real Farm", 20)])
 def test_log_completion_guard_and_csv_downloads(mode, p0):
     at = app(mode)
+    if mode == "Real Farm":
+        at.selectbox(key="pv_dc_real_source_Real Farm").select("image_01").run()
     case = next(c for c in dc._load_cases() if c["Source mode"] == mode and c["Priority"].startswith("P0") and c["CLOSE required?"] == "Yes")
     cid = case["Case ID"]
     at.selectbox(key=f"pv_dc_case_{mode}").select(cid).run()
@@ -219,7 +263,7 @@ def test_preparation_failure_does_not_claim_prepared_and_source_change_requires_
     def fail(*args):
         raise ValueError("Unavailable")
     dc._prepare_case(case, None, fail)
-    assert not dc._records()
+    assert dc._current_record(case["Case ID"])["Status"] == "Blocked"
     assert records["pv_dc_prepare_error"] == "Unavailable"
     records["pv_dc_records_v1"] = {case["Case ID"]: {**dc._blank_record(), "Status": "Complete", "GT verified?": "Yes",
                                                     "Prepared scene identity": "old", "Notes / exceptions": "keep"}}
