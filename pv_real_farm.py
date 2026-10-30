@@ -5329,7 +5329,7 @@ def real_farm_main_impl():
         render_data_collection("Real Farm", on_prepare=lambda case, options: prepare_real(globals(), case, options),
             prepared_sources=real_farm_catalog_entries(), target_options=lambda source: real_targets(globals(), source),
             on_restore_simulator=lambda: restore_previous(globals()),
-            on_restore_original=lambda: restore_previous(globals(), original=True))
+            on_restore_original=lambda: restore_previous(globals(), original=True), simulator_ns=globals())
         return
 
     uploaded=None

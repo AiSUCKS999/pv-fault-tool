@@ -4906,7 +4906,7 @@ def main():
         render_data_collection("Generated", on_prepare=lambda case, options: prepare_generated(globals(), case, options),
             generated_scenes=LOCATIONS, selected_scene=location["id"],
             on_restore_simulator=lambda: restore_previous(globals()),
-            on_restore_original=lambda: restore_previous(globals(), original=True))
+            on_restore_original=lambda: restore_previous(globals(), original=True), simulator_ns=globals())
 
     elif section == "Export":
         scene = get_scene()
