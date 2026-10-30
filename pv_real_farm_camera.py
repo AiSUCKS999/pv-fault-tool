@@ -972,10 +972,9 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             format_func=lambda value:value+(" · PROVISIONAL" if value.startswith("SIM-") else ""))
     else:mid=None
     selected=next((m for m in targets if m["module_id"]==mid),None)
-    view=st.radio("Camera acquisition",["Far View","Close View"],horizontal=True,key="real_farm_camera_distance")
-    if section=="Faults" and view=="Far View":
-        from pv_far_surface import real_controls
-        real_controls(globals(),state,image,selected,layers)
+    # Keep the visual order, but let placement actions set the distance before
+    # its widget is instantiated (random generation returns to Far View).
+    view_controls=st.container()
     placement=st.radio("Hotspot placement",["Manual Select","Random Hotspots"],horizontal=True,key="real_farm_camera_placement") if section=="Faults" else "Manual Select"
     refresh=real_farm_camera_pick_target(state,image,selected) if section=="Faults" and placement=="Manual Select" else False
     if selected and selected.get("simulation_only"):
@@ -997,6 +996,11 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
         if observation["module_id"] in target_lookup:
             observation.setdefault("target_geometry",json.loads(json.dumps(target_lookup[observation["module_id"]])))
         observation.pop("camera_visibility",None)
+    with view_controls:
+        view=st.radio("Camera acquisition",["Far View","Close View"],horizontal=True,key="real_farm_camera_distance")
+        if section=="Faults" and view=="Far View":
+            from pv_far_surface import real_controls
+            real_controls(globals(),state,image,selected,layers)
     active_observation=real_farm_camera_observation_controls(state,image,targets,view)
     if active_observation:mid=active_observation["module_id"]
     unavailable=[o for o in observations if o.get("module_id") not in target_lookup or
