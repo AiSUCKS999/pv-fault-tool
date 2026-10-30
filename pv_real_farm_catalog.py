@@ -60,8 +60,17 @@ def real_farm_camera_remove_random(state):
     state.pop("camera_random_batch",None)
 
 
-def real_farm_camera_generate_random(state,image,credible,count,seed):
-    """Reuse the existing distinct-module randomizer and validate visible support."""
+def real_farm_camera_random_fault_types(fault_types=None):
+    options=[*CLOSE_DIAGNOSTIC_FAULT_TYPES,"SingleHotSpot"]
+    requested=list(CLOSE_DIAGNOSTIC_FAULT_TYPES if fault_types is None else fault_types)
+    if not requested or any(fault not in options for fault in requested):
+        raise ValueError("Select at least one supported fault class")
+    return [fault for fault in options if fault in requested]
+
+
+def real_farm_camera_generate_random(state,image,credible,count,seed,fault_types=None):
+    """Place a reproducible, diverse mix of diagnoses on valid distinct modules."""
+    fault_types=real_farm_camera_random_fault_types(fault_types)
     real_farm_camera_observation_source(state,image)
     pool=real_farm_camera_random_modules(state,image,credible)
     if not pool:raise ValueError("No resolved modules for random placement. Use Manual Select to confirm a provisional PV target.")
@@ -83,32 +92,64 @@ def real_farm_camera_generate_random(state,image,credible,count,seed):
         target=dict(module);target["simulation_anchor_rgb"]=point.astype(float).tolist()
         validated.append((target,proposal))
     if not validated:raise ValueError("No visible PV support for the requested random targets. Use Manual Select.")
+    class_rng=np.random.default_rng(int(seed)^0x505646)
+    assigned=[]
+    while len(assigned)<len(validated):
+        assigned.extend(class_rng.permutation(fault_types).tolist())
+    assigned=assigned[:len(validated)]
     real_farm_camera_remove_random(state)
-    batch=hashlib.sha256(f"{real_farm_source_identity(image)}:{int(seed)}:{int(count)}".encode()).hexdigest()[:16]
-    for target,proposal in validated:
-        real_farm_camera_new_observation(state,image,target,severity=proposal["severity"])
-        state["camera_observations"][-1].update(seed=int(seed),placement_origin="random",random_batch_id=batch)
-    state["camera_random_batch"]={"id":batch,"seed":int(seed),"count":len(validated)}
+    identity=[real_farm_source_identity(image),int(seed),int(count),"mixed-diagnostics-v1",fault_types]
+    batch=hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:16]
+    for (target,proposal),fault in zip(validated,assigned):
+        observation=real_farm_camera_new_observation(state,image,target,severity=proposal["severity"])
+        observation.update(seed=int(seed),placement_origin="random",random_batch_id=batch,
+            diagnostic_fault_type=None if fault=="SingleHotSpot" else fault)
+    state["camera_random_batch"]={"id":batch,"seed":int(seed),"count":len(validated),
+        "assignment_policy":"shuffled_class_cycles_v1","fault_types":fault_types,"fault_counts":{fault:assigned.count(fault) for fault in fault_types if fault in assigned}}
     return len(validated)
+
+
+def real_farm_camera_generate_random_clicked(state,image,credible):
+    # Button callbacks run before the camera radio is instantiated. Updating
+    # its value in the button's render branch raises a Streamlit widget error.
+    error_key="real_farm_camera_random_error"
+    st.session_state.pop(error_key,None)
+    try:
+        real_farm_camera_generate_random(state,image,credible,
+            st.session_state["real_farm_camera_random_count"],
+            st.session_state["real_farm_camera_random_seed"],
+            st.session_state.get("real_farm_camera_random_fault_types"))
+    except ValueError as exc:
+        st.session_state[error_key]=str(exc)
+        return
+    real_farm_camera_show_thermal_result(image,paired=True)
 
 
 def real_farm_camera_random_controls(state,image,credible):
     pool=real_farm_camera_random_modules(state,image,credible)
     if not pool:
-        st.info("Random hotspots need resolved module geometry. Use Manual Select to confirm a provisional PV polygon.")
+        st.info("Random faults need resolved module geometry. Use Manual Select to confirm a provisional PV polygon.")
+    fault_types=st.multiselect("Fault classes",[*CLOSE_DIAGNOSTIC_FAULT_TYPES,"SingleHotSpot"],
+        default=list(CLOSE_DIAGNOSTIC_FAULT_TYPES),format_func=fault_display_name,
+        key="real_farm_camera_random_fault_types")
+    if not fault_types:st.info("Select at least one fault class to generate.")
     count_key="real_farm_camera_random_count"
     if count_key in st.session_state and not 1<=st.session_state[count_key]<=max(1,len(pool)):
         st.session_state[count_key]=max(1,min(int(st.session_state[count_key]),max(1,len(pool))))
-    count=st.number_input("Number of hotspots",min_value=1,max_value=max(1,len(pool)),value=min(3,max(1,len(pool))),step=1,key=count_key)
-    seed=st.number_input("Random seed",min_value=0,max_value=2147483647,value=42,step=1,key="real_farm_camera_random_seed")
+    st.number_input("Number of faults",min_value=1,max_value=max(1,len(pool)),value=min(len(CLOSE_DIAGNOSTIC_FAULT_TYPES),max(1,len(pool))),step=1,key=count_key)
+    st.number_input("Random seed",min_value=0,max_value=2147483647,value=42,step=1,key="real_farm_camera_random_seed")
     changed=False
-    if st.button("Generate Random Hotspots",disabled=not pool,use_container_width=True):
-        try:
-            real_farm_camera_generate_random(state,image,credible,count,seed)
-            st.session_state["real_farm_camera_distance"]="Far View"
-            changed=True
-        except ValueError as exc:st.warning(str(exc))
-    if st.button("Remove Random Hotspots",disabled=not any(o.get("placement_origin")=="random" for o in state.get("camera_observations",[])),use_container_width=True):
+    st.button("Generate Random Faults",disabled=not pool or not fault_types,use_container_width=True,
+        on_click=real_farm_camera_generate_random_clicked,args=(state,image,credible))
+    error=st.session_state.pop("real_farm_camera_random_error",None)
+    if error:st.warning(error)
+    if st.button("Remove Random Faults",disabled=not any(o.get("placement_origin")=="random" for o in state.get("camera_observations",[])),use_container_width=True):
         real_farm_camera_remove_random(state);changed=True
-    st.caption("Regenerate replaces only the random batch. Manually placed observations are preserved.")
+    st.caption("Selected classes are shuffled without repeats until each has been used. Regenerate replaces only the random batch; manual faults are preserved.")
+    counts={}
+    for observation in state.get("camera_observations",[]):
+        if observation.get("placement_origin")=="random":
+            fault=observation.get("diagnostic_fault_type") or "SingleHotSpot"
+            counts[fault]=counts.get(fault,0)+1
+    if counts:st.caption("Random faults: "+" · ".join(f"{fault_display_name(fault)} × {count}" for fault,count in counts.items()))
     return changed

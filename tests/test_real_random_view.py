@@ -38,6 +38,7 @@ def test_random_generation_switches_to_far_and_preserves_manual_observation(appl
     app.session_state["real_farm_camera_display"] = "RGB faults"
     app.session_state["real_farm_camera_distance"] = initial_view
     app.session_state["real_farm_camera_placement"] = "Random Hotspots"
+    app.session_state["real_farm_camera_random_count"] = 3
     app.run()
     assert not app.exception
 
@@ -56,12 +57,12 @@ def test_random_generation_switches_to_far_and_preserves_manual_observation(appl
         assert state["modules"] == geometry
         assert state["source_rgb_pixel_sha256"] == saved["real_farm_state"]["source_rgb_pixel_sha256"]
 
-    click("Generate Random Hotspots")
+    click("Generate Random Faults")
     assert app.radio(key="real_farm_camera_distance").value == "Far View"
     assert_batch(3)
     app.radio(key="real_farm_camera_distance").set_value("Close View").run()
     app.number_input(key="real_farm_camera_random_count").set_value(2).run()
-    click("Generate Random Hotspots")
+    click("Generate Random Faults")
     assert app.radio(key="real_farm_camera_distance").value == "Far View"
     assert_batch(2)
     # Existing thermal frame, so this checks the real acquisition without recovery.
@@ -71,5 +72,5 @@ def test_random_generation_switches_to_far_and_preserves_manual_observation(appl
     app.radio(key="real_farm_camera_display").set_value("Thermal").run()
     assert not app.exception
     assert_batch(2)
-    click("Remove Random Hotspots")
+    click("Remove Random Faults")
     assert_batch(0)

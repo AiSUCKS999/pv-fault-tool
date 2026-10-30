@@ -92,14 +92,14 @@ def test_cold_rgb_ui_has_natural_fault_view_without_generating_thermal(scene):
     app.run()
     assert not app.exception
     assert app.radio(key="real_farm_camera_display").value == "RGB faults"
-    assert "real_farm_camera_layers" not in app.session_state.filtered_state
+    assert "real_farm_camera_layers" not in app.session_state
     assert app.session_state["real_farm_rgb_preview_cache"][2]["rendered"][0]["changed_pixels"] > 0
     app.radio(key="real_farm_camera_distance").set_value("Close View").run()
     assert not app.exception
-    assert any("Close View · simulated RGB surface appearance" in image.caption for group in app.get("imgs") for image in group.proto.imgs)
+    assert any("Close View · simulated RGB surface appearance" in image.caption for group in app.get("image") for image in group.proto.imgs)
     app.radio(key="real_farm_camera_display").set_value("Original RGB").run()
     assert not app.exception
-    assert any("Close View · original RGB photograph" in image.caption for group in app.get("imgs") for image in group.proto.imgs)
+    assert any("Close View · original RGB photograph" in image.caption for group in app.get("image") for image in group.proto.imgs)
 
 
 def test_thermal_acquisition_pixels_match_approved_main_after_rgb_ui_changes(scene):

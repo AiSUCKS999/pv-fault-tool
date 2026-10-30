@@ -1914,7 +1914,10 @@ def draw_realistic_fault(image, cell, fault_type, scale, view):
                     max(0.30, min(bw, bh) * 0.012),
                 )
                 mask_array = np.clip(patch_mask * 0.86 + edge * 0.42, 0, 1)
-        if mask_array is None:
+        # A patch can lose all crack contrast during extraction (for example,
+        # an opaque alpha plane can saturate the percentile threshold). Use the
+        # existing RGB crack model when that leaves no visible surface mask.
+        if mask_array is None or (view == "rgb" and not np.any(mask_array > 0)):
             fallback = organic_fault_mask(bw, bh, "CellCracking", seed_for(cell["id"], scale, view, "rgb-crack-fallback"))
             mask_array = np.clip((fallback - np.percentile(fallback, 76)) / 0.24, 0, 1) * cell_edge_feather(bw, bh, strength=9.0)
         preserve = panel_segmentation_preserve_mask((BASE_SIZE[1], BASE_SIZE[0], 3), cell)[by1:by2, bx1:bx2]
