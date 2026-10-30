@@ -40,12 +40,12 @@ def setup(scene, cid):
     return ns, state, image, modules
 
 
-@pytest.mark.parametrize("cid", ["TC0497", "TC0499", "TC0500", "TC0501"])
+@pytest.mark.parametrize("cid", ["TC0499", "TC0500", "TC0501"])
 def test_surface_rgb_effect_is_visible_confined_and_does_not_recolor_the_farm(scene, cid):
     ns, state, image, modules = setup(scene, cid)
     original = np.array(image).copy()
     geometry = deepcopy(state["modules"])
-    metadata = ns["real_farm_project_json"](state)
+    metadata = deepcopy(state)
     result, report = rgb_fault_preview(ns, image, modules, state["camera_observations"])
     changed = np.any(np.array(result) != original, axis=2)
     target = next(m for m in modules if m["module_id"] == state["camera_observations"][0]["module_id"])
@@ -55,14 +55,14 @@ def test_surface_rgb_effect_is_visible_confined_and_does_not_recolor_the_farm(sc
     assert np.count_nonzero(changed) < image.width * image.height * .1
     assert np.array_equal(np.asarray(image), original)
     assert state["modules"] == geometry
-    assert ns["real_farm_project_json"](state) == metadata
+    assert state == metadata
     assert report["rendered"][0]["changed_pixels"] > 0 and not report["physical_ground_truth_verified"]
     assert report["rendered"][0]["engine"] == "draw_realistic_fault(view='rgb')"
     again, _ = rgb_fault_preview(ns, image, modules, state["camera_observations"])
     assert np.array_equal(np.asarray(again), np.asarray(result))
 
 
-@pytest.mark.parametrize("cid", ["TC0502", "TC0503", "TC0504", "TC0505"])
+@pytest.mark.parametrize("cid", ["TC0497", "TC0502", "TC0503", "TC0504", "TC0505"])
 def test_electrical_diagnoses_do_not_fabricate_rgb_damage(scene, cid):
     ns, state, image, modules = setup(scene, cid)
     result, report = rgb_fault_preview(ns, image, modules, state["camera_observations"])

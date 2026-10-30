@@ -928,7 +928,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             status.update(label="Thermal ready",state="complete",expanded=False)
         cached=(key,layers)
     if not cached or cached[0][0]!=source:
-        if image_view!="Thermal":
+        if image_view!="Thermal" or section=="Faults":
             candidates,credible=real_farm_camera_candidates(state,image)
             layers={"camera_candidates":candidates,"accepted_modules":credible,"mode":"rgb_preview_only"}
         else:
@@ -972,6 +972,10 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             format_func=lambda value:value+(" · PROVISIONAL" if value.startswith("SIM-") else ""))
     else:mid=None
     selected=next((m for m in targets if m["module_id"]==mid),None)
+    view=st.radio("Camera acquisition",["Far View","Close View"],horizontal=True,key="real_farm_camera_distance")
+    if section=="Faults" and view=="Far View":
+        from pv_far_surface import real_controls
+        real_controls(globals(),state,image,selected,layers)
     placement=st.radio("Hotspot placement",["Manual Select","Random Hotspots"],horizontal=True,key="real_farm_camera_placement") if section=="Faults" else "Manual Select"
     refresh=real_farm_camera_pick_target(state,image,selected) if section=="Faults" and placement=="Manual Select" else False
     if selected and selected.get("simulation_only"):
@@ -993,7 +997,6 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
         if observation["module_id"] in target_lookup:
             observation.setdefault("target_geometry",json.loads(json.dumps(target_lookup[observation["module_id"]])))
         observation.pop("camera_visibility",None)
-    view=st.radio("Camera acquisition",["Far View","Close View"],horizontal=True,key="real_farm_camera_distance")
     active_observation=real_farm_camera_observation_controls(state,image,targets,view)
     if active_observation:mid=active_observation["module_id"]
     unavailable=[o for o in observations if o.get("module_id") not in target_lookup or
@@ -1027,6 +1030,9 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
         else:
             shown=real_farm_annotated_preview(image,candidates,mid,max_width=image.width,show_labels=True)
             caption=("Saved module geometry" if state.get("camera_geometry_origin") else "Automatic module proposals")+" · unverified · amber requires review"
+    elif "master_scalar" not in layers:
+        shown=image;caption="Original RGB · thermal frame not generated yet"
+        st.info("Generate a visible Far condition above to prepare both views, or use Generate Thermal for the existing thermal workflow.")
     else:
         try:
             bounds=None

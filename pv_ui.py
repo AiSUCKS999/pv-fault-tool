@@ -4207,6 +4207,8 @@ def main():
         nonlocal rgb_scene
         if rgb_scene is None:
             rgb_scene = module_field_image(location["id"], "rgb", selected_row_id, selected_cell_id, [], show_grid=False).convert("RGB")
+            from pv_far_surface import generated_rgb_scene
+            rgb_scene, _ = generated_rgb_scene(globals(), rgb_scene, location["id"], selected_row_id, selected_cell_id, records)
         return rgb_scene
 
     def get_thermal_scene():
@@ -4233,7 +4235,8 @@ def main():
     def get_regions():
         nonlocal regions
         if regions is None:
-            regions = array_regions(location["id"], get_rgb_scene())
+            clean_rgb = module_field_image(location["id"], "rgb", selected_row_id, selected_cell_id, [], show_grid=False).convert("RGB")
+            regions = array_regions(location["id"], clean_rgb)
         return regions
 
     def get_selected_region():
@@ -4444,6 +4447,9 @@ def main():
                     else:
                         native_scene = close_source_scene(location["id"], "thermal" if inspection_mode == "Thermal" else "rgb" if inspection_mode == "RGB" else view,
                                                           selected_row_id, selected_cell_id, records, crop_scene)
+                        if inspection_mode == "RGB" or (inspection_mode == "Current" and view == "rgb"):
+                            from pv_far_surface import generated_rgb_scene
+                            native_scene, _ = generated_rgb_scene(globals(), native_scene, location["id"], selected_row_id, selected_cell_id, records)
                         native_region = scale_region_to_image(selected_region, crop_scene.size, native_scene.size)
                         render_array_module_selector(
                             location,
@@ -4636,8 +4642,11 @@ def main():
                 st.markdown("</div>", unsafe_allow_html=True)
 
                 if inspection_state == "scene":
+                    from pv_far_surface import generated_controls
+                    if not experimental_thermal:
+                        generated_controls(globals(), location, selected_row_id, selected_cell_id)
                     st.markdown('<div class="pv-card"><div class="pv-section-title">Far View Thermal Observations</div>', unsafe_allow_html=True)
-                    st.caption("Generate scene-level thermal phenomena without changing close diagnostic fault classes.")
+                    st.caption("Optional thermal-only observations. Hotspots do not imply visible RGB scorching. Use Visible Far conditions above for paired surface appearance and thermal response.")
                     far_fault_types = [
                         fault_type for fault_type in globals().get(
                             "FAR_SCOUT_FAULT_TYPES",
@@ -4931,7 +4940,8 @@ def main():
             st.download_button("Export CSV", fault_records_csv(export_records), file_name="faults.csv", mime="text/csv", use_container_width=True)
         with export_cols[3]:
             healthy_export = module_field_image(location["id"], "thermal", selected_row_id, selected_cell_id, [], show_grid=False) if view == "thermal" else None
-            dataset = generated_geometry_dataset(location, view, selected_row, selected_cell, export_records, scene, get_rgb_scene(), crop_image, crop_bounds, export_modules, export_support, healthy_export)
+            source_rgb_export = module_field_image(location["id"], "rgb", selected_row_id, selected_cell_id, [], show_grid=False).convert("RGB")
+            dataset = generated_geometry_dataset(location, view, selected_row, selected_cell, export_records, scene, source_rgb_export, crop_image, crop_bounds, export_modules, export_support, healthy_export)
             st.download_button("Export Dataset", dataset, file_name="pv_fault_dataset.zip", mime="application/zip", use_container_width=True, on_click="ignore")
         st.markdown("</div>", unsafe_allow_html=True)
 

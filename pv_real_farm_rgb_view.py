@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-VISIBLE_RGB_EFFECTS = {"SingleHotSpot", "MultiHotSpot", "SurfaceObstruction", "SoilingDust", "CellCracking"}
+VISIBLE_RGB_EFFECTS = {"SurfaceObstruction", "SoilingDust", "CellCracking"}
 
 
 def view_mode_changed(st):
@@ -42,7 +42,7 @@ def rgb_fault_preview(ns, image, modules, observations):
         ("observation_id", "module_id", "severity", "seed", "local_uv", "diagnostic_fault_type", "observation_type")} for o in observations],
         "geometry": [{k: m.get(k) for k in ("module_id", "active_polygon_rgb", "refined_mask_contours_rgb", "refined_mask_holes_rgb", "refinement_status")}
                      for m in modules if any(o.get("module_id") == m["module_id"] for o in observations)],
-        "version": "existing-rgb-effects-source-projection-v2",
+        "version": "visible-surface-only-source-projection-v3",
         "engine_revision": (ns["ROOT"] / "pv_render_rgb.py").stat().st_mtime_ns}
     signature = hashlib.sha256(json.dumps(signature_data, sort_keys=True, default=lambda a: a.tolist()).encode()).hexdigest()
     cached = ns["st"].session_state.get("real_farm_rgb_preview_cache")
@@ -76,8 +76,9 @@ def rgb_fault_preview(ns, image, modules, observations):
         to_canvas = cv2.getPerspectiveTransform(quad, rect)
         original = cv2.warpPerspective(output, to_canvas, (width, height), flags=cv2.INTER_LINEAR)
         u, v = observation.get("local_uv", [.5, .5])
-        fraction = .42 if fault in {"SingleHotSpot", "MultiHotSpot"} else .8
-        bw, bh = cw * fraction, ch * fraction
+        # The thermal adapter's obstruction occupies .32 x .38 of the same
+        # target plane. Heat-only symptoms must never invent RGB scorching.
+        bw, bh = (cw * .32, ch * .38) if fault == "SurfaceObstruction" else (cw * .8, ch * .8)
         cx, cy = ox + cw * float(u), oy + ch * float(v)
         x1 = max(ox, min(cx - bw / 2, ox + cw - bw))
         y1 = max(oy, min(cy - bh / 2, oy + ch - bh))

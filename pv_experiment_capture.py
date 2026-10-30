@@ -62,6 +62,9 @@ def actual_state(ns, mode):
                     "applied_seed": None, "seed_behavior": "Fixed-target engine derives morphology internally; independent case seed is unsupported"}
             item["record_identity"] = "generated-" + fingerprint(item)[:20]
             item["identity_kind"] = "collection-derived identity of the actual engine record; not a native observation ID"
+            if record.get("far_surface_group_id"):
+                item["far_surface_group_id"] = record["far_surface_group_id"]
+                item["far_surface_scope"] = record["far_surface_scope"]
             faults.append(item)
         return {"mode": mode, "scene_identity": loc["id"], "scene_name": loc["name"], "source_image": file_identity(source),
                 "rows": ns["custom_row_count"](loc["id"]), "columns": ns["custom_panels_per_row"](loc["id"]),
