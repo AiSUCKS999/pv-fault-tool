@@ -319,9 +319,11 @@ def real_farm_camera_observation_controls(state,image,targets,view):
     if st.session_state.get(key) not in ids:st.session_state[key]=state.get("camera_selected_observation") if state.get("camera_selected_observation") in ids else ids[0]
     index=ids.index(st.session_state[key])
     nav=st.columns(2)
-    if nav[0].button("Previous hotspot",disabled=len(ids)<2,use_container_width=True):st.session_state[key]=ids[(index-1)%len(ids)]
-    if nav[1].button("Next hotspot",disabled=len(ids)<2,use_container_width=True):st.session_state[key]=ids[(index+1)%len(ids)]
-    chosen=st.selectbox("Hotspot observation",ids,key=key)
+    if nav[0].button("Previous fault",disabled=len(ids)<2,use_container_width=True):st.session_state[key]=ids[(index-1)%len(ids)]
+    if nav[1].button("Next fault",disabled=len(ids)<2,use_container_width=True):st.session_state[key]=ids[(index+1)%len(ids)]
+    diagnosis_by_id={o["observation_id"]:o.get("diagnostic_fault_type") or "SingleHotSpot" for o in observations}
+    chosen=st.selectbox("Fault observation",ids,key=key,
+        format_func=lambda value:f"{value} · {fault_display_name(diagnosis_by_id[value])}")
     state["camera_selected_observation"]=chosen
     observation=next(o for o in observations if o["observation_id"]==chosen)
     module=next((m for m in targets if m["module_id"]==observation["module_id"]),None)
@@ -333,7 +335,7 @@ def real_farm_camera_observation_controls(state,image,targets,view):
             st.caption("Perimeter unresolved: hotspot symptom only. Module/section diagnoses require a fitted physical module.")
         current=observation.get("diagnostic_fault_type") or "SingleHotSpot"
         if current not in options:current="SingleHotSpot"
-        diagnosis=st.selectbox("Actual fault for this hotspot",options,index=options.index(current),
+        diagnosis=st.selectbox("Actual fault for this observation",options,index=options.index(current),
             format_func=lambda code:"Thermal Hotspot Symptom / Unassigned" if code=="SingleHotSpot" else real_farm_diagnostic_label(code),
             key=f"{key}_{chosen}_diagnosis")
         severity=st.slider("Observation severity",1,10,int(observation.get("severity",7)),key=f"{key}_{chosen}_severity")
@@ -881,11 +883,25 @@ def real_farm_camera_acquisition(layers,observations,distance,bounds=None,graysc
     return acquired
 
 
+def real_farm_camera_image_view_changed(image):
+    from pv_real_farm_rgb_view import view_mode_changed
+    view_mode_changed(st)
+    if st.session_state.get("real_farm_camera_display") in {"Thermal","RGB + Thermal"}:
+        st.session_state["real_farm_camera_pending_result_source"]=real_farm_source_identity(image)
+
+
+def real_farm_camera_show_thermal_result(image,paired=False):
+    """Select the fault result before widgets render; prepare pixels on rerun."""
+    st.session_state["real_farm_camera_display"]="RGB + Thermal" if paired else "Thermal"
+    st.session_state["real_farm_camera_distance"]="Far View"
+    real_farm_camera_image_view_changed(image)
+
+
 def real_farm_camera_workflow(state,image,section="Thermal"):
     # Camera capture uses the recovered Current renderer. A hidden Generated
     # Mode selector must not silently select a legacy sensor or module field.
     st.session_state["thermal_renderer_mode"]="Current Thermal"
-    from pv_real_farm_rgb_view import rgb_fault_preview, view_bounds, view_mode_changed
+    from pv_real_farm_rgb_view import annotated_rgb_fault_preview, view_bounds
     source=real_farm_source_identity(image)
     if st.session_state.get("real_farm_camera_ui_source")!=source:
         # A new upload starts at the full Far scene, with no hidden healthy/RGB
@@ -896,10 +912,15 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     display_key="real_farm_camera_display"
     if display_key not in st.session_state:
         st.session_state[display_key]="Original RGB" if st.session_state.get("real_farm_camera_original") else "Thermal"
-    image_view=st.radio("Image view",["Thermal","RGB faults","Original RGB"],horizontal=True,key=display_key,
-        on_change=view_mode_changed,args=(st,))
-    st.caption("Synthetic relative thermal · not measured temperature." if image_view=="Thermal" else
-        "Synthetic natural-color RGB surface effects · not physical ground truth." if image_view=="RGB faults" else "Original RGB photograph.")
+    image_view=st.radio("Image view",["RGB + Thermal","Thermal","RGB faults","Original RGB"],horizontal=True,key=display_key,
+        on_change=real_farm_camera_image_view_changed,args=(image,))
+    paired=image_view=="RGB + Thermal"
+    thermal_view=image_view in {"Thermal","RGB + Thermal"}
+    st.caption("Paired RGB surface effects / marked fault locations and synthetic thermal response." if paired else
+        "Synthetic relative thermal · not measured temperature." if thermal_view else
+        "RGB surface effects and marked thermal/electrical fault locations · simulation only." if image_view=="RGB faults" else "Original RGB photograph.")
+    preview=st.container()
+    pending_result=st.session_state.get("real_farm_camera_pending_result_source")
     frame_width=state.get("camera_preparation_response",{}).get("physical_frame_width_fraction")
     render_revision="real-native-source-surfaces-v24-edges-v1-gap-v1-table-v2"+(f"-frame-width-{float(frame_width):.6f}" if frame_width is not None else "")
     key=(source,real_farm_geometry_signature(state.get("modules",[])),render_revision)
@@ -927,6 +948,14 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
                 "training_verified":False}
             status.update(label="Thermal ready",state="complete",expanded=False)
         cached=(key,layers)
+    if pending_result==source and (not cached or cached[0]!=key or "master_scalar" not in cached[1]):
+        # Random placement already has resolved geometry. Prepare its thermal
+        # image without running detection again or replacing live observations.
+        with st.status("Preparing fault images…",expanded=False) as status:
+            layers=real_farm_camera_build_layers(state,image)
+            cached=(key,layers)
+            st.session_state["real_farm_camera_layers"]=cached
+            status.update(label="Fault images ready",state="complete",expanded=False)
     if not cached or cached[0][0]!=source:
         if image_view!="Thermal" or section=="Faults":
             candidates,credible=real_farm_camera_candidates(state,image)
@@ -940,7 +969,8 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
                 st.caption("Saved geometry loaded. You can select a PV polygon now; Generate Thermal to view its hotspot.")
                 if real_farm_camera_pick_target(state,image,selected):st.rerun()
                 st.caption(f"{len(state.get('camera_observations',[]))} hotspot observations · Generate Thermal to view")
-            st.image(image,caption=f"Original RGB · {image.width} × {image.height}",use_container_width=True)
+            with preview:
+                st.image(image,caption=f"Original RGB · {image.width} × {image.height}",use_container_width=True)
             return
     else:
         if cached[0]!=key:
@@ -972,20 +1002,24 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             format_func=lambda value:value+(" · PROVISIONAL" if value.startswith("SIM-") else ""))
     else:mid=None
     selected=next((m for m in targets if m["module_id"]==mid),None)
-    # Keep the visual order, but let placement actions set the distance before
-    # its widget is instantiated (random generation returns to Far View).
-    view_controls=st.container()
-    placement=st.radio("Hotspot placement",["Manual Select","Random Hotspots"],horizontal=True,key="real_farm_camera_placement") if section=="Faults" else "Manual Select"
+    view=st.radio("Camera acquisition",["Far View","Close View"],horizontal=True,key="real_farm_camera_distance")
+    if section=="Faults" and view=="Far View":
+        from pv_far_surface import real_controls
+        real_controls(globals(),state,image,selected,layers)
+    placement_key="real_farm_camera_placement"
+    if st.session_state.get(placement_key)=="Random Hotspots":
+        st.session_state[placement_key]="Random Faults"
+    placement=st.radio("Fault placement",["Manual Select","Random Faults"],horizontal=True,key=placement_key) if section=="Faults" else "Manual Select"
     refresh=real_farm_camera_pick_target(state,image,selected) if section=="Faults" and placement=="Manual Select" else False
     if selected and selected.get("simulation_only"):
         st.caption("PROVISIONAL — exploratory simulation; excluded from verified training labels.")
     real_farm_camera_observation_source(state,image)
     observations=state["camera_observations"]
     if section=="Faults":
-        if placement=="Random Hotspots":
+        if placement=="Random Faults":
             refresh=real_farm_camera_random_controls(state,image,credible) or refresh
             observations=state["camera_observations"]
-        elif st.button("Add hotspot observation",disabled=not mid,use_container_width=True):
+        elif st.button("Add fault observation",disabled=not mid,use_container_width=True):
             real_farm_camera_new_observation(state,image,selected)
         if st.button("Clear Camera Faults",disabled=not observations):
             real_farm_camera_forget_observation_widgets(state,observations)
@@ -996,11 +1030,6 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
         if observation["module_id"] in target_lookup:
             observation.setdefault("target_geometry",json.loads(json.dumps(target_lookup[observation["module_id"]])))
         observation.pop("camera_visibility",None)
-    with view_controls:
-        view=st.radio("Camera acquisition",["Far View","Close View"],horizontal=True,key="real_farm_camera_distance")
-        if section=="Faults" and view=="Far View":
-            from pv_far_surface import real_controls
-            real_controls(globals(),state,image,selected,layers)
     active_observation=real_farm_camera_observation_controls(state,image,targets,view)
     if active_observation:mid=active_observation["module_id"]
     unavailable=[o for o in observations if o.get("module_id") not in target_lookup or
@@ -1011,23 +1040,25 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     outlines=secondary[0].checkbox("Show Module Outlines",value=False,key="real_farm_camera_outlines")
     diagnostics=st.expander("Diagnostics",expanded=False)
     with diagnostics:
-        grayscale=st.checkbox("Grayscale Signal",value=False,key="real_farm_camera_grayscale",disabled=image_view!="Thermal")
+        grayscale=st.checkbox("Grayscale Signal",value=False,key="real_farm_camera_grayscale",disabled=not thermal_view)
         healthy_only=st.checkbox("Healthy Baseline",value=False,key="real_farm_camera_healthy")
-    display=image_view if image_view!="Thermal" else "Grayscale Signal" if grayscale else "Synthetic Thermal"
+    display=image_view if not thermal_view else "Grayscale Signal" if grayscale else "Synthetic Thermal"
     bounds=None
+    rgb_report=None
+    rgb_shown=None
+    thermal_result_ready=False
     selected=next((m for m in targets if m["module_id"]==mid),None)
     if display in {"Original RGB","RGB faults"}:
         shown=image
         if display=="RGB faults" and not healthy_only:
-            shown,rgb_report=rgb_fault_preview(globals(),image,targets,observations)
-            st.caption(f"{len(rgb_report['rendered'])} RGB surface effect(s) · no thermal palette")
-            for skipped in rgb_report["unavailable"]:
-                st.info(f"{skipped['observation_id']}: {skipped['reason']}. Thermal view retains the diagnosis.")
+            shown,rgb_report=annotated_rgb_fault_preview(globals(),image,targets,observations)
             with diagnostics:
                 st.json(rgb_report)
         bounds=view_bounds(globals(),image,selected,candidates,view)
         if bounds:shown=shown.crop(bounds)
-        caption=("Close View" if bounds else "Far View")+" · "+("simulated RGB surface appearance" if display=="RGB faults" and not healthy_only else "original RGB photograph")
+        rgb_label="simulated RGB surface appearance" if display=="RGB faults" and not healthy_only else "original RGB photograph"
+        if rgb_report and rgb_report.get("annotated"):rgb_label+=" · marked thermal/electrical fault locations"
+        caption=("Close View" if bounds else "Far View")+" · "+rgb_label
     elif display=="Automatic Modules":
         if state.get("camera_structure_check",{}).get("scene_geometry_unreliable"):
             shown=image;caption="Unreliable cell-grid proposals withheld; no physical module labels available"
@@ -1055,19 +1086,53 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
                 else:
                     w,h=image.size;bounds=(max(0,w//2-500),max(0,h//2-350),min(w,w//2+500),min(h,h//2+350))
             shown=real_farm_camera_acquisition(layers,[] if healthy_only else observations,"close" if bounds else "far",bounds,grayscale=display=="Grayscale Signal")
+            thermal_result_ready=True
         except FaultGeometryError as exc:
             st.error(f"Synthetic fault could not be rendered accurately: {exc}")
             shown=real_farm_camera_acquisition(layers,[],"close" if bounds else "far",bounds,grayscale=display=="Grayscale Signal")
         caption=(f"Close View · native-source thermal detail · {shown.width} × {shown.height}" if bounds else f"Far View · {image.width} × {image.height}")
-        caption += " · Healthy" if healthy_only else " · With synthetic fault" if observations else " · Healthy"
+        caption += " · Fault preview unavailable; healthy baseline shown" if not thermal_result_ready else " · Healthy" if healthy_only else " · With synthetic fault" if observations else " · Healthy"
+    if paired:
+        rgb_shown=image
+        if not healthy_only:
+            rgb_shown,rgb_report=annotated_rgb_fault_preview(globals(),image,targets,observations)
+            with diagnostics:st.json(rgb_report)
+        if bounds:rgb_shown=rgb_shown.crop(bounds)
     if outlines:
-        overlay=np.array(shown);offset=np.float32(bounds[:2] if bounds else (0,0))
-        for module in candidates+provisional:
-            polygon=np.rint(np.float32(module["outer_polygon_rgb"])-offset).astype(np.int32)
-            cv2.polylines(overlay,[polygon],True,(0,255,255) if module["module_id"]==mid else (255,180,30),1,cv2.LINE_AA)
-        shown=Image.fromarray(overlay)
-    st.image(shown,caption=caption,width="stretch" if view=="Close View" and display in {"Original RGB","RGB faults"} else shown.width,output_format="PNG")
-    st.download_button("Download camera view",export_current_view_bytes(shown),file_name=f"camera_{display.replace(' ','_')}_{view.replace(' ','_')}.png",mime="image/png")
+        outlined=[]
+        for frame in ([shown,rgb_shown] if paired else [shown]):
+            overlay=np.array(frame);offset=np.float32(bounds[:2] if bounds else (0,0))
+            for module in candidates+provisional:
+                polygon=np.rint(np.float32(module["outer_polygon_rgb"])-offset).astype(np.int32)
+                cv2.polylines(overlay,[polygon],True,(0,255,255) if module["module_id"]==mid else (255,180,30),1,cv2.LINE_AA)
+            outlined.append(Image.fromarray(overlay))
+        shown=outlined[0]
+        if paired:rgb_shown=outlined[1]
+    with preview:
+        if paired:
+            rgb_column,thermal_column=st.columns(2)
+            with rgb_column:
+                st.markdown("**RGB faults**")
+                st.image(rgb_shown,caption=("Close View" if bounds else "Far View")+" · RGB surface effects and marked fault locations" if not healthy_only else "Original RGB · healthy baseline",width="stretch",output_format="PNG")
+                st.download_button("Download RGB faults",export_current_view_bytes(rgb_shown),file_name=f"camera_RGB_faults_{view.replace(' ','_')}.png",mime="image/png")
+            with thermal_column:
+                st.markdown("**Thermal faults**")
+                st.image(shown,caption=caption,width="stretch",output_format="PNG")
+                st.download_button("Download thermal faults",export_current_view_bytes(shown),file_name=f"camera_Thermal_faults_{view.replace(' ','_')}.png",mime="image/png")
+        else:
+            st.image(shown,caption=caption,width="stretch",output_format="PNG")
+            st.download_button("Download camera view",export_current_view_bytes(shown),file_name=f"camera_{display.replace(' ','_')}_{view.replace(' ','_')}.png",mime="image/png")
+        if rgb_report is not None:
+            st.caption(f"{len(rgb_report['rendered'])} RGB surface effect(s) · {len(rgb_report.get('annotated',[]))} marked thermal/electrical location(s)")
+            if rgb_report.get("annotated"):
+                st.caption("Location markers are annotations, not visible physical damage. Dust, obstruction and cracks use simulated RGB surface effects.")
+            if rgb_report["unavailable"]:
+                st.info(f"{len(rgb_report['unavailable'])} observation(s) could not be shown in RGB; see details below.")
+                with st.expander("RGB preview details",expanded=False):
+                    for skipped in rgb_report["unavailable"]:
+                        st.write(f"{skipped['observation_id']}: {skipped['reason']}")
+        if not paired and observations:
+            st.button("Show RGB + thermal",on_click=real_farm_camera_show_thermal_result,args=(image,True))
     with diagnostics:
         st.json(layers.get("scalar_audit",{}))
         if "master_scalar" in layers:
@@ -1080,4 +1145,6 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             st.download_button("Download pre-palette proxy codes",export_current_view_bytes(Image.fromarray(np.uint8(np.clip(layers["master_scalar"],0,255)))),file_name="synthetic_proxy_codes_NOT_TEMPERATURE.png",mime="image/png")
         st.caption(f"{len(candidates)} module proposals · {len(targets)} simulation targets. Synthetic relative signal, not measured temperature. Training-label export requires separate explicit verification.")
         st.download_button("Download unverified analysis",real_farm_project_json(state),file_name="camera_analysis_UNVERIFIED.json",mime="application/json")
+    if pending_result==source and thermal_result_ready:
+        st.session_state.pop("real_farm_camera_pending_result_source",None)
     if refresh:st.rerun()

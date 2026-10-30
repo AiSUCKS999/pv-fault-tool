@@ -74,8 +74,9 @@ def fault_patch_counts():
     return counts
 
 
-@st.cache_data(show_spinner=False)
 def fault_patch_paths(fault_type):
+    # Enumerating names is cheap and observes added/removed assets. Image
+    # qualification and decoding below are cached by file revision instead.
     classes = [canonical_fault_type(fault_type)] + PATCH_FALLBACKS.get(canonical_fault_type(fault_type), [])
     paths = []
     for class_name in classes:
@@ -87,15 +88,39 @@ def fault_patch_paths(fault_type):
     return paths
 
 
-@st.cache_data(show_spinner=False)
-def load_fault_patch(path):
+def fault_patch_revision(path):
     try:
-        image = Image.open(path)
-        if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
-            return np.array(image.convert("RGBA"))
-        return np.array(image.convert("RGB"))
+        stat = Path(path).stat()
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None, None
+
+
+@st.cache_data(show_spinner=False)
+def load_fault_patch(path, file_revision=None):
+    # file_revision participates in the cache key even though decoding only
+    # needs the path. Replacing an asset must not retain its old pixel array.
+    try:
+        with Image.open(path) as image:
+            if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+                return np.array(image.convert("RGBA"))
+            return np.array(image.convert("RGB"))
     except OSError:
         return None
+
+
+@st.cache_data(show_spinner=False)
+def alpha_fault_patch_paths(path_revisions):
+    """Qualify transparency once per ordered path set and asset revision."""
+    paths = []
+    for path, _modified_ns, _size in path_revisions:
+        try:
+            with Image.open(path) as image:
+                if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+                    paths.append(path)
+        except OSError:
+            continue
+    return paths
 
 
 def selected_fault_patch(fault_type, seed):
@@ -104,31 +129,34 @@ def selected_fault_patch(fault_type, seed):
         return None
     fault_type = canonical_fault_type(fault_type)
     if fault_type in CRACKING_FAULTS | HOTSPOT_FAULTS:
-        alpha_paths = []
-        for path in paths:
-            try:
-                image = Image.open(path)
-                if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
-                    alpha_paths.append(path)
-            except OSError:
+        groups = [paths]
+        if fault_type in CRACKING_FAULTS:
+            groups = [[], [], []]
+            for path in paths:
+                stem = Path(path).stem
+                if "pv_v1_glass_breakage" in stem:
+                    groups[0].append(path)
+                elif stem.rsplit("_", 1)[-1] in PREFERRED_CELL_CRACKING_PATCH_SUFFIXES:
+                    groups[1].append(path)
+                else:
+                    groups[2].append(path)
+        # Alpha qualification precedes crack priority. Qualifying priority
+        # groups lazily yields the same candidates without opening lower groups
+        # once a higher group contains usable alpha references.
+        for group in groups:
+            if not group:
                 continue
-        if alpha_paths:
-            paths = alpha_paths
-    if fault_type in CRACKING_FAULTS:
-        glass_breakage_paths = [
-            path for path in paths
-            if "pv_v1_glass_breakage" in Path(path).stem
-        ]
-        if glass_breakage_paths:
-            paths = glass_breakage_paths
+            revisions = tuple((path, *fault_patch_revision(path)) for path in group)
+            alpha_paths = alpha_fault_patch_paths(revisions)
+            if alpha_paths:
+                paths = alpha_paths
+                break
         else:
-            preferred_paths = [
-                path for path in paths
-                if Path(path).stem.rsplit("_", 1)[-1] in PREFERRED_CELL_CRACKING_PATCH_SUFFIXES
-            ]
-            if preferred_paths:
-                paths = preferred_paths
-    return load_fault_patch(paths[seed % len(paths)])
+            # Preserve the original unqualified priority fallback when every
+            # reference is opaque (or unreadable).
+            paths = next(group for group in groups if group)
+    path = paths[seed % len(paths)]
+    return load_fault_patch(path, fault_patch_revision(path))
 
 
 def patch_bank_status_rows():

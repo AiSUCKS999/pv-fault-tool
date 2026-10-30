@@ -1,12 +1,17 @@
 """Project existing RGB surface effects onto source-supported Real Farm modules."""
 import hashlib
 import json
+from copy import deepcopy
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 VISIBLE_RGB_EFFECTS = {"SurfaceObstruction", "SoilingDust", "CellCracking"}
+ANNOTATED_RGB_FAULTS = {
+    "SingleHotSpot", "MultiHotSpot", "PartialShading", "SingleDiode", "MultiDiode",
+    "SingleByPassed", "MultiByPassed", "StringOpenCircuit", "StringReversedPolarity",
+}
 
 
 def view_mode_changed(st):
@@ -108,4 +113,103 @@ def rgb_fault_preview(ns, image, modules, observations):
             "engine": "draw_realistic_fault(view='rgb')", "geometry_verified": False})
     result = Image.fromarray(output, "RGB")
     ns["st"].session_state["real_farm_rgb_preview_cache"] = (signature, result, report)
+    return result, report
+
+
+def annotated_rgb_fault_preview(ns, image, modules, observations):
+    """Natural surface effects plus explicitly annotated thermal/electrical locations.
+
+    Location markers are diagram overlays, not simulated scorching or daylight
+    evidence. The natural preview, its cache, source pixels and observations are
+    never painted in place. Coordinates remain in the original RGB image space.
+    """
+    natural, natural_report = rgb_fault_preview(ns, image, modules, observations)
+    result = natural.copy()
+    report = deepcopy(natural_report)
+    report["annotated"] = []
+    report["annotation_kind"] = "thermal/electrical location markers; not physical RGB damage"
+    source = ns["real_farm_source_identity"](image)
+    lookup = {m["module_id"]: m for m in modules}
+    draw = ImageDraw.Draw(result)
+    radius = max(4, min(18, round(min(image.size) / 120)))
+    stroke = max(1, round(radius / 4))
+    font_size = max(10, min(22, round(radius * 1.6)))
+    try:
+        font = ImageFont.load_default(size=font_size)
+    except TypeError:
+        font = ImageFont.load_default()
+    color, border = (255, 65, 105), (12, 18, 28)
+    annotated_ids = set()
+    reasons = {}
+
+    for index, observation in enumerate(observations, 1):
+        fault = observation.get("diagnostic_fault_type") or observation.get("observation_type", "SingleHotSpot")
+        if fault not in ANNOTATED_RGB_FAULTS:
+            continue
+        oid = observation.get("observation_id")
+        module = lookup.get(observation.get("module_id"))
+        reason = None
+        if observation.get("source_rgb_pixel_sha256", source) != source:
+            reason = "Observation source mismatch"
+        elif module is None:
+            reason = "The observation has no matching module geometry"
+        else:
+            try:
+                quad = np.asarray(module["active_polygon_rgb"], dtype=np.float32)
+                if (quad.shape != (4, 2) or not np.isfinite(quad).all()
+                        or not ns["real_farm_mechanical_validation"](quad, image.size)["mechanically_valid"]):
+                    raise ValueError("Invalid target polygon")
+                if "center_rgb_px" in observation:
+                    center = np.asarray(observation["center_rgb_px"], dtype=np.float32)
+                else:
+                    uv = np.asarray(observation.get("local_uv", [.5, .5]), dtype=np.float32)
+                    if uv.shape != (2,) or not np.isfinite(uv).all() or np.any((uv < 0) | (uv > 1)):
+                        raise ValueError("Invalid local observation coordinates")
+                    transform = cv2.getPerspectiveTransform(np.float32([[0, 0], [1, 0], [1, 1], [0, 1]]), quad)
+                    center = cv2.perspectiveTransform(uv.reshape(1, 1, 2), transform)[0, 0]
+                if center.shape != (2,) or not np.isfinite(center).all():
+                    raise ValueError("Invalid observation center")
+                x, y = map(float, center)
+                if not (0 <= x < image.width and 0 <= y < image.height):
+                    raise ValueError("Observation center is outside the source image")
+                if cv2.pointPolygonTest(quad, (x, y), False) < 0:
+                    raise ValueError("Observation center is outside its module")
+                px, py = min(image.width - 1, round(x)), min(image.height - 1, round(y))
+                if "real_farm_module_mask" in ns:
+                    support = ns["real_farm_module_mask"](image.size, [module], True, (px, py, px + 1, py + 1))
+                    if not np.any(support):
+                        raise ValueError("Observation center has no active PV support")
+            except (ValueError, TypeError, KeyError, cv2.error) as exc:
+                reason = str(exc)
+        if reason:
+            reasons[oid] = reason
+            continue
+
+        # A hollow ring/cross and small numbered tag remain recognizably an
+        # annotation even on a dark panel; no heat texture is painted into RGB.
+        draw.ellipse((px-radius-1, py-radius-1, px+radius+1, py+radius+1), outline=border, width=stroke+2)
+        draw.ellipse((px-radius, py-radius, px+radius, py+radius), outline=color, width=stroke)
+        draw.line((px-2, py, px+2, py), fill=(255, 255, 255), width=1)
+        draw.line((px, py-2, px, py+2), fill=(255, 255, 255), width=1)
+        digits = "".join(c for c in str(oid or "") if c.isdigit())
+        label = str(int(digits)) if digits and len(digits) <= 4 else str(index)
+        text_box = draw.textbbox((0, 0), label, font=font)
+        tw, th = text_box[2]-text_box[0], text_box[3]-text_box[1]
+        lw, lh = tw+6, th+4
+        left = px+radius+3 if px+radius+3+lw <= image.width else px-radius-3-lw
+        left = max(0, min(left, image.width-lw))
+        top = max(0, min(py-lh//2, image.height-lh))
+        draw.rounded_rectangle((left, top, left+lw-1, top+lh-1), radius=2, fill=border, outline=color, width=1)
+        draw.text((left+3-text_box[0], top+2-text_box[1]), label, fill=(255, 255, 255), font=font)
+        report["annotated"].append({
+            "observation_id": oid, "module_id": observation.get("module_id"), "fault_type": fault,
+            "center_rgb_px": [x, y], "marker_kind": "location_annotation", "label": label,
+            "physical_rgb_effect": False, "geometry_verified": False,
+        })
+        annotated_ids.add(oid)
+
+    report["unavailable"] = [dict(item, reason=reasons.get(item.get("observation_id"), item["reason"]))
+                             for item in report["unavailable"] if item.get("observation_id") not in annotated_ids]
+    if report["annotated"]:
+        report["palette"] = "original natural RGB; surface effects and explicit location annotation overlays"
     return result, report
