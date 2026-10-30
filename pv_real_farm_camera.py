@@ -885,7 +885,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     # Camera capture uses the recovered Current renderer. A hidden Generated
     # Mode selector must not silently select a legacy sensor or module field.
     st.session_state["thermal_renderer_mode"]="Current Thermal"
-    st.caption("Synthetic relative thermal · not measured temperature.")
+    from pv_real_farm_rgb_view import rgb_fault_preview, view_bounds, view_mode_changed
     source=real_farm_source_identity(image)
     if st.session_state.get("real_farm_camera_ui_source")!=source:
         # A new upload starts at the full Far scene, with no hidden healthy/RGB
@@ -893,6 +893,13 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
         for widget_key in list(st.session_state):
             if widget_key.startswith("real_farm_camera_"):st.session_state.pop(widget_key,None)
         st.session_state["real_farm_camera_ui_source"]=source
+    display_key="real_farm_camera_display"
+    if display_key not in st.session_state:
+        st.session_state[display_key]="Original RGB" if st.session_state.get("real_farm_camera_original") else "Thermal"
+    image_view=st.radio("Image view",["Thermal","RGB faults","Original RGB"],horizontal=True,key=display_key,
+        on_change=view_mode_changed,args=(st,))
+    st.caption("Synthetic relative thermal · not measured temperature." if image_view=="Thermal" else
+        "Synthetic natural-color RGB surface effects · not physical ground truth." if image_view=="RGB faults" else "Original RGB photograph.")
     frame_width=state.get("camera_preparation_response",{}).get("physical_frame_width_fraction")
     render_revision="real-native-source-surfaces-v24-edges-v1-gap-v1-table-v2"+(f"-frame-width-{float(frame_width):.6f}" if frame_width is not None else "")
     key=(source,real_farm_geometry_signature(state.get("modules",[])),render_revision)
@@ -921,20 +928,25 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             status.update(label="Thermal ready",state="complete",expanded=False)
         cached=(key,layers)
     if not cached or cached[0][0]!=source:
-        if section=="Faults" and state.get("modules"):
+        if image_view!="Thermal":
             candidates,credible=real_farm_camera_candidates(state,image)
-            provisional=real_farm_camera_simulation_targets(state,image,candidates,credible)
-            selected=next(iter(credible+provisional),None)
-            real_farm_camera_observation_source(state,image)
-            st.caption("Saved geometry loaded. You can select a PV polygon now; Generate Thermal to view its hotspot.")
-            if real_farm_camera_pick_target(state,image,selected):st.rerun()
-            st.caption(f"{len(state.get('camera_observations',[]))} hotspot observations · Generate Thermal to view")
-        st.image(image,caption=f"Original RGB · {image.width} × {image.height}",use_container_width=True)
-        return
-    if cached[0]!=key:
-        layers=real_farm_camera_build_layers(state,image)
-        st.session_state["real_farm_camera_layers"]=(key,layers)
-    else:layers=cached[1]
+            layers={"camera_candidates":candidates,"accepted_modules":credible,"mode":"rgb_preview_only"}
+        else:
+            if section=="Faults" and state.get("modules"):
+                candidates,credible=real_farm_camera_candidates(state,image)
+                provisional=real_farm_camera_simulation_targets(state,image,candidates,credible)
+                selected=next(iter(credible+provisional),None)
+                real_farm_camera_observation_source(state,image)
+                st.caption("Saved geometry loaded. You can select a PV polygon now; Generate Thermal to view its hotspot.")
+                if real_farm_camera_pick_target(state,image,selected):st.rerun()
+                st.caption(f"{len(state.get('camera_observations',[]))} hotspot observations · Generate Thermal to view")
+            st.image(image,caption=f"Original RGB · {image.width} × {image.height}",use_container_width=True)
+            return
+    else:
+        if cached[0]!=key:
+            layers=real_farm_camera_build_layers(state,image)
+            st.session_state["real_farm_camera_layers"]=(key,layers)
+        else:layers=cached[1]
     candidates=layers["camera_candidates"]
     credible=list(layers.setdefault("credible_modules",list(layers["accepted_modules"])))
     provisional=real_farm_camera_simulation_targets(state,image,candidates,credible)
@@ -989,16 +1001,26 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     if unavailable:st.warning("Some observations lack the geometry needed for their selected diagnosis. Their records are retained; use hotspot-only placement or review that target.")
     observations=[o for o in observations if o not in unavailable]
     secondary=st.columns(2)
-    original=secondary[0].checkbox("View Original RGB",value=False,key="real_farm_camera_original")
-    outlines=secondary[1].checkbox("Show Module Outlines",value=False,key="real_farm_camera_outlines")
+    outlines=secondary[0].checkbox("Show Module Outlines",value=False,key="real_farm_camera_outlines")
     diagnostics=st.expander("Diagnostics",expanded=False)
     with diagnostics:
-        grayscale=st.checkbox("Grayscale Signal",value=False,key="real_farm_camera_grayscale")
+        grayscale=st.checkbox("Grayscale Signal",value=False,key="real_farm_camera_grayscale",disabled=image_view!="Thermal")
         healthy_only=st.checkbox("Healthy Baseline",value=False,key="real_farm_camera_healthy")
-    display="Original RGB" if original else "Grayscale Signal" if grayscale else "Synthetic Thermal"
+    display=image_view if image_view!="Thermal" else "Grayscale Signal" if grayscale else "Synthetic Thermal"
     bounds=None
     selected=next((m for m in targets if m["module_id"]==mid),None)
-    if display=="Original RGB":shown=image;caption="Full original RGB"
+    if display in {"Original RGB","RGB faults"}:
+        shown=image
+        if display=="RGB faults" and not healthy_only:
+            shown,rgb_report=rgb_fault_preview(globals(),image,targets,observations)
+            st.caption(f"{len(rgb_report['rendered'])} RGB surface effect(s) · no thermal palette")
+            for skipped in rgb_report["unavailable"]:
+                st.info(f"{skipped['observation_id']}: {skipped['reason']}. Thermal view retains the diagnosis.")
+            with diagnostics:
+                st.json(rgb_report)
+        bounds=view_bounds(globals(),image,selected,candidates,view)
+        if bounds:shown=shown.crop(bounds)
+        caption=("Close View" if bounds else "Far View")+" · "+("simulated RGB surface appearance" if display=="RGB faults" and not healthy_only else "original RGB photograph")
     elif display=="Automatic Modules":
         if state.get("camera_structure_check",{}).get("scene_geometry_unreliable"):
             shown=image;caption="Unreliable cell-grid proposals withheld; no physical module labels available"
@@ -1034,16 +1056,18 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             polygon=np.rint(np.float32(module["outer_polygon_rgb"])-offset).astype(np.int32)
             cv2.polylines(overlay,[polygon],True,(0,255,255) if module["module_id"]==mid else (255,180,30),1,cv2.LINE_AA)
         shown=Image.fromarray(overlay)
-    st.image(shown,caption=caption,width=shown.width,output_format="PNG")
+    st.image(shown,caption=caption,width="stretch" if view=="Close View" and display in {"Original RGB","RGB faults"} else shown.width,output_format="PNG")
     st.download_button("Download camera view",export_current_view_bytes(shown),file_name=f"camera_{display.replace(' ','_')}_{view.replace(' ','_')}.png",mime="image/png")
     with diagnostics:
         st.json(layers.get("scalar_audit",{}))
-        if layers.get("acquisition_audit"):
-            st.download_button("Download scalar comparison",json.dumps(layers["acquisition_audit"],indent=2),file_name="camera_scalar_comparison.json",mime="application/json")
-        st.download_button("Download exact scalar PV mask",export_current_view_bytes(Image.fromarray(layers["camera_composited_pv_mask"])),file_name="scalar_PV_mask_UNVERIFIED.png",mime="image/png")
-        st.download_button("Download module outlines",export_current_view_bytes(real_farm_annotated_preview(image,candidates,max_width=image.width,show_labels=False)),file_name="module_proposals_UNVERIFIED.png",mime="image/png")
+        if "master_scalar" in layers:
+            if layers.get("acquisition_audit"):
+                st.download_button("Download scalar comparison",json.dumps(layers["acquisition_audit"],indent=2),file_name="camera_scalar_comparison.json",mime="application/json")
+            st.download_button("Download exact scalar PV mask",export_current_view_bytes(Image.fromarray(layers["camera_composited_pv_mask"])),file_name="scalar_PV_mask_UNVERIFIED.png",mime="image/png")
+            st.download_button("Download module outlines",export_current_view_bytes(real_farm_annotated_preview(image,candidates,max_width=image.width,show_labels=False)),file_name="module_proposals_UNVERIFIED.png",mime="image/png")
         st.download_button("Download original RGB",export_current_view_bytes(image),file_name="original_RGB.png",mime="image/png")
-        st.download_button("Download pre-palette proxy codes",export_current_view_bytes(Image.fromarray(np.uint8(np.clip(layers["master_scalar"],0,255)))),file_name="synthetic_proxy_codes_NOT_TEMPERATURE.png",mime="image/png")
+        if "master_scalar" in layers:
+            st.download_button("Download pre-palette proxy codes",export_current_view_bytes(Image.fromarray(np.uint8(np.clip(layers["master_scalar"],0,255)))),file_name="synthetic_proxy_codes_NOT_TEMPERATURE.png",mime="image/png")
         st.caption(f"{len(candidates)} module proposals · {len(targets)} simulation targets. Synthetic relative signal, not measured temperature. Training-label export requires separate explicit verification.")
         st.download_button("Download unverified analysis",real_farm_project_json(state),file_name="camera_analysis_UNVERIFIED.json",mime="application/json")
     if refresh:st.rerun()
