@@ -55,6 +55,18 @@ def test_native_image14_stress():
     codes=list(ns['CLOSE_DIAGNOSTIC_FAULT_TYPES'])+['SingleHotSpot']
     request=dict(source='image_14',count=12,classes=codes,policy='Counts per class',
         counts={c:2 if i<4 else 1 for i,c in enumerate(codes)},seed=137,severity=7,severity_distribution='Fixed',placement='Spread')
+    profile={}
+    scope=ns['real_farm_camera_acquisition'].__globals__
+    for name in ['real_farm_camera_observation_field','real_farm_camera_sensor']:
+        original=scope[name]
+        def measured(*args,_name=name,_original=original,**kwargs):
+            t=time.perf_counter()
+            try:return _original(*args,**kwargs)
+            finally:
+                row=profile.setdefault(_name,{'calls':0,'seconds':0})
+                row['calls']+=1;row['seconds']+=time.perf_counter()-t
+                (ROOT/'artifacts/experiment_recovery/image14_profile_progress.json').write_text(json.dumps(profile,indent=2))
+        scope[name]=measured
     scene=generate_scene(ns,'Real Farm',request);acquire_seconds=time.perf_counter()-start
     assert scene['source']['size']==[4742,3159] and len(scene['faults'])==12
     ids=[f['id'] for f in scene['faults']]
@@ -98,5 +110,22 @@ def test_native_image14_stress():
     report={'source_size':scene['source']['size'],'faults':12,'native_acquisition_seconds':acquire_seconds,
         'cached_acquisition_20_calls_seconds':switch_seconds,'zip_bytes':len(raw),
         'peak_working_set_MiB':mem.PeakWorkingSetSize/1048576,'total_seconds':time.perf_counter()-start,
-        'browser_switches':60,'physical_display_verified':False}
+        'browser_switches':60,'profile':profile,'physical_display_verified':False}
     (out/'image14_stress.json').write_text(json.dumps(report,indent=2));print(report)
+
+
+def test_close_batch_scalar_cache_is_pixel_exact():
+    ns=namespace();ns['st'].session_state['real_farm_prepared_picker']='image_05';ns['real_farm_catalog_selected']()
+    state=ns['st'].session_state['real_farm_state'];image=ns['st'].session_state['real_farm_image']
+    layers=ns['real_farm_camera_build_layers'](state,image)
+    targets=layers['accepted_modules']
+    ns['real_farm_camera_generate_random'](state,image,targets,3,137,['SoilingDust'],severity_distribution='Fixed')
+    observations=state['camera_observations'];cache={}
+    for module in targets[:2]:
+        bounds=ns['real_farm_close_context_bounds'](module,targets,(image.height,image.width),.25)
+        ns['st'].session_state.pop('real_farm_camera_acquisitions',None)
+        expected=ns['real_farm_camera_acquisition'](layers,observations,'close',bounds)
+        ns['st'].session_state.pop('real_farm_camera_acquisitions',None)
+        actual=ns['real_farm_camera_acquisition'](layers,observations,'close',bounds,scalar_cache=cache)
+        assert actual.tobytes()==expected.tobytes()
+    assert len(cache)==1

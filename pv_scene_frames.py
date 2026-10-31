@@ -116,6 +116,7 @@ def acquire_scene(ns, mode):
         rgb,report=rgb_fault_preview(ns,original,geometry,observations)
         healthy=ns["real_farm_camera_acquisition"](layers,[],"far")
         thermal=ns["real_farm_camera_acquisition"](layers,observations,"far")
+        close_scalar_cache={}
         for observation in observations:
             module=lookup[observation["module_id"]]
             polygon=deepcopy(module["active_polygon_rgb"])
@@ -129,7 +130,7 @@ def acquire_scene(ns, mode):
                 "reference_ids":deepcopy(observation.get("production_reference_ids",{}))})
             bounds=view_bounds(ns,original,module,layers["camera_candidates"],"Close View")
             close[oid]={"original":original.crop(bounds),"rgb":rgb.crop(bounds),
-                "thermal":ns["real_farm_camera_acquisition"](layers,observations,"close",bounds),"bounds":bounds}
+                "thermal":ns["real_farm_camera_acquisition"](layers,observations,"close",bounds,scalar_cache=close_scalar_cache),"bounds":bounds}
         mask=Image.fromarray(layers["pv_module_union_mask"].astype(np.uint8)*255) if layers["pv_module_union_mask"].max()<=1 else Image.fromarray(np.uint8(layers["pv_module_union_mask"]))
         source={"identity":state.get("prepared_catalog_id","uploaded"),"size":list(original.size),
             "source_pixel_sha256":ns["real_farm_source_identity"](original),"filename":state.get("original_rgb_filename"),

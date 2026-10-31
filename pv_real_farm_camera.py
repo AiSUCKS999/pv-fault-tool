@@ -827,7 +827,7 @@ def real_farm_camera_sensor(field,distance,support=None):
     return field
 
 
-def real_farm_camera_acquisition(layers,observations,distance,bounds=None,grayscale=False):
+def real_farm_camera_acquisition(layers,observations,distance,bounds=None,grayscale=False,scalar_cache=None):
     config=json.dumps([{k:o.get(k) for k in ("observation_id","module_id","severity","seed","local_uv","diagnostic_fault_type","production_reference_ids","camera_visibility")} for o in observations],sort_keys=True)
     target_geometry=tuple((m["module_id"],real_farm_polygon_signature(m)) for m in layers.get("accepted_modules",[]) if
         m.get("simulation_only") and any(o.get("module_id")==m["module_id"] for o in observations))
@@ -838,11 +838,21 @@ def real_farm_camera_acquisition(layers,observations,distance,bounds=None,graysc
     if key in cache and (not observations or key in audits):
         if observations:layers["acquisition_audit"]=audits[key]
         return cache[key]
-    field=real_farm_camera_observation_field(layers,observations) if observations else layers["master_scalar"]
-    sensor=real_farm_camera_sensor(field,distance,layers["pv_module_union_mask"])
+    # A scene export acquires several Close crops from one unchanged native
+    # scalar plane. Reuse that plane/sensor result only within that batch.
+    scalar_key=(id(layers["master_scalar"]),config,target_geometry,distance)
+    cached_planes=scalar_cache.get(scalar_key) if scalar_cache is not None else None
+    if cached_planes:
+        field,sensor,baseline=cached_planes
+    else:
+        field=real_farm_camera_observation_field(layers,observations) if observations else layers["master_scalar"]
+        sensor=real_farm_camera_sensor(field,distance,layers["pv_module_union_mask"])
+        baseline=real_farm_camera_sensor(layers["master_scalar"],distance,layers["pv_module_union_mask"]) if observations else sensor
+        if scalar_cache is not None:
+            scalar_cache.clear()
+            scalar_cache[scalar_key]=(field,sensor,baseline)
     # Inspect the same scalar planes actually sent to display, before palette.
     if observations:
-        baseline=real_farm_camera_sensor(layers["master_scalar"],distance,layers["pv_module_union_mask"])
         crop=bounds or (0,0,field.shape[1],field.shape[0])
         x1,y1,x2,y2=crop
         pre=(field[y1:y2,x1:x2]-layers["master_scalar"][y1:y2,x1:x2])
