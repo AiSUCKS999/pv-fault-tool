@@ -10,3 +10,6 @@ artifacts/experiment_recovery/*.png
 artifacts/experiment_recovery/*.html
 artifacts/experiment_recovery/*.zip
 artifacts/experiment_recovery/*.log
+
+# Local ROS workspace discovery marker
+COLCON_IGNORE

@@ -26,6 +26,7 @@ def test_calibration_browser_and_clean_filming(tmp_path):
         try:
             page=browser.new_page(viewport={'width':1280,'height':800});page.goto(file.as_uri())
             page.locator('#boxes').click();assert page.locator('[data-fault]').count()==1
+            page.locator('#advanced > summary').click()
             page.locator('#clean').click();assert page.locator('[data-fault]').count()==0
             page.locator('#calibration').select_option('gray')
             page.locator('#fullscreen').click();page.wait_for_function('document.fullscreenElement!==null')

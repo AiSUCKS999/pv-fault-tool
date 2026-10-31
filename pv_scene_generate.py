@@ -89,12 +89,20 @@ def generate_scene(ns,mode,request):
             if any((r.get("layout",{}).get("row_count"),r.get("layout",{}).get("panels_per_row"))!=(rows,cols) for r in manual):
                 raise ValueError("Existing manual faults use another layout. Restore it or explicitly clear active faults")
             occupied={(r["row_id"],r["panel_number_in_row"],r["module_number_in_panel"]) for r in manual}
+            native=ns["cached_native_thermal_master"](scene,ns["solar_render_cache_signature"](scene))
+            if native is None:raise ValueError("Native layout geometry unavailable")
+            scalar,geometry=native
+            for record in manual:
+                if ns["rendered_fault_cell_from_record"](scene,record,record["row_id"],record["target_cell_id"],geometry) is None:
+                    raise ValueError("Existing manual fault is absent from this source. Restore its layout or clear active faults")
             pool=[]
             for row in range(1,rows+1):
                 for col in range(1,cols+1):
                     for module in range(1,5):
                         rid,cell=ns["default_cell_for_array"](scene,row,col,module,20)
-                        if (rid,col,module) not in occupied:
+                        probe={"row_id":rid,"target_cell_id":cell["id"]}
+                        resolved=ns["rendered_fault_cell_from_record"](scene,probe,rid,cell["id"],geometry)
+                        if resolved is not None and (rid,col,module) not in occupied:
                             pool.append({"row":rid,"cell":cell,"position":[col+(module-1)*.08,row]})
             chosen=choose_targets(pool,count,seed,request.get("placement","Spread"))
             additions=[]

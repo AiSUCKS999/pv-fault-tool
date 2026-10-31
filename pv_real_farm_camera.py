@@ -327,8 +327,7 @@ def real_farm_camera_observation_controls(state,image,targets,view):
     state["camera_selected_observation"]=chosen
     observation=next(o for o in observations if o["observation_id"]==chosen)
     module=next((m for m in targets if m["module_id"]==observation["module_id"]),None)
-    st.caption(f"{chosen} · Module {observation['module_id']} · {observation.get('geometry_status','UNVERIFIED')}")
-    if view=="Close View":
+    if view in {"Far View", "Close View"}:
         options=["SingleHotSpot",*CLOSE_DIAGNOSTIC_FAULT_TYPES]
         if module and module.get("placement_kind")=="pv_point":
             options=["SingleHotSpot"]
@@ -339,7 +338,6 @@ def real_farm_camera_observation_controls(state,image,targets,view):
             format_func=lambda code:"Thermal Hotspot Symptom / Unassigned" if code=="SingleHotSpot" else real_farm_diagnostic_label(code),
             key=f"{key}_{chosen}_diagnosis")
         severity=st.slider("Observation severity",1,10,int(observation.get("severity",7)),key=f"{key}_{chosen}_severity")
-        st.caption("Reference-backed morphology · synthetic placement and relative intensity" if diagnosis in {"SingleHotSpot","SingleDiode","SingleByPassed"} else "Synthetic diagnostic pattern · unvalidated")
         apply_col,remove_col=st.columns(2)
         if apply_col.button("Generate / Apply Fault",type="primary",use_container_width=True,
                             key=f"{key}_{chosen}_apply"):
@@ -1012,9 +1010,6 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     else:mid=None
     selected=next((m for m in targets if m["module_id"]==mid),None)
     view=st.radio("Camera acquisition",["Far View","Close View"],horizontal=True,key="real_farm_camera_distance")
-    if section=="Faults" and view=="Far View":
-        from pv_far_surface import real_controls
-        real_controls(globals(),state,image,selected,layers)
     placement_key="real_farm_camera_placement"
     if st.session_state.get(placement_key)=="Random Hotspots":
         st.session_state[placement_key]="Random Faults"

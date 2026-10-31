@@ -1596,6 +1596,11 @@ def solar_render_geometry_items(location_id):
         return []
     layout_key = f"{custom_row_count(location_id)}x{custom_panels_per_row(location_id)}"
     items = (((index or {}).get("scenes") or {}).get(location_id) or {}).get(layout_key, [])
+    if location_id == "grass_open" and layout_key == "2x4":
+        # Explicit integration alias only; retain original native polygon identities.
+        items = [dict(item, native_array={"row":item["row"],"column":item["col"]},
+            row=2 if int(item["row"])==1 and int(item["col"]) in (5,6) else item["row"],
+            col=int(item["col"])-2 if int(item["row"])==1 and int(item["col"]) in (5,6) else item["col"]) for item in items]
     asset = solar_render_asset_path(location_id)
     return aligned_generated_array_geometry(str(asset), tuple(json.dumps(item, sort_keys=True) for item in items)) if asset else items
 
@@ -4649,16 +4654,10 @@ def main():
                 st.markdown("</div>", unsafe_allow_html=True)
 
                 if inspection_state == "scene":
-                    from pv_far_surface import generated_controls
-                    if not experimental_thermal:
-                        generated_controls(globals(), location, selected_row_id, selected_cell_id)
-                    st.markdown('<div class="pv-card"><div class="pv-section-title">Far View Thermal Observations</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="pv-card"><div class="pv-section-title">Far faults</div>', unsafe_allow_html=True)
                     pass  # Technical context: APP_DIAGNOSTICS.md
                     far_fault_types = [
-                        fault_type for fault_type in globals().get(
-                            "FAR_SCOUT_FAULT_TYPES",
-                            ["SingleHotSpot", "MultiHotSpot", "PartialShading"],
-                        )
+                        fault_type for fault_type in list(globals().get("FAR_SCOUT_FAULT_TYPES", [])) + ["SurfaceObstruction", "SoilingDust", "CellCracking"]
                         if fault_available_in_location(location["id"], fault_type)
                     ]
                     if not far_fault_types:
@@ -4709,8 +4708,6 @@ def main():
                         if fault_type not in far_observation_types
                     ]
                     fault_type = st.selectbox("Diagnostic Fault Type", available_fault_types, format_func=fault_display_name, key="new_fault_type")
-                    if fault_type in REAL_FARM_SYNTHETIC_DIAGNOSTIC_MODELS:
-                        st.caption("Synthetic relative diagnostic morphology; not a production-validated diagnosis or measured temperature.")
                     severity = st.number_input(
                         "Severity", min_value=1, max_value=10,
                         value=int(DEFAULT_FAULT_SCALE), step=1, key="generated_fault_severity",

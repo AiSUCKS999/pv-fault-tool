@@ -112,7 +112,10 @@ def _confirm_current(ns,mode,stage):
 
 def render_scene_workflow(ns,mode,section="DATA COLLECTION"):
     st=ns["st"];journal=SceneJournal(st.session_state)
-    if section in {"Faults","DATA COLLECTION"}:setup(ns,mode)
+    if section in {"Faults","DATA COLLECTION"}:
+        from pv_ros_mission import render_prepare
+        render_prepare(ns,mode)
+        setup(ns,mode)
     if message:=st.session_state.pop("pv_scene_error",None):st.error(message)
     ready=mode=="Generated" or st.session_state.get("real_farm_image") is not None
     exp=journal.active(mode)
@@ -124,11 +127,13 @@ def render_scene_workflow(ns,mode,section="DATA COLLECTION"):
         else:
             show_presentation(ns,saved[1],key=mode)
             frames=acquire_scene(ns,mode)
+            if frames["source"].get("missing_logical_arrays"):
+                st.warning("Source topology is irregular; faults use only source-supported modules.")
+            from pv_ros_mission import render_export
+            render_export(ns,frames)
             view=st.session_state.get("pv_scene_view_"+mode,{})
             faults=frames["faults"];idx=min(max(int(view.get("index",0)),0),max(0,len(faults)-1))
             selected=faults[idx] if faults else None
-            if selected:
-                st.caption(f"{selected['id']} · {selected['fault_type']} · severity {selected['severity']} · {selected['rgb_classification']}")
             if section in {"Faults","DATA COLLECTION"}:
                 buttons=st.columns(3)
                 buttons[0].button("REMOVE RANDOM FAULTS",on_click=_remove,args=(ns,mode),key="scene_remove_"+mode)
@@ -145,26 +150,27 @@ def render_scene_workflow(ns,mode,section="DATA COLLECTION"):
                 st.caption(f"{len(faults)} fault instances · {frames['source']['identity']} · geometry unverified")
                 with st.expander("Diagnostics",expanded=False):st.json({"source":frames["source"],"faults":faults,"rgb":frames["rgb_report"]})
             if exp:
-                st.caption(f"{exp['experiment_id']} · {exp['status']} · revision {len(exp['revisions'])}")
-                columns=st.columns(3)
-                columns[0].button("CONFIRM FAR RECORDED",on_click=_confirm_current,args=(ns,mode,"FAR"),key="scene_far_confirm_"+mode)
-                columns[1].button("CONFIRM CLOSE RECORDED",disabled=not selected or view.get("distance")!="CLOSE",
-                    on_click=_confirm_current,args=(ns,mode,"CLOSE"),key="scene_close_confirm_"+mode)
-                columns[2].button("SAVE EXPERIMENT",on_click=lambda:_error(ns,lambda:journal.finish(exp)),key="scene_finish_"+mode,type="primary")
-                completed={e.get("fault_id") for e in exp["events"] if e["action"]=="operator_confirmed_drone_capture" and e.get("stage")=="CLOSE" and e.get("revision")==len(exp["revisions"])}
-                st.progress(len(completed)/len(faults) if faults else 1,text=f"Close recordings confirmed: {len(completed)}/{len(faults)}")
-                if exp.get("status")=="Saved":
-                    next_request=deepcopy(exp.get("request",{}))
-                    if "count" in next_request:
-                        next_request["seed"]=(int(next_request.get("seed",42))+1)%2147483648
-                        st.button("NEXT EXPERIMENT",on_click=_generate,args=(ns,mode,next_request),key="scene_next_"+mode)
+                with st.expander("Advanced Options · Recording",expanded=False):
+                    st.caption(f"{exp['experiment_id']} · {exp['status']} · revision {len(exp['revisions'])}")
+                    columns=st.columns(3)
+                    columns[0].button("CONFIRM FAR RECORDED",on_click=_confirm_current,args=(ns,mode,"FAR"),key="scene_far_confirm_"+mode)
+                    columns[1].button("CONFIRM CLOSE RECORDED",disabled=not selected or view.get("distance")!="CLOSE",
+                        on_click=_confirm_current,args=(ns,mode,"CLOSE"),key="scene_close_confirm_"+mode)
+                    columns[2].button("SAVE EXPERIMENT",on_click=lambda:_error(ns,lambda:journal.finish(exp)),key="scene_finish_"+mode,type="primary")
+                    completed={e.get("fault_id") for e in exp["events"] if e["action"]=="operator_confirmed_drone_capture" and e.get("stage")=="CLOSE" and e.get("revision")==len(exp["revisions"])}
+                    st.progress(len(completed)/len(faults) if faults else 1,text=f"Close recordings confirmed: {len(completed)}/{len(faults)}")
+                    if exp.get("status")=="Saved":
+                        next_request=deepcopy(exp.get("request",{}))
+                        if "count" in next_request:
+                            next_request["seed"]=(int(next_request.get("seed",42))+1)%2147483648
+                            st.button("NEXT EXPERIMENT",on_click=_generate,args=(ns,mode,next_request),key="scene_next_"+mode)
     if exp or journal.data["experiments"]:
         try:
             bundle=journal.bundle()
             st.download_button("DOWNLOAD SESSION ZIP / BACKUP",bundle,file_name="pv_scene_session.zip",mime="application/zip",key="scene_bundle_"+mode)
         except ValueError as exc:st.error(str(exc))
-    st.caption("Session progress is temporary. Download the ZIP to keep it. Recording buttons confirm external drone captures.")
-    with st.expander("Help / Diagnostics",expanded=False):
+    with st.expander("Advanced Options · Diagnostics",expanded=False):
+        st.caption("Session progress is temporary. Download a backup to keep it.")
         from pathlib import Path
         st.markdown(Path(__file__).with_name("APP_DIAGNOSTICS.md").read_text(encoding="utf-8"))
     with st.expander("Restore session",expanded=False):
