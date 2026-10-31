@@ -127,61 +127,56 @@ def test_visible_far_safety_rejects_unsupported_and_rooftop_baseline(ns):
     assert not visibility(image, image)["visible_at_tested_scale"]
 
 
-@pytest.mark.parametrize("visible,initial_view", [(True, "RGB faults"), (True, "Thermal"), (False, "RGB faults")])
-def test_real_far_ui_generates_visible_pair_without_close_diagnosis_or_typing(ns, monkeypatch, visible, initial_view):
+@pytest.mark.parametrize("fault", ["SurfaceObstruction", "CellCracking"])
+def test_real_far_normal_fault_selection_preserves_id_across_distance(ns, fault):
     mid = real_targets(ns, "image_05")[0]
     prepare_real(ns, case("TC0496"), {"source": "image_05"})
-    app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60)
-    # Exercise the preserved individual controls explicitly; scene workflow is the new default.
+    state=ns["st"].session_state["real_farm_state"]
+    image=ns["st"].session_state["real_farm_image"]
+    target=next(m for m in ns["real_farm_camera_candidates"](state,image)[1] if m["module_id"]==mid)
+    ns["real_farm_camera_new_observation"](state,image,target,7)
+    app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=80)
     app.session_state["scene_individual_real"] = True
-    app.session_state["scene_individual_generated"] = True
-    app.session_state["collection_mode_Generated"] = "929 controlled cases"
     app.session_state["collection_mode_Real Farm"] = "929 controlled cases"
     app.query_params["base_source"] = "real_farm"
     for key in ("real_farm_state", "real_farm_image", "real_farm_image_path"):
         app.session_state[key] = deepcopy(ns["st"].session_state[key])
     app.session_state["real_farm_camera_ui_source"] = ns["real_farm_source_identity"](ns["st"].session_state["real_farm_image"])
-    app.session_state["real_farm_camera_display"] = initial_view
+    app.session_state["real_farm_camera_display"] = "RGB faults"
     app.session_state["real_farm_camera_target"] = mid
     app.session_state["real_farm_section"] = "Faults"
     app.run()
     assert not app.exception
-    if not visible:
-        import pv_far_surface
-        monkeypatch.setattr(pv_far_surface, "visibility", lambda *args: {"visible_at_tested_scale": False})
-    next(b for b in app.button if b.label == "GENERATE VISIBLE FAR CONDITION").click().run()
-    assert not app.exception
-    state = app.session_state["real_farm_state"]
-    assert not app.error
-    assert len(state["camera_observations"]) == 1
-    observation = state["camera_observations"][0]
-    assert observation["diagnostic_fault_type"] == "SurfaceObstruction"
-    assert state["far_surface_visibility"]["RGB"]["visible_at_tested_scale"] == visible
-    assert state["far_surface_visibility"]["Thermal"]["visible_at_tested_scale"] == visible
-    app.radio(key="real_farm_camera_display").set_value("Thermal").run()
-    assert not app.exception
-    assert app.session_state["real_farm_state"]["camera_observations"][0]["observation_id"] == observation["observation_id"]
-
-
-def test_generated_far_ui_creates_actual_paired_records_without_typing(ns):
-    prepare_generated(ns, case("TC0001"), {"scene": "grass_open"})
-    app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60)
-    # Exercise the preserved individual controls explicitly; scene workflow is the new default.
-    app.session_state["scene_individual_real"] = True
-    app.session_state["scene_individual_generated"] = True
-    app.session_state["collection_mode_Generated"] = "929 controlled cases"
-    app.session_state["collection_mode_Real Farm"] = "929 controlled cases"
-    app.query_params.update(dict(ns["st"].query_params))
-    app.query_params["section"] = "Faults"
-    app.query_params["view"] = "rgb"
-    app.run()
-    assert not app.exception
-    next(b for b in app.button if b.label == "GENERATE VISIBLE FAR CONDITION").click().run()
+    assert not any("GENERATE VISIBLE FAR" in b.label for b in app.button)
+    selector=next(s for s in app.selectbox if s.label=="Actual fault for this observation")
+    selector.set_value(fault).run()
+    next(b for b in app.button if b.label=="Generate / Apply Fault").click().run()
     assert not app.exception and not app.error
-    records = app.session_state["random_fault_records"]
-    assert len(records) == 12 and {r["fault_type"] for r in records} == {"SurfaceObstruction"}
-    assert all(c["visible_at_tested_scale"] for c in app.session_state["pv_far_surface_visibility"].values())
-    before = deepcopy(records)
-    app.query_params["view"] = "thermal"
+    state=app.session_state["real_farm_state"]
+    observation=deepcopy(state["camera_observations"][0])
+    assert observation["diagnostic_fault_type"]==fault
+    image=app.session_state["real_farm_image"]
+    painted,report=rgb_fault_preview(ns,image,state["modules"],state["camera_observations"])
+    assert np.any(np.array(painted)!=np.array(image)),report
+    for distance in ["Close View","Far View"]:
+        app.radio(key="real_farm_camera_distance").set_value(distance).run()
+        assert not app.exception
+        current=app.session_state["real_farm_state"]["camera_observations"][0]
+        assert current["observation_id"]==observation["observation_id"] and current["diagnostic_fault_type"]==fault
+
+
+def test_generated_normal_far_fault_selection_without_duplicate_button():
+    app=AppTest.from_file(str(ROOT/"app.py"),default_timeout=80)
+    app.query_params.update(location="grass_open",custom_layout="1",row_count="2",panels_per_row="4",section="Faults")
     app.run()
-    assert not app.exception and app.session_state["random_fault_records"] == before
+    app.selectbox(key="ros_prepare_class").set_value("CellCracking").run()
+    next(b for b in app.button if b.label=="PREPARE SELECTED ROS FAULTS (REPLACE CURRENT)").click().run()
+    assert not app.exception and not app.error
+    assert not any("GENERATE VISIBLE FAR" in b.label for b in app.button)
+    scene=app.session_state["pv_scene_frames_Generated"][1]
+    assert len(scene["faults"])==3
+    assert {f["fault_type"] for f in scene["faults"]}=={"CellCracking"}
+    assert np.any(np.array(scene["far"]["rgb"])!=np.array(scene["far"]["original"]))
+    for f in scene["faults"]:
+        close=scene["close"][f["id"]]
+        assert np.array_equal(np.array(close["rgb"]),np.array(scene["far"]["rgb"].crop(close["bounds"])))
