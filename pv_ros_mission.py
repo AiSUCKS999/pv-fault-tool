@@ -37,6 +37,9 @@ def render_export(ns,scene):
         try:
             mission=export_mission(scene,chosen)
             st.download_button('EXPORT ROS MISSION JSON',json.dumps(mission,indent=2),file_name='pv_mission.json',mime='application/json')
+            if st.button('SEND TO LOCAL ROS INBOX (NEXT LAUNCH)'):
+                try:st.success('Saved local mission: '+str(write_local_inbox(mission)))
+                except (OSError,ValueError) as exc:st.error(str(exc))
         except ValueError as exc:st.info(str(exc))
 
 
@@ -72,3 +75,16 @@ def render_prepare(ns,mode):
             except Exception as exc:
                 restore_simulator(ns,saved);st.session_state['pv_scene_error']=str(exc)
         st.button('PREPARE SELECTED ROS FAULTS (REPLACE CURRENT)',on_click=prepare,disabled=not panels)
+
+
+def write_local_inbox(mission):
+    from pathlib import Path
+    # Deliberately local fixed destination, not a remotely exposed file server.
+    root=Path(__file__).resolve().parent.parent
+    if root.name!='PV_Gazebo_WS' or not (root/'src/pv_inspection_demo/package.xml').is_file():
+        raise ValueError('Local inbox is only available inside PV_Gazebo_WS')
+    path=root/'outputs/local_ros_inbox.json'
+    temp=path.with_suffix('.tmp')
+    temp.write_text(json.dumps(mission,indent=2),encoding='utf-8')
+    temp.replace(path)
+    return path
