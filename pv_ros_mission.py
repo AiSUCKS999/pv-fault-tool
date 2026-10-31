@@ -29,9 +29,17 @@ def export_mission(scene,selected_ids):
     mission['mission_id']='mission-'+hashlib.sha256(json.dumps(mission,sort_keys=True).encode()).hexdigest()[:20]
     return mission
 
+
+def local_ros_available(root=None):
+    from pathlib import Path
+    root=Path(root) if root is not None else Path(__file__).resolve().parent.parent
+    return root.name=='PV_Gazebo_WS' and (root/'src/pv_inspection_demo/package.xml').is_file()
+
 def render_export(ns,scene):
     st=ns['st']
-    with st.expander('ROS 2 mission export (simulation)',expanded=False):
+    with st.expander('ROS mission export · local simulator only',expanded=False):
+        local=local_ros_available()
+        if not local:st.caption('Download a mission for your local simulator. This website cannot control your computer.')
         st.caption('Generated 2x4 arrays map to eight Gazebo panels. Module IDs remain provenance; no image-to-world calibration is claimed.')
         ids=[f['id'] for f in scene['faults']]
         if 'ros_mission_fault_ids' in st.session_state:
@@ -41,7 +49,7 @@ def render_export(ns,scene):
         try:
             mission=export_mission(scene,chosen)
             st.download_button('EXPORT ROS MISSION JSON',json.dumps(mission,indent=2),file_name='pv_mission.json',mime='application/json')
-            if st.button('Send Inspection Mission'):
+            if st.button('Send Inspection Mission',disabled=not local):
                 try:
                     attach_textures(scene,mission)
                     write_local_inbox(mission)
@@ -54,7 +62,7 @@ def render_export(ns,scene):
 
 def render_prepare(ns,mode):
     st=ns['st']
-    if mode!='Generated':return
+    if mode!='Generated' or not local_ros_available():return
     loc=ns['selected_location']()['id']
     if (ns['custom_row_count'](loc),ns['custom_panels_per_row'](loc))!=(2,4):return
     with st.expander('Prepare selected ROS inspection faults (development)',expanded=False):
@@ -107,6 +115,7 @@ def attach_textures(scene,mission):
     """Rectify actual rendered module pixels; never make up fault imagery."""
     from pathlib import Path
     import cv2,numpy as np
+    if not local_ros_available():raise ValueError('ROS imagery export is local-only')
     root=Path(__file__).resolve().parent.parent
     folder=root/'outputs/mission_media'/mission['mission_id'];folder.mkdir(parents=True,exist_ok=True)
     rgb=np.array(scene['far']['rgb'])
@@ -122,6 +131,7 @@ def attach_textures(scene,mission):
 
 
 def read_results(mission):
+    if not local_ros_available():return None
     from pathlib import Path
     root=Path(__file__).resolve().parent.parent
     path=root/'outputs/mission_status.json'
