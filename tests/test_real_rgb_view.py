@@ -83,6 +83,11 @@ def test_rgb_close_view_uses_the_selected_physical_module_bounds(scene):
 def test_cold_rgb_ui_has_natural_fault_view_without_generating_thermal(scene):
     ns, state, image, modules = setup(scene, "TC0501")
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=35)
+    # Exercise the preserved individual controls explicitly; scene workflow is the new default.
+    app.session_state["scene_individual_real"] = True
+    app.session_state["scene_individual_generated"] = True
+    app.session_state["collection_mode_Generated"] = "929 controlled cases"
+    app.session_state["collection_mode_Real Farm"] = "929 controlled cases"
     app.query_params["base_source"] = "real_farm"
     for key in ("real_farm_state", "real_farm_image", "real_farm_image_path"):
         app.session_state[key] = deepcopy(ns["st"].session_state[key])

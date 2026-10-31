@@ -4317,6 +4317,13 @@ def main():
             cell_active=1,
         ))
 
+    if section in {"Faults", "Review", "Export"} and not experimental_thermal:
+        from pv_scene_ui import render_scene_workflow
+        individual = st.checkbox("Individual fault / legacy controls", value=False, key="scene_individual_generated")
+        if not individual:
+            render_scene_workflow(globals(), "Generated", section)
+            return
+
     top_summary_bar(location, view, metadata, metadata["fault_count"])
     if section == "Faults":
         from pv_data_collection import active_case_banner

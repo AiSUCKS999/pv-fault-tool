@@ -5432,6 +5432,19 @@ def real_farm_main_impl():
         return
     state["source_rgb_pixel_sha256"] = identity
 
+    if section in {"Faults","Review","Export"}:
+        from pv_scene_ui import render_scene_workflow
+        individual = section == "Faults" and st.checkbox("Individual fault / legacy controls",value=False,key="scene_individual_real")
+        if not individual:
+            render_scene_workflow(globals(),"Real Farm",section)
+            if section == "Export" and st.session_state.get("pv_scene_frames_Real Farm"):
+                from pv_scene_frames import acquire_scene, effective_real_observations
+                with st.expander("Verified training export",expanded=False):
+                    acquired=acquire_scene(globals(),"Real Farm")
+                    adapter=dict(state,observations=effective_real_observations(state))
+                    real_farm_export_panel(adapter,image,acquired["far"]["healthy_thermal"],acquired["far"]["thermal"],acquired["geometry"],state.get("camera_selected_observation"))
+            return
+
     if section in {"Thermal","Faults"}:
         from pv_data_collection import active_case_banner
         active_case_banner("Real Farm")

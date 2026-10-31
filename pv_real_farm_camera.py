@@ -901,7 +901,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     # Camera capture uses the recovered Current renderer. A hidden Generated
     # Mode selector must not silently select a legacy sensor or module field.
     st.session_state["thermal_renderer_mode"]="Current Thermal"
-    from pv_real_farm_rgb_view import annotated_rgb_fault_preview, view_bounds
+    from pv_real_farm_rgb_view import rgb_fault_preview, view_bounds
     from pv_scene_frames import presentation_panel
     presentation_panel(globals(), "Real Farm")
     source=real_farm_source_identity(image)
@@ -918,9 +918,6 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
         on_change=real_farm_camera_image_view_changed,args=(image,))
     paired=image_view=="RGB + Thermal"
     thermal_view=image_view in {"Thermal","RGB + Thermal"}
-    st.caption("Paired RGB surface effects / marked fault locations and synthetic thermal response." if paired else
-        "Synthetic relative thermal · not measured temperature." if thermal_view else
-        "RGB surface effects and marked thermal/electrical fault locations · simulation only." if image_view=="RGB faults" else "Original RGB photograph.")
     preview=st.container()
     pending_result=st.session_state.get("real_farm_camera_pending_result_source")
     frame_width=state.get("camera_preparation_response",{}).get("physical_frame_width_fraction")
@@ -1053,7 +1050,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     if display in {"Original RGB","RGB faults"}:
         shown=image
         if display=="RGB faults" and not healthy_only:
-            shown,rgb_report=annotated_rgb_fault_preview(globals(),image,targets,observations)
+            shown,rgb_report=rgb_fault_preview(globals(),image,targets,observations)
             with diagnostics:
                 st.json(rgb_report)
         bounds=view_bounds(globals(),image,selected,candidates,view)
@@ -1097,7 +1094,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     if paired:
         rgb_shown=image
         if not healthy_only:
-            rgb_shown,rgb_report=annotated_rgb_fault_preview(globals(),image,targets,observations)
+            rgb_shown,rgb_report=rgb_fault_preview(globals(),image,targets,observations)
             with diagnostics:st.json(rgb_report)
         if bounds:rgb_shown=rgb_shown.crop(bounds)
     if outlines:
@@ -1115,7 +1112,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             rgb_column,thermal_column=st.columns(2)
             with rgb_column:
                 st.markdown("**RGB faults**")
-                st.image(rgb_shown,caption=("Close View" if bounds else "Far View")+" · RGB surface effects and marked fault locations" if not healthy_only else "Original RGB · healthy baseline",width="stretch",output_format="PNG")
+                st.image(rgb_shown,caption=("Close View" if bounds else "Far View")+" · RGB surface effects" if not healthy_only else "Original RGB · healthy baseline",width="stretch",output_format="PNG")
                 st.download_button("Download RGB faults",export_current_view_bytes(rgb_shown),file_name=f"camera_RGB_faults_{view.replace(' ','_')}.png",mime="image/png")
             with thermal_column:
                 st.markdown("**Thermal faults**")
@@ -1125,14 +1122,12 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             st.image(shown,caption=caption,width="stretch",output_format="PNG")
             st.download_button("Download camera view",export_current_view_bytes(shown),file_name=f"camera_{display.replace(' ','_')}_{view.replace(' ','_')}.png",mime="image/png")
         if rgb_report is not None:
-            st.caption(f"{len(rgb_report['rendered'])} RGB surface effect(s) · {len(rgb_report.get('annotated',[]))} marked thermal/electrical location(s)")
-            if rgb_report.get("annotated"):
-                st.caption("Location markers are annotations, not visible physical damage. Dust, obstruction and cracks use simulated RGB surface effects.")
-            if rgb_report["unavailable"]:
-                st.info(f"{len(rgb_report['unavailable'])} observation(s) could not be shown in RGB; see details below.")
-                with st.expander("RGB preview details",expanded=False):
-                    for skipped in rgb_report["unavailable"]:
-                        st.write(f"{skipped['observation_id']}: {skipped['reason']}")
+            thermal_only=[r for r in rgb_report["unavailable"] if r["reason"].startswith("No established daylight RGB")]
+            failures=[r for r in rgb_report["unavailable"] if r not in thermal_only]
+            if thermal_only:st.caption(f"Thermal only: {len(thermal_only)}")
+            if failures:
+                st.warning(f"RGB unavailable for {len(failures)} observation(s)")
+                with diagnostics:st.json(failures)
         if not paired and observations:
             st.button("Show RGB + thermal",on_click=real_farm_camera_show_thermal_result,args=(image,True))
     with diagnostics:

@@ -39,7 +39,11 @@ def image_data(png):
 
 def show_presentation(ns, payload, key="scene"):
     import streamlit.components.v1 as components
-    components.html(presentation_html(payload, channel="pv-display-" + key), height=540, scrolling=False)
+    viewer=components.declare_component("pv_scene_display",path=str(Path(__file__).with_name("pv_presentation_component")))
+    value=viewer(html=presentation_html(payload, channel="pv-display-" + key),
+        signature=payload["revision"],key="scene_display_"+key,default=None)
+    if isinstance(value,dict) and value.get("signature")==payload["revision"]:
+        ns["st"].session_state["pv_scene_view_"+key]=value
     with ns["st"].expander("Presentation help", expanded=False):
         ns["st"].write("F: Far · C: Close · R: RGB · T: thermal · O: original · V: compare · arrows: previous/next fault · B: boxes · X: fit/fill · Enter: fullscreen · Esc: exit. Move the separate display window to the projector; control it here. Compare: move the pointer to slide the divider.")
         ns["st"].caption("FIT retains the whole image with letterboxing. FILL crops edges without distortion. Display scaling adds no source detail. Browser fullscreen may require Enter in the display window.")

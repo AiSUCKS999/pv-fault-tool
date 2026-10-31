@@ -39,7 +39,12 @@ function render() {
   geometry();
 }
 function send() { channel?.postMessage({type:'view',state}); if(popup && !popup.closed) popup.postMessage({type:'pv-view',state},'*'); }
-function changed() {render();send();}
+let lastOperator='';
+function operatorState() {
+  const next=JSON.stringify([state.distance,state.mode,state.index,state.boxes,state.fit]);
+  if(CONTROLLER && next!==lastOperator){lastOperator=next;parent.postMessage({type:'pv-operator-state',state,signature:payload.revision},'*');}
+}
+function changed() {render();send();operatorState();}
 function step(direction) {const n=(payload.faults||[]).length;if(n)state.index=(state.index+direction+n)%n;changed();}
 async function fullscreen() {
   try {if(document.fullscreenElement) await document.exitFullscreen();else await screen.requestFullscreen();}
@@ -57,7 +62,7 @@ $('open').onclick=()=>{
   popup.addEventListener('load',()=>popup.postMessage({type:'pv-view',state},'*'),{once:true});
 };
 window.addEventListener('message',event=>{if(event.data?.type==='pv-view' && event.source===window.opener){state=event.data.state;render();}});
-if(channel)channel.onmessage=event=>{if(event.data.type==='view'){state=event.data.state;render();}if(event.data.type==='payload'){payload=event.data.payload;render();}};
+if(channel)channel.onmessage=event=>{if(event.data.type==='view'){state=event.data.state;render();operatorState();}if(event.data.type==='payload'){payload=event.data.payload;render();}};
 if(CONTROLLER)channel?.postMessage({type:'payload',payload});
 document.addEventListener('keydown',event=>{
   if(event.target.tagName==='SELECT')return;
