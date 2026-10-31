@@ -73,6 +73,18 @@ class SceneJournal:
         self.blobs.update(blobs);self.data["experiments"][eid]=exp;self.data["active"][mode]=eid
         return exp
 
+    def record_presentation(self,mode,value):
+        exp=self.active(mode)
+        if not exp or value.get("signature")!=exp["revisions"][-1]["signature"]:return
+        settings=value.get("calibration_settings")
+        if settings is not None:
+            if settings.get("pattern") not in {"gray","detail","fault"}:return
+            # Display settings are observational metadata, never research pixels/labels.
+            settings=deepcopy(settings)
+            if exp.get("led_calibration")==settings:return
+            exp["led_calibration"]=settings
+            exp["events"].append({"utc":utc(),"action":"led_calibration_settings","revision":len(exp["revisions"]),"settings":settings})
+
     def confirm(self,exp,stage,fault_id=None):
         revision=exp["revisions"][-1]
         if stage=="CLOSE" and fault_id not in {f["id"] for f in revision["faults"]}:raise ValueError("Select a current Close fault first")

@@ -99,10 +99,14 @@ def _confirm_current(ns,mode,stage):
         journal=SceneJournal(ns["st"].session_state);exp=journal.active(mode)
         value=ns["st"].session_state.get("scene_display_"+mode) or {}
         revision=exp["revisions"][-1]
+        if value.get("calibration", "off")!="off":raise ValueError("Exit LED calibration before confirming an experiment recording")
         if (stage=="CLOSE" and value.get("signature")!=revision["signature"]) or current_signature(ns,mode)!=revision["signature"]:raise ValueError("Display changed; wait for the current scene before confirming")
         index=int(value.get("index",0));faults=revision["faults"]
         if stage=="CLOSE" and (value.get("distance")!="CLOSE" or not 0<=index<len(faults)):raise ValueError("Select a current Close target")
         journal.confirm(exp,stage,faults[index]["id"] if stage=="CLOSE" else None)
+        exp["events"][-1]["presentation"]={key:value.get(key) for key in ("distance","mode","fit","zoom","clean")}
+        if exp.get("led_calibration"):
+            exp["events"][-1]["led_calibration"]=deepcopy(exp["led_calibration"])
     _error(ns,action)
 
 
