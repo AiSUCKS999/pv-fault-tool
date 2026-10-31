@@ -830,7 +830,7 @@ def real_farm_verified_geometry(state, image):
 def real_farm_geometry_review_gate(state, image):
     issues = real_farm_geometry_review_issues(state, image)
     st.markdown("#### Geometry verification before training export")
-    pass  # Technical context: APP_DIAGNOSTICS.md
+    st.caption("Detector confidence is not physical verification. Inspect numbered outlines and native RGB crops, including missing modules, separators and image edges.")
     if issues:
         st.warning(f"{len(issues)} module(s)/region(s) need inspection or correction. Verified-label export is blocked.")
         st.dataframe([{"module": mid, "needs attention": "; ".join(reasons)} for mid, reasons in issues.items()], hide_index=True)
@@ -869,7 +869,7 @@ def real_farm_geometry_triage_panel(state, image):
                      "reason":record.get("reason","") if current else "Geometry changed; inspect the current RGB perimeter"})
     counts={kind:sum(r["review"]==kind for r in rows) for kind in {r["review"] for r in rows}}
     with st.expander("Native geometry review — triage and unresolved regions",expanded=True):
-        pass  # Technical context: APP_DIAGNOSTICS.md
+        st.caption("RGB review evidence is separate from the user's export approval. Partial visible faces are not automatically defective. Edits invalidate the affected review record.")
         st.write(" · ".join(f"{kind.replace('_',' ')}: {count}" for kind,count in sorted(counts.items())))
         kinds=st.multiselect("Show review categories",sorted(counts),default=sorted(counts),key="real_farm_triage_categories")
         st.dataframe([r for r in rows if r["review"] in kinds],hide_index=True)
@@ -895,7 +895,7 @@ def real_farm_geometry_triage_panel(state, image):
         columns=st.columns(2)
         columns[0].image(crop,caption=f"{region} · native RGB pixels · origin {list(low)}",width=crop.width,output_format="PNG")
         columns[1].image(Image.fromarray(mask,"L"),caption="Exact corresponding proposal union · unverified",width=crop.width,output_format="PNG")
-        pass  # Technical context: APP_DIAGNOSTICS.md
+        st.caption("Green: clear RGB support; cyan: legitimate clipped face; amber: unresolved; red: confirmed error. These colors do not grant training-label approval. Expand images to inspect native pixels.")
         real_farm_flagged_review_queue(state, image, modules)
 
 
@@ -963,7 +963,7 @@ def real_farm_flagged_review_queue(state, image, modules):
     actions[3].button("Mark unresolved",on_click=real_farm_review_queue_action,args=(state,image,mid,"unresolved",reason))
     def next_flagged():st.session_state["real_farm_queue_module"]=ids[(ids.index(mid)+1)%len(ids)]
     actions[4].button("Next flagged module",on_click=next_flagged)
-    pass  # Technical context: APP_DIAGNOSTICS.md
+    st.caption("Rejected and unresolved regions remain recorded and block verified export; their empty canonical support is not a healthy-background label.")
 
 
 def real_farm_geometry_signature(modules):
@@ -3047,7 +3047,7 @@ def real_farm_table_batch_panel(state, image):
             st.button("Approve supported modules in this table",disabled=not eligible or not checked,
                       on_click=real_farm_review_table,args=(state,image,table_id,True,True))
             return
-        pass  # Technical context: APP_DIAGNOSTICS.md
+        st.caption("Layout changes are proposals. Frame refinement uses this region's RGB; unsupported boundaries remain unresolved. Accept a complete table only after inspecting its RGB perimeters.")
         st.button("Refine existing modules as one perspective grid",disabled=len(members)<4,
                   on_click=real_farm_refine_shared_grid,args=(state,image,table_id))
         if table.get("grid_refinement"):
@@ -3496,7 +3496,7 @@ def real_farm_sync_live_geometry(state, image):
 
 def real_farm_refinement_workflow(state, image, modules, selected_id):
     st.markdown('<div class="pv-card"><div class="pv-section-title">Refined PV Area</div>', unsafe_allow_html=True)
-    pass  # Technical context: APP_DIAGNOSTICS.md
+    st.caption("The blue polygon is only a coarse search ROI. Auto-Refine finds visible PV material; review the green result before accepting it as thermal support.")
     selected = next((item for item in modules if item.get("module_id") == selected_id), None)
     if selected is None:
         st.info("Add and select a coarse PV region first.")
@@ -4750,7 +4750,7 @@ def real_farm_export_panel(state, image, healthy_thermal, faulted_thermal, therm
         dataset_cache[1],
         file_name=f"{project_name}_real_farm_dataset.zip", mime="application/zip", use_container_width=True,
     )
-    pass  # Technical context: APP_DIAGNOSTICS.md
+    st.caption("Clean exports contain no debug masks, selection outlines, labels, or support overlays. The annotated image is provided separately.")
 
 
 def real_farm_observation_selection_changed():
@@ -4834,7 +4834,7 @@ def real_farm_fault_workflow(state, image, modules, section="Faults"):
         st.info("Corrected geometry applied. Thermal rendering rebuilds with the retained fault assignments.")
 
     st.markdown('<div class="pv-card"><div class="pv-section-title">Real-image Thermal Mask & Fault Workflow</div>', unsafe_allow_html=True)
-    pass  # Technical context: APP_DIAGNOSTICS.md
+    st.caption("The real RGB image supplies the scene. Only accepted refined PV support or an explicit manual final polygon supplies the thermal mask; a coarse search ROI is never thermalized.")
     st.button("Inspect / Correct Module Geometry", on_click=real_farm_open_geometry)
     valid_geometry, excluded_geometry = real_farm_thermal_modules(image, modules) if modules else ([], [])
     pending_geometry = [item for item in excluded_geometry if item.get("mechanically_valid") and not item.get("refinement_ready")]
@@ -4947,7 +4947,7 @@ def real_farm_fault_workflow(state, image, modules, section="Faults"):
         return
 
     st.markdown("#### Select Target Module")
-    pass  # Technical context: APP_DIAGNOSTICS.md
+    st.caption("Click a recovered module marker in the scene. The selected stable module ID drives hotspot placement, Close View, Review, and Export.")
     module_event = st.plotly_chart(
         real_farm_module_selection_chart(image, thermal_modules, selected_module_id),
         key=f"real_farm_module_scene_picker_{selected_module_id}", on_select="rerun", selection_mode="points",
@@ -5017,7 +5017,7 @@ def real_farm_fault_workflow(state, image, modules, section="Faults"):
         st.session_state["real_farm_close_view"] = False
         st.rerun()
 
-    pass  # Technical context: APP_DIAGNOSTICS.md
+    st.caption("One active observation per physical module. Adding again replaces that module's observation. Batch generation uses separate accepted modules.")
     generate_col, clear_col = st.columns([0.7, 0.3])
     with generate_col:
         count_col, seed_col = st.columns(2)
@@ -5099,14 +5099,17 @@ def real_farm_fault_workflow(state, image, modules, section="Faults"):
                     caption=f"Native-source thermal crop {close_image.width} × {close_image.height} px · {selected['module_id']} · Applied: {real_farm_diagnostic_label(applied_fault)} · relative simulation · annotations off",
                     width=min(1000, close_image.width),
                 )
-                pass  # Technical context: APP_DIAGNOSTICS.md
+                st.caption("Select a diagnosis and press Apply Diagnosis to replace this observation's hotspot. Far, Close and export share the applied result. Enlarging the display adds no acquired detail.")
             except FaultGeometryError as exc:
                 renderer_failed = True
                 st.error("Diagnostic renderer unavailable.")
                 with st.expander("Developer renderer failure"):
                     st.code(str(exc))
             if chosen_fault in REAL_FARM_SYNTHETIC_DIAGNOSTIC_MODELS:
-                pass  # Technical context: APP_DIAGNOSTICS.md
+                st.caption(
+                    "Synthetic relative diagnostic: dedicated fault-specific morphology; "
+                    "not a production reference or measured temperature."
+                )
             apply_col, clear_diagnosis_col = st.columns([0.7, 0.3])
             if apply_col.button("Apply Diagnosis", type="primary", use_container_width=True, disabled=renderer_failed):
                 selected["diagnostic_fault_type"] = chosen_fault
@@ -5429,19 +5432,6 @@ def real_farm_main_impl():
         return
     state["source_rgb_pixel_sha256"] = identity
 
-    if section in {"Faults","Review","Export"}:
-        from pv_scene_ui import render_scene_workflow
-        individual = section == "Faults" and st.checkbox("Individual fault / legacy controls",value=False,key="scene_individual_real")
-        if not individual:
-            render_scene_workflow(globals(),"Real Farm",section)
-            if section == "Export" and st.session_state.get("pv_scene_frames_Real Farm"):
-                from pv_scene_frames import acquire_scene, effective_real_observations
-                with st.expander("Verified training export",expanded=False):
-                    acquired=acquire_scene(globals(),"Real Farm")
-                    adapter=dict(state,observations=effective_real_observations(state))
-                    real_farm_export_panel(adapter,image,acquired["far"]["healthy_thermal"],acquired["far"]["thermal"],acquired["geometry"],state.get("camera_selected_observation"))
-            return
-
     if section in {"Thermal","Faults"}:
         from pv_data_collection import active_case_banner
         active_case_banner("Real Farm")
@@ -5618,15 +5608,15 @@ def real_farm_advanced_geometry_panel(state,image,modules,identity):
     real_farm_table_batch_panel(state, image)
     real_farm_verified_subset_panel(state, image)
 
-    pass  # Technical context: APP_DIAGNOSTICS.md
+    st.caption("Inspect physical boundaries before verified training export. Geometry correction is optional for thermal preview.")
     if state.get("physical_geometry_review_required"):
         st.warning("Automatic geometry on this image requires review. A candidate can end on a cell line or span several modules. Save only polygons following ONE physical outer frame. Each saved module immediately becomes available for thermal and faults; the other candidates stay excluded.")
     if state.get("pending_geometry_observations"):
         st.info(f"{len(state['pending_geometry_observations'])} saved fault assignment(s) are retained pending physical-module review. Saving the corrected module restores its assignment.")
     with st.expander("Geometry Editor", expanded=True):
         real_farm_geometry_history_controls()
-        pass  # Technical context: APP_DIAGNOSTICS.md
-        pass  # Technical context: APP_DIAGNOSTICS.md
+        st.caption("Select a module below, then drag its green corner handles onto the physical frame. Save updates thermal and export immediately. Draw a missed module with four perimeter clicks.")
+        st.caption("Confirm a small neighboring group to provide healthy thermal context for diagnosis. Unreviewed candidates remain outside the PV mask.")
         if modules:
             module_ids = [m["module_id"] for m in modules]
             st.session_state["real_farm_manual_module_picker"] = selected_id
@@ -5646,7 +5636,7 @@ def real_farm_advanced_geometry_panel(state,image,modules,identity):
                 split_axis = st.selectbox("Separator direction", ["Across width", "Across height"])
                 split_fraction = st.slider("Separator position within selected polygon", .1, .9, .5, .01)
                 split_gap = st.number_input("Physical separator gap (source pixels)", 0., 30., 2., .5)
-                pass  # Technical context: APP_DIAGNOSTICS.md
+                st.caption("This creates two editable proposals. Fit/confirm each child's real frame afterward; a mathematical split does not verify it.")
                 if st.button("Split selected proposal into two"):
                     real_farm_split_module(state, image, selected_for_review, split_axis, split_fraction, split_gap)
                     st.rerun()
@@ -5817,7 +5807,7 @@ def real_farm_advanced_geometry_panel(state,image,modules,identity):
             st.markdown("</div>", unsafe_allow_html=True)
 
         real_farm_refinement_workflow(state, image, modules, st.session_state.get("real_farm_selected_module"))
-    pass  # Technical context: APP_DIAGNOSTICS.md
+    st.caption("Geometry is stored in the canonical Real Farm state. Use the Export section for images, masks, module records, and metadata.")
     if state.get("thermal_mask_ready") and modules:
         real_farm_sync_live_geometry(state, image)
         layers = real_farm_get_thermal_master(state, image, modules)

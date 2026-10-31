@@ -34,11 +34,6 @@ def test_random_generation_regeneration_and_removal_preserve_manual_hotspots(app
     manual_id = state["camera_observations"][0]["observation_id"]
 
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60)
-    # Exercise the preserved individual controls explicitly; scene workflow is the new default.
-    app.session_state["scene_individual_real"] = True
-    app.session_state["scene_individual_generated"] = True
-    app.session_state["collection_mode_Generated"] = "929 controlled cases"
-    app.session_state["collection_mode_Real Farm"] = "929 controlled cases"
     app.query_params["base_source"] = "real_farm"
     for key in ("real_farm_state", "real_farm_image", "real_farm_image_path"):
         app.session_state[key] = deepcopy(ns["st"].session_state[key])
@@ -69,8 +64,8 @@ def test_random_generation_regeneration_and_removal_preserve_manual_hotspots(app
     layers = app.session_state["real_farm_camera_layers"][1]
     assert "master_scalar" in layers
     assert layers["acquisition_audit"]["post_sensor_peak"] > 0
-    assert any("With synthetic fault" in caption for group in app.get("imgs") for caption in [im.caption for im in group.proto.imgs])
-    assert any("RGB surface effects" in caption for group in app.get("imgs") for caption in [im.caption for im in group.proto.imgs])
+    assert any("With synthetic fault" in caption for group in app.get("image") for caption in group.captions)
+    assert any("RGB surface effects and marked fault locations" in caption for group in app.get("image") for caption in group.captions)
     assert {button.label for button in app.get("download_button")} >= {"Download RGB faults", "Download thermal faults"}
     acquired = next(value for key, value in app.session_state["real_farm_camera_acquisitions"].items() if key[3] == "far")
     healthy_image = ns["real_farm_camera_acquisition"](layers, [], "far")
@@ -93,7 +88,7 @@ def test_random_generation_regeneration_and_removal_preserve_manual_hotspots(app
     before = [(o["observation_id"], o["module_id"], o["seed"]) for o in observations]
     app.radio(key="real_farm_camera_display").set_value("RGB faults").run()
     assert not any("could not be shown in RGB" in info.value for info in app.info)
-    assert any("Thermal only" in caption.value for caption in app.caption)
+    assert any("4 marked thermal/electrical location(s)" in caption.value for caption in app.caption)
     observations = click("Show RGB + thermal")
     assert app.radio(key="real_farm_camera_display").value == "RGB + Thermal"
     assert [(o["observation_id"], o["module_id"], o["seed"]) for o in observations] == before

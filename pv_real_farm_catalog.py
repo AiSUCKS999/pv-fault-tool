@@ -61,28 +61,20 @@ def real_farm_camera_remove_random(state):
 
 
 def real_farm_camera_random_fault_types(fault_types=None):
-    options=[*CLOSE_DIAGNOSTIC_FAULT_TYPES,"SingleHotSpot","PartialShading"]
+    options=[*CLOSE_DIAGNOSTIC_FAULT_TYPES,"SingleHotSpot"]
     requested=list(CLOSE_DIAGNOSTIC_FAULT_TYPES if fault_types is None else fault_types)
     if not requested or any(fault not in options for fault in requested):
         raise ValueError("Select at least one supported fault class")
     return [fault for fault in options if fault in requested]
 
 
-def real_farm_camera_generate_random(state,image,credible,count,seed,fault_types=None, *, policy="Random", counts=None, severity_distribution="Uniform", severity=7, severity_limits=(1,10), placement="Random"):
-    """Place the requested distribution on distinct valid targets; preserve manual faults."""
-    from pv_scene_generate import assignment, choose_targets
-    fault_types=real_farm_camera_random_fault_types(fault_types) if count else []
-    assigned=assignment(int(count),fault_types,seed,policy,counts,severity_distribution,severity,severity_limits)
+def real_farm_camera_generate_random(state,image,credible,count,seed,fault_types=None):
+    """Place a reproducible, diverse mix of diagnoses on valid distinct modules."""
+    fault_types=real_farm_camera_random_fault_types(fault_types)
+    real_farm_camera_observation_source(state,image)
     pool=real_farm_camera_random_modules(state,image,credible)
-    if int(count)>len(pool):raise ValueError(f"Requested {count} faults; only {len(pool)} unoccupied valid modules available")
-    if not pool and count:raise ValueError("No resolved modules for random placement. Use Manual Select to confirm a provisional PV target.")
-    selected=choose_targets([dict(m,position=np.float32(m["active_polygon_rgb"]).mean(0).tolist()) for m in pool],int(count),seed,placement)
-    proposals=[]
-    # Independent module streams keep relative positions varied and stable even
-    # when target selection order changes. Morphology still uses the experiment seed.
-    for module in selected:
-        module_seed=seed_for(int(seed),module["module_id"],"camera-placement-v3")
-        proposals.extend(real_farm_generate_observations([module],1,module_seed))
+    if not pool:raise ValueError("No resolved modules for random placement. Use Manual Select to confirm a provisional PV target.")
+    proposals=real_farm_generate_observations(pool,min(int(count),len(pool)),int(seed))
     lookup={m["module_id"]:m for m in pool};rng=np.random.default_rng(int(seed));validated=[]
     for proposal in proposals:
         module=lookup[proposal["module_id"]];q=np.float32(module["active_polygon_rgb"])
@@ -99,18 +91,21 @@ def real_farm_camera_generate_random(state,image,credible,count,seed,fault_types
             index=int(rng.integers(len(xx)));point=np.float32([xx[index],yy[index]])+low
         target=dict(module);target["simulation_anchor_rgb"]=point.astype(float).tolist()
         validated.append((target,proposal))
-    if len(validated)!=int(count):raise ValueError("Some requested targets lack valid PV support; no batch was replaced")
-    real_farm_camera_observation_source(state,image)
+    if not validated:raise ValueError("No visible PV support for the requested random targets. Use Manual Select.")
+    class_rng=np.random.default_rng(int(seed)^0x505646)
+    assigned=[]
+    while len(assigned)<len(validated):
+        assigned.extend(class_rng.permutation(fault_types).tolist())
+    assigned=assigned[:len(validated)]
     real_farm_camera_remove_random(state)
-    identity=[real_farm_source_identity(image),int(seed),int(count),"controlled-distribution-v3",fault_types,assigned,placement]
+    identity=[real_farm_source_identity(image),int(seed),int(count),"mixed-diagnostics-v1",fault_types]
     batch=hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:16]
-    for (target,proposal),(fault,level) in zip(validated,assigned):
-        observation=real_farm_camera_new_observation(state,image,target,severity=level)
+    for (target,proposal),fault in zip(validated,assigned):
+        observation=real_farm_camera_new_observation(state,image,target,severity=proposal["severity"])
         observation.update(seed=int(seed),placement_origin="random",random_batch_id=batch,
             diagnostic_fault_type=None if fault=="SingleHotSpot" else fault)
     state["camera_random_batch"]={"id":batch,"seed":int(seed),"count":len(validated),
-        "assignment_policy":policy,"placement_distribution":placement,"severity_distribution":severity_distribution,
-        "fault_types":fault_types,"fault_counts":{fault:sum(code==fault for code,_ in assigned) for fault in fault_types if any(code==fault for code,_ in assigned)}}
+        "assignment_policy":"shuffled_class_cycles_v1","fault_types":fault_types,"fault_counts":{fault:assigned.count(fault) for fault in fault_types if fault in assigned}}
     return len(validated)
 
 
@@ -150,6 +145,7 @@ def real_farm_camera_random_controls(state,image,credible):
     if error:st.warning(error)
     if st.button("Remove Random Faults",disabled=not any(o.get("placement_origin")=="random" for o in state.get("camera_observations",[])),use_container_width=True):
         real_farm_camera_remove_random(state);changed=True
+    st.caption("Selected classes are shuffled without repeats until each has been used. Regenerate replaces only the random batch; manual faults are preserved.")
     counts={}
     for observation in state.get("camera_observations",[]):
         if observation.get("placement_origin")=="random":

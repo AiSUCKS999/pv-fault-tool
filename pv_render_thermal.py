@@ -148,8 +148,6 @@ def production_hotspot_residuals():
     return _PRODUCTION_HOTSPOT_RESIDUALS
 
 
-# Severity changes amplitude/coverage, not reference or random shape. The
-# existing severity-7 morphology seed is retained across the severity sweep.
 def apply_production_hotspot_residual(temp, cell, fault_type, scale, reference_id=None, trace=None):
     fault_type = canonical_fault_type(fault_type)
     if fault_type not in HOTSPOT_FAULTS:
@@ -202,7 +200,7 @@ def apply_production_hotspot_residual(temp, cell, fault_type, scale, reference_i
         y1 = int(clamp(round(center_y - footprint_h / 2), my1, max(my1, my2 - footprint_h)))
         x2, y2 = x1 + footprint_w, y1 + footprint_h
 
-    rng = np.random.default_rng(seed_for(cell.get("id", "hotspot"), fault_type, 7, "production-hotspot-v1"))
+    rng = np.random.default_rng(seed_for(cell.get("id", "hotspot"), fault_type, scale, "production-hotspot-v1"))
     severity = clamp(scale, 1, 10) / 10.0
     spot_count = 1 if fault_type == "SingleHotSpot" else int(rng.integers(2, 6))
     used = set()
@@ -371,7 +369,7 @@ def selected_production_submodule_signal(fault_type, cell, scale):
     records = production_submodule_signals(fault_type)
     if not records:
         return None
-    rng = np.random.default_rng(seed_for(cell.get("id", "submodule"), fault_type, 7, "production-submodule-ref"))
+    rng = np.random.default_rng(seed_for(cell.get("id", "submodule"), fault_type, scale, "production-submodule-ref"))
     families_used = set()
     ordered = []
     for _ in range(min(len(records), 7)):
@@ -447,7 +445,7 @@ def apply_production_submodule_fault_signal(temp, cell, fault_type, scale, refer
             trace["failure_reason"] = f"production_reference_not_found:{reference_id or fault_type}"
         return False
 
-    rng = np.random.default_rng(seed_for(cell.get("id", "submodule"), fault_type, 7, ref.get("reference_id", "ref")))
+    rng = np.random.default_rng(seed_for(cell.get("id", "submodule"), fault_type, scale, ref.get("reference_id", "ref")))
     x1, y1, x2, y2 = submodule_target_bbox(cell, fault_type, ref, rng)
     x1, y1, x2, y2 = clamp_bbox_to_field(temp, (x1, y1, x2, y2))
     if x2 <= x1 or y2 <= y1:
@@ -803,8 +801,8 @@ def apply_real_thermal_fault_patch(temp, cell, fault_type, scale):
     fault_type = canonical_fault_type(fault_type)
     if fault_type in SURFACE_OBSTRUCTION_FAULTS:
         return False
-    rng = np.random.default_rng(seed_for(cell["id"], fault_type, 7, "real-patch"))
-    patch = selected_fault_patch(fault_type, seed_for(cell["id"], fault_type, 7, "patch-choice"))
+    rng = np.random.default_rng(seed_for(cell["id"], fault_type, scale, "real-patch"))
+    patch = selected_fault_patch(fault_type, seed_for(cell["id"], fault_type, scale, "patch-choice"))
     if patch is None:
         return False
 
@@ -1002,8 +1000,8 @@ def thermal_fault_tint_mask(shape, cell, fault_type, scale):
     if bx2 <= bx1 or by2 <= by1:
         bx1, by1, bx2, by2 = x1, y1, x2, y2
 
-    rng = np.random.default_rng(seed_for(cell["id"], fault_type, 7, "thermal-tint"))
-    patch = selected_fault_patch(fault_type, seed_for(cell["id"], fault_type, 7, "tint-patch-choice"))
+    rng = np.random.default_rng(seed_for(cell["id"], fault_type, scale, "thermal-tint"))
+    patch = selected_fault_patch(fault_type, seed_for(cell["id"], fault_type, scale, "tint-patch-choice"))
     origin_info = cell.get("fault_origin_px") if isinstance(cell, dict) else None
     origin = None
     if origin_info:
@@ -1102,7 +1100,7 @@ def apply_surface_obstruction_rgb_tint(output, cell, scale):
 
     local_w, local_h = x2 - x1, y2 - y1
     severity = clamp(scale, 1, 10) / 10
-    shadow = surface_obstruction_shape(local_w, local_h, seed_for(cell["id"], 7, "surface-obstruction-rgb"))
+    shadow = surface_obstruction_shape(local_w, local_h, seed_for(cell["id"], scale, "surface-obstruction-rgb"))
 
     edge = np.clip(cv2.Laplacian(shadow.astype(np.float32), cv2.CV_32F), 0, 1)
     hot = cv2.GaussianBlur(edge, (0, 0), max(0.35, min(local_w, local_h) * 0.012))
@@ -1140,7 +1138,7 @@ def apply_soiling_rgb_tint(output, cell, scale):
 
     local_w, local_h = x2 - x1, y2 - y1
     severity = clamp(scale, 1, 10) / 10
-    seed = seed_for(cell["id"], 7, "close-soiling-rgb")
+    seed = seed_for(cell["id"], scale, "close-soiling-rgb")
     rng = np.random.default_rng(seed)
     yy, xx = np.mgrid[0:local_h, 0:local_w].astype(np.float32)
     cx = local_w * (0.50 + rng.uniform(-0.035, 0.035))
@@ -1183,13 +1181,13 @@ def apply_cell_cracking_rgb_tint(output, cell, scale):
     local_w, local_h = x2 - x1, y2 - y1
     severity = clamp(scale, 1, 10) / 10
 
-    patch = selected_fault_patch("CellCracking", seed_for(cell["id"], 7, "cell-crack-patch"))
+    patch = selected_fault_patch("CellCracking", seed_for(cell["id"], scale, "cell-crack-patch"))
     field = None
     real_mask = None
     if patch is not None:
-        field, real_mask = crack_patch_texture_mask(patch, (local_w, local_h), seed_for(cell["id"], 7, "cell-crack-field"))
+        field, real_mask = crack_patch_texture_mask(patch, (local_w, local_h), seed_for(cell["id"], scale, "cell-crack-field"))
     if field is None:
-        field = smooth_unit_field((local_h, local_w), seed_for(cell["id"], 7, "cell-crack-fallback"), max(1.0, min(local_w, local_h) * 0.14), octaves=3)
+        field = smooth_unit_field((local_h, local_w), seed_for(cell["id"], scale, "cell-crack-fallback"), max(1.0, min(local_w, local_h) * 0.14), octaves=3)
         real_mask = np.clip((field - np.percentile(field, 78)) / 0.24, 0, 1)
     field = cv2.GaussianBlur(field.astype(np.float32), (0, 0), max(0.45, min(local_w, local_h) * 0.035))
     if real_mask is not None:
@@ -1222,7 +1220,7 @@ def apply_cell_cracking_rgb_tint(output, cell, scale):
 
     # Add a deterministic fracture path after palette mapping so a crack stays
     # legible in the complete four-module close view instead of becoming a blob.
-    rng = np.random.default_rng(seed_for(cell["id"], 7, "close-crack-path"))
+    rng = np.random.default_rng(seed_for(cell["id"], scale, "close-crack-path"))
     path = []
     for index in range(9):
         t = index / 8.0
@@ -1371,7 +1369,7 @@ def apply_thermal_fault(
     if bw <= 0 or bh <= 0:
         return temp
     severity = clamp(scale, 1, 10) / 10
-    rng = np.random.default_rng(seed_for(cell["id"], fault_type, 7, "thermal-field"))
+    rng = np.random.default_rng(seed_for(cell["id"], fault_type, scale, "thermal-field"))
 
     if fault_type in HOTSPOT_FAULTS:
         origin_info = cell.get("fault_origin_px") if isinstance(cell, dict) else None
@@ -1404,7 +1402,7 @@ def apply_thermal_fault(
             dist = (xr / radius_x) ** 2 + (yr / radius_y) ** 2
             halo = np.exp(-dist * 0.55)
             core = np.exp(-dist * 2.9)
-            rough = smooth_unit_field((local_h, local_w), seed_for(cell["id"], 7, spot_idx, "hotspot-edge"), max(1.0, min(local_w, local_h) * 0.20), octaves=3)
+            rough = smooth_unit_field((local_h, local_w), seed_for(cell["id"], scale, spot_idx, "hotspot-edge"), max(1.0, min(local_w, local_h) * 0.20), octaves=3)
             mask = np.clip(halo * (0.78 + rough * 0.35), 0, 1)
             mask *= 0.82 + 0.24 * np.sin((xx * 0.19) + (yy * 0.11) + float(rng.uniform(-2.0, 2.0)))
             mask = np.clip(mask, 0, 1)
@@ -1429,7 +1427,7 @@ def apply_thermal_fault(
         along = (np.cos(direction) * (xx / max(1, sw - 1)) + np.sin(direction) * (yy / max(1, sh - 1)))
         along = (along - along.min()) / max(1e-6, float(along.max() - along.min()))
         edge = np.clip((along - rng.uniform(0.28, 0.46)) / rng.uniform(0.18, 0.30), 0, 1)
-        cloud = smooth_unit_field((sh, sw), seed_for(cell["id"], 7, "partial-shade-cloud"), max(2.0, min(sw, sh) * 0.24), octaves=3)
+        cloud = smooth_unit_field((sh, sw), seed_for(cell["id"], scale, "partial-shade-cloud"), max(2.0, min(sw, sh) * 0.24), octaves=3)
         shade = np.clip((edge * 0.72 + cloud * 0.44 - 0.18) * (0.74 + 0.28 * severity), 0, 0.92).astype(np.float32)
         shade = cv2.GaussianBlur(shade, (0, 0), max(0.8, min(sw, sh) * 0.035))
 
@@ -1546,7 +1544,7 @@ def apply_thermal_fault(
         temp[by1:by2, bx1:bx2] += np.clip(edge, 0, 1)[:bh, :bw] * warm_rim
 
     elif fault_type in SURFACE_OBSTRUCTION_FAULTS:
-        shade = surface_obstruction_shape(bw, bh, seed_for(cell["id"], 7, "surface-obstruction-temp"))
+        shade = surface_obstruction_shape(bw, bh, seed_for(cell["id"], scale, "surface-obstruction-temp"))
         def apply_shade(local, shade_local):
             cool_target = 104 + 18 * (1 - shade_local)
             return local * (1 - shade_local * (0.50 + 0.10 * severity)) + cool_target * (shade_local * (0.50 + 0.10 * severity))

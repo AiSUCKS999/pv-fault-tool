@@ -4,9 +4,3 @@ __pycache__/
 
 # Machine-specific PV Tool paths
 config/paths.yaml
-
-# Local visual acceptance and dataset evidence (reproducible via tests).
-artifacts/experiment_recovery/*.png
-artifacts/experiment_recovery/*.html
-artifacts/experiment_recovery/*.zip
-artifacts/experiment_recovery/*.log

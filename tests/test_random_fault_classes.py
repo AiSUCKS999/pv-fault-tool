@@ -45,12 +45,12 @@ def placement(observations):
             for o in observations]
 
 
-def generate(scene, count, seed=137, fault_types=None, policy="Balanced"):
+def generate(scene, count, seed=137, fault_types=None):
     return scene.ns["real_farm_camera_generate_random"](
-        scene.state, scene.image, scene.credible, count, seed, fault_types=fault_types, policy=policy)
+        scene.state, scene.image, scene.credible, count, seed, fault_types=fault_types)
 
 
-def test_explicit_balanced_batches_cover_every_diagnostic_once_per_cycle(scene):
+def test_default_batches_cover_every_diagnostic_once_per_shuffled_cycle(scene):
     expected = set(scene.ns["CLOSE_DIAGNOSTIC_FAULT_TYPES"])
     assert len(expected) == 7 and len(scene.credible) >= 14
     assert generate(scene, 14) == 14
@@ -144,11 +144,6 @@ def test_hotspot_symptom_is_available_only_when_explicitly_selected(scene):
 def test_cold_rgb_random_cracking_generates_physical_rgb_and_paired_thermal(scene):
     ns = scene.ns
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60)
-    # Exercise the preserved individual controls explicitly; scene workflow is the new default.
-    app.session_state["scene_individual_real"] = True
-    app.session_state["scene_individual_generated"] = True
-    app.session_state["collection_mode_Generated"] = "929 controlled cases"
-    app.session_state["collection_mode_Real Farm"] = "929 controlled cases"
     app.query_params["base_source"] = "real_farm"
     for key in ("real_farm_state", "real_farm_image", "real_farm_image_path"):
         app.session_state[key] = deepcopy(ns["st"].session_state[key])
@@ -176,8 +171,8 @@ def test_cold_rgb_random_cracking_generates_physical_rgb_and_paired_thermal(scen
     assert app.radio(key="real_farm_camera_display").value == "RGB + Thermal"
     assert {button.label for button in app.get("download_button")} >= {
         "Download RGB faults", "Download thermal faults"}
-    captions = [caption for group in app.get("imgs") for caption in [im.caption for im in group.proto.imgs]]
-    assert any("RGB surface effects" in caption for caption in captions)
+    captions = [caption for group in app.get("image") for caption in group.captions]
+    assert any("RGB surface effects and marked fault locations" in caption for caption in captions)
     assert any("With synthetic fault" in caption for caption in captions)
     layers = app.session_state["real_farm_camera_layers"][1]
     assert layers["acquisition_audit"]["post_sensor_peak"] > 0

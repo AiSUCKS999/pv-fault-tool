@@ -1812,8 +1812,6 @@ def pil_hotspot_mask(size, seed, severity):
     return ImageChops.multiply(mask.filter(ImageFilter.GaussianBlur(max(0.6, min(width, height) * 0.055))), noise)
 
 
-# Severity changes amplitude/coverage, not reference or random shape. The
-# existing severity-7 morphology seed is retained across the severity sweep.
 def draw_realistic_fault(image, cell, fault_type, scale, view):
     fault_type = canonical_fault_type(fault_type)
     image = image.convert("RGBA")
@@ -1834,7 +1832,7 @@ def draw_realistic_fault(image, cell, fault_type, scale, view):
         by1 = clamp(cy - 2, 0, BASE_SIZE[1] - 4)
         by2 = by1 + 4
     bw, bh = bx2 - bx1, by2 - by1
-    rng = random.Random(seed_for(cell["id"], fault_type, 7, view))
+    rng = random.Random(seed_for(cell["id"], fault_type, scale, view))
     severity = scale / 10
     overlay = Image.new("RGBA", BASE_SIZE, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -1905,10 +1903,10 @@ def draw_realistic_fault(image, cell, fault_type, scale, view):
                 paste_color_with_mask(overlay, (72, 76, 76), (sx1, by1, sx2, by2), mask, int(45 + 35 * severity))
 
     elif fault_type in CRACKING_FAULTS:
-        patch = selected_fault_patch("CellCracking", seed_for(cell["id"], 7, view, "rgb-crack-patch"))
+        patch = selected_fault_patch("CellCracking", seed_for(cell["id"], scale, view, "rgb-crack-patch"))
         mask_array = None
         if patch is not None:
-            _, patch_mask = crack_patch_texture_mask(patch, (bw, bh), seed_for(cell["id"], 7, view, "rgb-crack-field"))
+            _, patch_mask = crack_patch_texture_mask(patch, (bw, bh), seed_for(cell["id"], scale, view, "rgb-crack-field"))
             if patch_mask is not None:
                 edge = cv2.GaussianBlur(
                     np.abs(cv2.Laplacian(patch_mask.astype(np.float32), cv2.CV_32F)),
@@ -1920,7 +1918,7 @@ def draw_realistic_fault(image, cell, fault_type, scale, view):
         # an opaque alpha plane can saturate the percentile threshold). Use the
         # existing RGB crack model when that leaves no visible surface mask.
         if mask_array is None or (view == "rgb" and not np.any(mask_array > 0)):
-            fallback = organic_fault_mask(bw, bh, "CellCracking", seed_for(cell["id"], 7, view, "rgb-crack-fallback"))
+            fallback = organic_fault_mask(bw, bh, "CellCracking", seed_for(cell["id"], scale, view, "rgb-crack-fallback"))
             mask_array = np.clip((fallback - np.percentile(fallback, 76)) / 0.24, 0, 1) * cell_edge_feather(bw, bh, strength=9.0)
         preserve = panel_segmentation_preserve_mask((BASE_SIZE[1], BASE_SIZE[0], 3), cell)[by1:by2, bx1:bx2]
         mask_array = np.clip(mask_array * (1.0 - preserve * 0.48), 0, 1)
@@ -1938,11 +1936,11 @@ def draw_realistic_fault(image, cell, fault_type, scale, view):
     elif fault_type in SOILING_FAULTS | {"Bird droppings", "Snow cover"}:
         mask = None
         if fault_type in SOILING_FAULTS:
-            patch = selected_fault_patch("SoilingDust", seed_for(cell["id"], 7, view, "rgb-soil-patch"))
+            patch = selected_fault_patch("SoilingDust", seed_for(cell["id"], scale, view, "rgb-soil-patch"))
             if patch is not None:
-                field, patch_alpha = normalized_patch_field(patch, (bw, bh), seed_for(cell["id"], 7, view, "rgb-soil-field"))
+                field, patch_alpha = normalized_patch_field(patch, (bw, bh), seed_for(cell["id"], scale, view, "rgb-soil-field"))
                 if patch_alpha is not None:
-                    soil_mask = np.clip(np.maximum(patch_alpha * 0.95, organic_fault_mask(bw, bh, fault_type, seed_for(cell["id"], 7, view, "rgb-soil-mask")) * 0.52), 0, 1)
+                    soil_mask = np.clip(np.maximum(patch_alpha * 0.95, organic_fault_mask(bw, bh, fault_type, seed_for(cell["id"], scale, view, "rgb-soil-mask")) * 0.52), 0, 1)
                     mask = Image.fromarray(np.uint8(soil_mask * 255), mode="L").filter(ImageFilter.GaussianBlur(max(0.35, min(bw, bh) * 0.015)))
         if mask is None:
             mask = irregular_mask((bw, bh), rng.randint(0, 10_000), blobs=9)

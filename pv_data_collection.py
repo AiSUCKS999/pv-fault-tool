@@ -51,11 +51,6 @@ def render_data_collection(mode, on_prepare=None, prepared_sources=None, generat
     from pv_experiment_ui import render
     if simulator_ns is None:
         raise ValueError("Actual simulator namespace is required for experiment recording")
-    collection_mode = st.radio("Collection mode", ["Scene experiments", "929 controlled cases"], horizontal=True, key="collection_mode_"+mode)
-    if collection_mode == "Scene experiments":
-        from pv_scene_ui import render_scene_workflow
-        render_scene_workflow(simulator_ns,mode)
-        return
     render(mode, simulator_ns, prepared_sources=prepared_sources, generated_scenes=generated_scenes,
            selected_scene=selected_scene, on_restore_simulator=on_restore_simulator,
            on_restore_original=on_restore_original)
