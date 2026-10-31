@@ -138,12 +138,28 @@ def read_results(mission):
 
 
 def render_results(st):
+    from pathlib import Path
     mission=st.session_state.get('ros_sent_mission')
     if not mission:return
     st.button('Refresh Inspection Results')
     try:result=read_results(mission)
     except (OSError,ValueError):result=None
     if result is None:st.info('Waiting for this mission in the foreground ROS terminal');return
+    survey_path=Path(__file__).resolve().parent.parent/'outputs/survey_status.json'
+    if survey_path.exists():
+        survey=json.loads(survey_path.read_text(encoding='utf-8'))
+        if survey.get('mission_id')==mission['mission_id'] and survey.get('mission_sha256')==result.get('mission_sha256'):
+            st.write('Survey robot: '+survey['status'])
+            st.write('Surveyed arrays: '+', '.join(survey.get('visited',[])))
+            st.metric('Survey Gazebo travel',f"{survey.get('gazebo_pose_travel_m',0):.2f} m")
+            with st.expander('Survey observations (simulated)',expanded=False):
+                st.caption('ROS 2 local coordination · simulated manifest screening')
+                output=(Path(__file__).resolve().parent.parent/'outputs').resolve()
+                for item in survey.get('inspection_images',[]):
+                    if item.get('path'):
+                        picture=(output/item['path']).resolve()
+                        if output in picture.parents and picture.is_file():st.image(str(picture),caption='Survey '+item['panel'])
+
     st.write(result['status'])
     st.write('Visited: '+', '.join(result.get('visited',[])))
     st.metric('Actual Gazebo travel',f"{result.get('gazebo_pose_travel_m',0):.2f} m")
