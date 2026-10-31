@@ -156,7 +156,7 @@ def presentation_payload(ns, acquired):
     def encode(frame):
         return {**{k:image_data(ns["export_current_view_bytes"](frame[k])) for k in ("original","rgb","thermal")},
             "width":frame["rgb"].width,"height":frame["rgb"].height,"bounds":frame["bounds"],
-            "boxes":_boxes(acquired["faults"],frame["bounds"])}
+            "boxes":[dict(box,name=ns.get("fault_display_name",lambda code:code)(box["class"])) for box in _boxes(acquired["faults"],frame["bounds"])]}
     return {"identity":acquired["source"]["identity"],"revision":acquired["signature"],
             "faults":acquired["faults"],"far":encode(acquired["far"]),
             "close":{oid:encode(frame) for oid,frame in acquired["close"].items()},

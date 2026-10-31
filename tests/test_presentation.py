@@ -51,6 +51,7 @@ def test_native_generated_presentation_browser(tmp_path):
             page.keyboard.press("r")
             assert page.evaluate("state.mode")=="rgb"
             page.evaluate("document.exitFullscreen()")
+            page.locator('#advanced > summary').click()
             with page.expect_popup() as opened:
                 page.get_by_text("OPEN DISPLAY",exact=True).click()
             display=opened.value
