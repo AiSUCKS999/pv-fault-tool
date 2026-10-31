@@ -205,7 +205,7 @@ def real_farm_camera_pick_target(state,image,selected):
     from pv_geometry_component import quad_editor
     refresh=False
     with st.expander("Select / adjust PV polygon on RGB",expanded=True):
-        st.caption("Click an outlined proposal or another PV surface. Adjust its four corners if needed, save the outline, then confirm to create a hotspot. Simulation only; not training verification.")
+        pass  # Technical context: APP_DIAGNOSTICS.md
         identity=real_farm_source_identity(image)
         cache=state["camera_simulation"]
         pending=cache.get("pending")
@@ -327,8 +327,7 @@ def real_farm_camera_observation_controls(state,image,targets,view):
     state["camera_selected_observation"]=chosen
     observation=next(o for o in observations if o["observation_id"]==chosen)
     module=next((m for m in targets if m["module_id"]==observation["module_id"]),None)
-    st.caption(f"{chosen} · Module {observation['module_id']} · {observation.get('geometry_status','UNVERIFIED')}")
-    if view=="Close View":
+    if view in {"Far View", "Close View"}:
         options=["SingleHotSpot",*CLOSE_DIAGNOSTIC_FAULT_TYPES]
         if module and module.get("placement_kind")=="pv_point":
             options=["SingleHotSpot"]
@@ -339,7 +338,6 @@ def real_farm_camera_observation_controls(state,image,targets,view):
             format_func=lambda code:"Thermal Hotspot Symptom / Unassigned" if code=="SingleHotSpot" else real_farm_diagnostic_label(code),
             key=f"{key}_{chosen}_diagnosis")
         severity=st.slider("Observation severity",1,10,int(observation.get("severity",7)),key=f"{key}_{chosen}_severity")
-        st.caption("Reference-backed morphology · synthetic placement and relative intensity" if diagnosis in {"SingleHotSpot","SingleDiode","SingleByPassed"} else "Synthetic diagnostic pattern · unvalidated")
         apply_col,remove_col=st.columns(2)
         if apply_col.button("Generate / Apply Fault",type="primary",use_container_width=True,
                             key=f"{key}_{chosen}_apply"):
@@ -827,7 +825,7 @@ def real_farm_camera_sensor(field,distance,support=None):
     return field
 
 
-def real_farm_camera_acquisition(layers,observations,distance,bounds=None,grayscale=False):
+def real_farm_camera_acquisition(layers,observations,distance,bounds=None,grayscale=False,scalar_cache=None):
     config=json.dumps([{k:o.get(k) for k in ("observation_id","module_id","severity","seed","local_uv","diagnostic_fault_type","production_reference_ids","camera_visibility")} for o in observations],sort_keys=True)
     target_geometry=tuple((m["module_id"],real_farm_polygon_signature(m)) for m in layers.get("accepted_modules",[]) if
         m.get("simulation_only") and any(o.get("module_id")==m["module_id"] for o in observations))
@@ -838,11 +836,21 @@ def real_farm_camera_acquisition(layers,observations,distance,bounds=None,graysc
     if key in cache and (not observations or key in audits):
         if observations:layers["acquisition_audit"]=audits[key]
         return cache[key]
-    field=real_farm_camera_observation_field(layers,observations) if observations else layers["master_scalar"]
-    sensor=real_farm_camera_sensor(field,distance,layers["pv_module_union_mask"])
+    # A scene export acquires several Close crops from one unchanged native
+    # scalar plane. Reuse that plane/sensor result only within that batch.
+    scalar_key=(id(layers["master_scalar"]),config,target_geometry,distance)
+    cached_planes=scalar_cache.get(scalar_key) if scalar_cache is not None else None
+    if cached_planes:
+        field,sensor,baseline=cached_planes
+    else:
+        field=real_farm_camera_observation_field(layers,observations) if observations else layers["master_scalar"]
+        sensor=real_farm_camera_sensor(field,distance,layers["pv_module_union_mask"])
+        baseline=real_farm_camera_sensor(layers["master_scalar"],distance,layers["pv_module_union_mask"]) if observations else sensor
+        if scalar_cache is not None:
+            scalar_cache.clear()
+            scalar_cache[scalar_key]=(field,sensor,baseline)
     # Inspect the same scalar planes actually sent to display, before palette.
     if observations:
-        baseline=real_farm_camera_sensor(layers["master_scalar"],distance,layers["pv_module_union_mask"])
         crop=bounds or (0,0,field.shape[1],field.shape[0])
         x1,y1,x2,y2=crop
         pre=(field[y1:y2,x1:x2]-layers["master_scalar"][y1:y2,x1:x2])
@@ -901,7 +909,9 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     # Camera capture uses the recovered Current renderer. A hidden Generated
     # Mode selector must not silently select a legacy sensor or module field.
     st.session_state["thermal_renderer_mode"]="Current Thermal"
-    from pv_real_farm_rgb_view import annotated_rgb_fault_preview, view_bounds
+    from pv_real_farm_rgb_view import rgb_fault_preview, view_bounds
+    from pv_scene_frames import presentation_panel
+    presentation_panel(globals(), "Real Farm")
     source=real_farm_source_identity(image)
     if st.session_state.get("real_farm_camera_ui_source")!=source:
         # A new upload starts at the full Far scene, with no hidden healthy/RGB
@@ -916,9 +926,6 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
         on_change=real_farm_camera_image_view_changed,args=(image,))
     paired=image_view=="RGB + Thermal"
     thermal_view=image_view in {"Thermal","RGB + Thermal"}
-    st.caption("Paired RGB surface effects / marked fault locations and synthetic thermal response." if paired else
-        "Synthetic relative thermal · not measured temperature." if thermal_view else
-        "RGB surface effects and marked thermal/electrical fault locations · simulation only." if image_view=="RGB faults" else "Original RGB photograph.")
     preview=st.container()
     pending_result=st.session_state.get("real_farm_camera_pending_result_source")
     frame_width=state.get("camera_preparation_response",{}).get("physical_frame_width_fraction")
@@ -1003,9 +1010,6 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     else:mid=None
     selected=next((m for m in targets if m["module_id"]==mid),None)
     view=st.radio("Camera acquisition",["Far View","Close View"],horizontal=True,key="real_farm_camera_distance")
-    if section=="Faults" and view=="Far View":
-        from pv_far_surface import real_controls
-        real_controls(globals(),state,image,selected,layers)
     placement_key="real_farm_camera_placement"
     if st.session_state.get(placement_key)=="Random Hotspots":
         st.session_state[placement_key]="Random Faults"
@@ -1051,7 +1055,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     if display in {"Original RGB","RGB faults"}:
         shown=image
         if display=="RGB faults" and not healthy_only:
-            shown,rgb_report=annotated_rgb_fault_preview(globals(),image,targets,observations)
+            shown,rgb_report=rgb_fault_preview(globals(),image,targets,observations)
             with diagnostics:
                 st.json(rgb_report)
         bounds=view_bounds(globals(),image,selected,candidates,view)
@@ -1095,7 +1099,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     if paired:
         rgb_shown=image
         if not healthy_only:
-            rgb_shown,rgb_report=annotated_rgb_fault_preview(globals(),image,targets,observations)
+            rgb_shown,rgb_report=rgb_fault_preview(globals(),image,targets,observations)
             with diagnostics:st.json(rgb_report)
         if bounds:rgb_shown=rgb_shown.crop(bounds)
     if outlines:
@@ -1113,7 +1117,7 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             rgb_column,thermal_column=st.columns(2)
             with rgb_column:
                 st.markdown("**RGB faults**")
-                st.image(rgb_shown,caption=("Close View" if bounds else "Far View")+" · RGB surface effects and marked fault locations" if not healthy_only else "Original RGB · healthy baseline",width="stretch",output_format="PNG")
+                st.image(rgb_shown,caption=("Close View" if bounds else "Far View")+" · RGB surface effects" if not healthy_only else "Original RGB · healthy baseline",width="stretch",output_format="PNG")
                 st.download_button("Download RGB faults",export_current_view_bytes(rgb_shown),file_name=f"camera_RGB_faults_{view.replace(' ','_')}.png",mime="image/png")
             with thermal_column:
                 st.markdown("**Thermal faults**")
@@ -1123,14 +1127,12 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
             st.image(shown,caption=caption,width="stretch",output_format="PNG")
             st.download_button("Download camera view",export_current_view_bytes(shown),file_name=f"camera_{display.replace(' ','_')}_{view.replace(' ','_')}.png",mime="image/png")
         if rgb_report is not None:
-            st.caption(f"{len(rgb_report['rendered'])} RGB surface effect(s) · {len(rgb_report.get('annotated',[]))} marked thermal/electrical location(s)")
-            if rgb_report.get("annotated"):
-                st.caption("Location markers are annotations, not visible physical damage. Dust, obstruction and cracks use simulated RGB surface effects.")
-            if rgb_report["unavailable"]:
-                st.info(f"{len(rgb_report['unavailable'])} observation(s) could not be shown in RGB; see details below.")
-                with st.expander("RGB preview details",expanded=False):
-                    for skipped in rgb_report["unavailable"]:
-                        st.write(f"{skipped['observation_id']}: {skipped['reason']}")
+            thermal_only=[r for r in rgb_report["unavailable"] if r["reason"].startswith("No established daylight RGB")]
+            failures=[r for r in rgb_report["unavailable"] if r not in thermal_only]
+            if thermal_only:st.caption(f"Thermal only: {len(thermal_only)}")
+            if failures:
+                st.warning(f"RGB unavailable for {len(failures)} observation(s)")
+                with diagnostics:st.json(failures)
         if not paired and observations:
             st.button("Show RGB + thermal",on_click=real_farm_camera_show_thermal_result,args=(image,True))
     with diagnostics:

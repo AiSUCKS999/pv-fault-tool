@@ -83,6 +83,11 @@ def test_rgb_close_view_uses_the_selected_physical_module_bounds(scene):
 def test_cold_rgb_ui_has_natural_fault_view_without_generating_thermal(scene):
     ns, state, image, modules = setup(scene, "TC0501")
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=35)
+    # Exercise the preserved individual controls explicitly; scene workflow is the new default.
+    app.session_state["scene_individual_real"] = True
+    app.session_state["scene_individual_generated"] = True
+    app.session_state["collection_mode_Generated"] = "929 controlled cases"
+    app.session_state["collection_mode_Real Farm"] = "929 controlled cases"
     app.query_params["base_source"] = "real_farm"
     for key in ("real_farm_state", "real_farm_image", "real_farm_image_path"):
         app.session_state[key] = deepcopy(ns["st"].session_state[key])
@@ -96,10 +101,10 @@ def test_cold_rgb_ui_has_natural_fault_view_without_generating_thermal(scene):
     assert app.session_state["real_farm_rgb_preview_cache"][2]["rendered"][0]["changed_pixels"] > 0
     app.radio(key="real_farm_camera_distance").set_value("Close View").run()
     assert not app.exception
-    assert any("Close View · simulated RGB surface appearance" in image.caption for group in app.get("image") for image in group.proto.imgs)
+    assert any("Close View · simulated RGB surface appearance" in image.caption for group in app.get("imgs") for image in group.proto.imgs), [str(g.proto) for g in app.get("imgs")]
     app.radio(key="real_farm_camera_display").set_value("Original RGB").run()
     assert not app.exception
-    assert any("Close View · original RGB photograph" in image.caption for group in app.get("image") for image in group.proto.imgs)
+    assert any("Close View · original RGB photograph" in image.caption for group in app.get("imgs") for image in group.proto.imgs), [str(g.proto) for g in app.get("imgs")]
 
 
 def test_thermal_acquisition_pixels_match_approved_main_after_rgb_ui_changes(scene):
@@ -107,7 +112,9 @@ def test_thermal_acquisition_pixels_match_approved_main_after_rgb_ui_changes(sce
     loader = runpy.run_path(str(ROOT / "tests/test_collection_acceptance.py"))["namespace"]
     baseline = loader("baf1f8f")
     images = []
-    case = next(c for c in _load_cases() if c["Case ID"] == "TC0502")
+    case = dict(next(c for c in _load_cases() if c["Case ID"] == "TC0502"))
+    # Severity-7 reference shape is preserved; other levels deliberately decouple RNG.
+    case["Severity (1–10)"] = "7"
     for ns in (baseline, current):
         prepare_real(ns, case, {"source": "image_05", "modules": [mid], "phase": "Close diagnosis"})
         state, photo = ns["st"].session_state["real_farm_state"], ns["st"].session_state["real_farm_image"]

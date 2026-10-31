@@ -44,10 +44,10 @@ def rgb_fault_preview(ns, image, modules, observations):
     source = ns["real_farm_source_identity"](image)
     lookup = {m["module_id"]: m for m in modules}
     signature_data = {"source": source, "observations": [{k: o.get(k) for k in
-        ("observation_id", "module_id", "severity", "seed", "local_uv", "diagnostic_fault_type", "observation_type")} for o in observations],
+        ("observation_id", "module_id", "severity", "seed", "local_uv", "patch_extent_uv", "diagnostic_fault_type", "observation_type")} for o in observations],
         "geometry": [{k: m.get(k) for k in ("module_id", "active_polygon_rgb", "refined_mask_contours_rgb", "refined_mask_holes_rgb", "refinement_status")}
                      for m in modules if any(o.get("module_id") == m["module_id"] for o in observations)],
-        "version": "visible-surface-only-source-projection-v3",
+        "version": "visible-surface-only-source-projection-v4",
         "engine_revision": (ns["ROOT"] / "pv_render_rgb.py").stat().st_mtime_ns}
     signature = hashlib.sha256(json.dumps(signature_data, sort_keys=True, default=lambda a: a.tolist()).encode()).hexdigest()
     cached = ns["st"].session_state.get("real_farm_rgb_preview_cache")
@@ -84,6 +84,9 @@ def rgb_fault_preview(ns, image, modules, observations):
         # The thermal adapter's obstruction occupies .32 x .38 of the same
         # target plane. Heat-only symptoms must never invent RGB scorching.
         bw, bh = (cw * .32, ch * .38) if fault == "SurfaceObstruction" else (cw * .8, ch * .8)
+        if observation.get("patch_extent_uv"):
+            ew, eh = observation["patch_extent_uv"]
+            bw, bh = cw * float(ew), ch * float(eh)
         cx, cy = ox + cw * float(u), oy + ch * float(v)
         x1 = max(ox, min(cx - bw / 2, ox + cw - bw))
         y1 = max(oy, min(cy - bh / 2, oy + ch - bh))
