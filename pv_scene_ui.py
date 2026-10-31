@@ -112,7 +112,10 @@ def _confirm_current(ns,mode,stage):
 
 def render_scene_workflow(ns,mode,section="DATA COLLECTION"):
     st=ns["st"];journal=SceneJournal(st.session_state)
-    if section in {"Faults","DATA COLLECTION"}:setup(ns,mode)
+    if section in {"Faults","DATA COLLECTION"}:
+        from pv_ros_mission import render_prepare
+        render_prepare(ns,mode)
+        setup(ns,mode)
     if message:=st.session_state.pop("pv_scene_error",None):st.error(message)
     ready=mode=="Generated" or st.session_state.get("real_farm_image") is not None
     exp=journal.active(mode)
@@ -124,6 +127,8 @@ def render_scene_workflow(ns,mode,section="DATA COLLECTION"):
         else:
             show_presentation(ns,saved[1],key=mode)
             frames=acquire_scene(ns,mode)
+            from pv_ros_mission import render_export
+            render_export(ns,frames)
             view=st.session_state.get("pv_scene_view_"+mode,{})
             faults=frames["faults"];idx=min(max(int(view.get("index",0)),0),max(0,len(faults)-1))
             selected=faults[idx] if faults else None
