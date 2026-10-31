@@ -1,0 +1,532 @@
+[
+  {
+    "id": "scene-c714b4ab3a7a-F001",
+    "fault_type": "StringOpenCircuit",
+    "severity": 7,
+    "module_id": "R1-A6-M1",
+    "row": 1,
+    "array": 6,
+    "module": 1,
+    "cell_ids": [
+      "R1-C820"
+    ],
+    "polygon_rgb": [
+      [
+        1892.840087890625,
+        407.969970703125
+      ],
+      [
+        1949.159912109375,
+        407.969970703125
+      ],
+      [
+        1949.159912109375,
+        476.02996826171875
+      ],
+      [
+        1892.8399658203125,
+        476.02996826171875
+      ]
+    ],
+    "module_bbox": [
+      1892.8399658203125,
+      407.969970703125,
+      1949.159912109375,
+      476.02996826171875
+    ],
+    "placement_seed": 421,
+    "seed_behavior": "Placement seeded; existing Generated morphology uses its internal target seed",
+    "physical_ground_truth_verified": false,
+    "rgb_classification": "Thermal only",
+    "acquisition_metrics": {
+      "RGB": {
+        "display_size": [
+          57,
+          69
+        ],
+        "contrast_pixels": 0,
+        "visible_at_tested_scale": false,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      },
+      "thermal": {
+        "display_size": [
+          57,
+          69
+        ],
+        "contrast_pixels": 3523,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      }
+    }
+  },
+  {
+    "id": "scene-c714b4ab3a7a-F002",
+    "fault_type": "SoilingDust",
+    "severity": 7,
+    "module_id": "R6-A1-M1",
+    "row": 6,
+    "array": 1,
+    "module": 1,
+    "cell_ids": [
+      "R6-C001",
+      "R6-C002",
+      "R6-C003",
+      "R6-C004",
+      "R6-C005",
+      "R6-C006",
+      "R6-C007",
+      "R6-C008",
+      "R6-C009",
+      "R6-C010",
+      "R6-C011",
+      "R6-C012",
+      "R6-C013",
+      "R6-C014",
+      "R6-C015",
+      "R6-C016",
+      "R6-C017",
+      "R6-C018",
+      "R6-C019",
+      "R6-C020",
+      "R6-C021",
+      "R6-C022",
+      "R6-C023",
+      "R6-C024",
+      "R6-C025",
+      "R6-C026",
+      "R6-C027",
+      "R6-C028",
+      "R6-C029",
+      "R6-C030",
+      "R6-C031",
+      "R6-C032",
+      "R6-C033",
+      "R6-C034",
+      "R6-C035",
+      "R6-C036",
+      "R6-C037",
+      "R6-C038",
+      "R6-C039",
+      "R6-C040"
+    ],
+    "polygon_rgb": [
+      [
+        651.9800415039062,
+        1560.43994140625
+      ],
+      [
+        725.02001953125,
+        1560.4400634765625
+      ],
+      [
+        725.02001953125,
+        1613.559814453125
+      ],
+      [
+        651.97998046875,
+        1613.5599365234375
+      ]
+    ],
+    "module_bbox": [
+      651.97998046875,
+      1560.43994140625,
+      725.02001953125,
+      1613.5599365234375
+    ],
+    "placement_seed": 421,
+    "seed_behavior": "Placement seeded; existing Generated morphology uses its internal target seed",
+    "physical_ground_truth_verified": false,
+    "rgb_classification": "Surface effect",
+    "acquisition_metrics": {
+      "RGB": {
+        "display_size": [
+          74,
+          53
+        ],
+        "contrast_pixels": 2752,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      },
+      "thermal": {
+        "display_size": [
+          74,
+          53
+        ],
+        "contrast_pixels": 3098,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      }
+    }
+  },
+  {
+    "id": "scene-c714b4ab3a7a-F003",
+    "fault_type": "SingleDiode",
+    "severity": 7,
+    "module_id": "R6-A6-M4",
+    "row": 6,
+    "array": 6,
+    "module": 4,
+    "cell_ids": [
+      "R6-C940"
+    ],
+    "polygon_rgb": [
+      [
+        2024.97998046875,
+        1627.35498046875
+      ],
+      [
+        2098.02001953125,
+        1627.35498046875
+      ],
+      [
+        2098.02001953125,
+        1679.6448974609375
+      ],
+      [
+        2024.97998046875,
+        1679.6448974609375
+      ]
+    ],
+    "module_bbox": [
+      2024.97998046875,
+      1627.35498046875,
+      2098.02001953125,
+      1679.6448974609375
+    ],
+    "placement_seed": 421,
+    "seed_behavior": "Placement seeded; existing Generated morphology uses its internal target seed",
+    "physical_ground_truth_verified": false,
+    "rgb_classification": "Thermal only",
+    "acquisition_metrics": {
+      "RGB": {
+        "display_size": [
+          74,
+          52
+        ],
+        "contrast_pixels": 0,
+        "visible_at_tested_scale": false,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      },
+      "thermal": {
+        "display_size": [
+          74,
+          52
+        ],
+        "contrast_pixels": 361,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      }
+    }
+  },
+  {
+    "id": "scene-c714b4ab3a7a-F004",
+    "fault_type": "SurfaceObstruction",
+    "severity": 7,
+    "module_id": "R1-A1-M1",
+    "row": 1,
+    "array": 1,
+    "module": 1,
+    "cell_ids": [
+      "R1-C012",
+      "R1-C013",
+      "R1-C014",
+      "R1-C017",
+      "R1-C018",
+      "R1-C019",
+      "R1-C022",
+      "R1-C023",
+      "R1-C024",
+      "R1-C027",
+      "R1-C028",
+      "R1-C029"
+    ],
+    "polygon_rgb": [
+      [
+        805.8999633789062,
+        408.9700012207031
+      ],
+      [
+        863.0999755859375,
+        408.9700012207031
+      ],
+      [
+        863.0999755859375,
+        477.02996826171875
+      ],
+      [
+        805.8999633789062,
+        477.0299987792969
+      ]
+    ],
+    "module_bbox": [
+      805.8999633789062,
+      408.9700012207031,
+      863.0999755859375,
+      477.0299987792969
+    ],
+    "placement_seed": 421,
+    "seed_behavior": "Placement seeded; existing Generated morphology uses its internal target seed",
+    "physical_ground_truth_verified": false,
+    "rgb_classification": "Surface effect",
+    "acquisition_metrics": {
+      "RGB": {
+        "display_size": [
+          58,
+          69
+        ],
+        "contrast_pixels": 1899,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      },
+      "thermal": {
+        "display_size": [
+          58,
+          69
+        ],
+        "contrast_pixels": 1627,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      }
+    }
+  },
+  {
+    "id": "scene-c714b4ab3a7a-F005",
+    "fault_type": "SingleHotSpot",
+    "severity": 7,
+    "module_id": "R3-A3-M4",
+    "row": 3,
+    "array": 3,
+    "module": 4,
+    "cell_ids": [
+      "R3-C460"
+    ],
+    "polygon_rgb": [
+      [
+        1526.89990234375,
+        956.885009765625
+      ],
+      [
+        1584.0999755859375,
+        956.885009765625
+      ],
+      [
+        1584.0999755859375,
+        1024.114990234375
+      ],
+      [
+        1526.89990234375,
+        1024.114990234375
+      ]
+    ],
+    "module_bbox": [
+      1526.89990234375,
+      956.885009765625,
+      1584.0999755859375,
+      1024.114990234375
+    ],
+    "placement_seed": 421,
+    "seed_behavior": "Placement seeded; existing Generated morphology uses its internal target seed",
+    "physical_ground_truth_verified": false,
+    "rgb_classification": "Thermal only",
+    "acquisition_metrics": {
+      "RGB": {
+        "display_size": [
+          58,
+          68
+        ],
+        "contrast_pixels": 0,
+        "visible_at_tested_scale": false,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      },
+      "thermal": {
+        "display_size": [
+          58,
+          68
+        ],
+        "contrast_pixels": 466,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      }
+    }
+  },
+  {
+    "id": "scene-c714b4ab3a7a-F006",
+    "fault_type": "SingleByPassed",
+    "severity": 7,
+    "module_id": "R5-A4-M3",
+    "row": 5,
+    "array": 4,
+    "module": 3,
+    "cell_ids": [
+      "R5-C580"
+    ],
+    "polygon_rgb": [
+      [
+        1728.919921875,
+        1423.43994140625
+      ],
+      [
+        1801.0799560546875,
+        1423.43994140625
+      ],
+      [
+        1801.0799560546875,
+        1476.56005859375
+      ],
+      [
+        1728.919921875,
+        1476.56005859375
+      ]
+    ],
+    "module_bbox": [
+      1728.919921875,
+      1423.43994140625,
+      1801.0799560546875,
+      1476.56005859375
+    ],
+    "placement_seed": 421,
+    "seed_behavior": "Placement seeded; existing Generated morphology uses its internal target seed",
+    "physical_ground_truth_verified": false,
+    "rgb_classification": "Thermal only",
+    "acquisition_metrics": {
+      "RGB": {
+        "display_size": [
+          73,
+          53
+        ],
+        "contrast_pixels": 0,
+        "visible_at_tested_scale": false,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      },
+      "thermal": {
+        "display_size": [
+          73,
+          53
+        ],
+        "contrast_pixels": 603,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      }
+    }
+  },
+  {
+    "id": "scene-c714b4ab3a7a-F007",
+    "fault_type": "StringReversedPolarity",
+    "severity": 7,
+    "module_id": "R3-A6-M4",
+    "row": 3,
+    "array": 6,
+    "module": 4,
+    "cell_ids": [
+      "R3-C940"
+    ],
+    "polygon_rgb": [
+      [
+        2184.89990234375,
+        960.885009765625
+      ],
+      [
+        2242.099853515625,
+        960.885009765625
+      ],
+      [
+        2242.099853515625,
+        1028.114990234375
+      ],
+      [
+        2184.89990234375,
+        1028.114990234375
+      ]
+    ],
+    "module_bbox": [
+      2184.89990234375,
+      960.885009765625,
+      2242.099853515625,
+      1028.114990234375
+    ],
+    "placement_seed": 421,
+    "seed_behavior": "Placement seeded; existing Generated morphology uses its internal target seed",
+    "physical_ground_truth_verified": false,
+    "rgb_classification": "Thermal only",
+    "acquisition_metrics": {
+      "RGB": {
+        "display_size": [
+          58,
+          68
+        ],
+        "contrast_pixels": 0,
+        "visible_at_tested_scale": false,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      },
+      "thermal": {
+        "display_size": [
+          58,
+          68
+        ],
+        "contrast_pixels": 3082,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      }
+    }
+  },
+  {
+    "id": "scene-c714b4ab3a7a-F008",
+    "fault_type": "CellCracking",
+    "severity": 7,
+    "module_id": "R4-A1-M4",
+    "row": 4,
+    "array": 1,
+    "module": 4,
+    "cell_ids": [
+      "R4-C140"
+    ],
+    "polygon_rgb": [
+      [
+        1039.9000244140625,
+        1194.885009765625
+      ],
+      [
+        1097.0999755859375,
+        1194.885009765625
+      ],
+      [
+        1097.0999755859375,
+        1262.114990234375
+      ],
+      [
+        1039.9000244140625,
+        1262.114990234375
+      ]
+    ],
+    "module_bbox": [
+      1039.9000244140625,
+      1194.885009765625,
+      1097.0999755859375,
+      1262.114990234375
+    ],
+    "placement_seed": 421,
+    "seed_behavior": "Placement seeded; existing Generated morphology uses its internal target seed",
+    "physical_ground_truth_verified": false,
+    "rgb_classification": "Surface effect",
+    "acquisition_metrics": {
+      "RGB": {
+        "display_size": [
+          58,
+          68
+        ],
+        "contrast_pixels": 319,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      },
+      "thermal": {
+        "display_size": [
+          58,
+          68
+        ],
+        "contrast_pixels": 179,
+        "visible_at_tested_scale": true,
+        "criterion": "at least 64 display pixels differ by 8/255; simulator visibility only"
+      }
+    }
+  }
+]

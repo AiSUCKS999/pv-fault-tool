@@ -85,7 +85,8 @@ def acquire_scene(ns, mode):
             oid=record.get("experiment_fault_id") or record.get("far_surface_group_id") or "G-"+digest([loc,record["row_id"],record["target_cell_id"]])[:12]
             if oid not in groups:
                 logical=ns["cell_by_id"](loc,record["row_id"],record["target_cell_id"])
-                polygon=deepcopy(target["active_module_polygon"])
+                module_geometry=ns["array_module_polygons"](arrays[(ns["row_number_from_id"](loc,record["row_id"]),logical["panel_number"])])[logical["module_number_in_panel"]]
+                polygon=deepcopy(ns["module_active_polygon"](module_geometry))
                 groups[oid]={"id":oid,"fault_type":record["fault_type"],"severity":record["fault_scale"],
                     "module_id":f"{record['row_id']}-A{logical['panel_number']}-M{logical['module_number_in_panel']}",
                     "row":ns["row_number_from_id"](loc,record["row_id"]),"array":logical["panel_number"],
