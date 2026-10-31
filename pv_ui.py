@@ -1596,6 +1596,11 @@ def solar_render_geometry_items(location_id):
         return []
     layout_key = f"{custom_row_count(location_id)}x{custom_panels_per_row(location_id)}"
     items = (((index or {}).get("scenes") or {}).get(location_id) or {}).get(layout_key, [])
+    if location_id == "grass_open" and layout_key == "2x4":
+        # Explicit integration alias only; retain original native polygon identities.
+        items = [dict(item, native_array={"row":item["row"],"column":item["col"]},
+            row=2 if int(item["row"])==1 and int(item["col"]) in (5,6) else item["row"],
+            col=int(item["col"])-2 if int(item["row"])==1 and int(item["col"]) in (5,6) else item["col"]) for item in items]
     asset = solar_render_asset_path(location_id)
     return aligned_generated_array_geometry(str(asset), tuple(json.dumps(item, sort_keys=True) for item in items)) if asset else items
 

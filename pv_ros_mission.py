@@ -19,7 +19,9 @@ def export_mission(scene,selected_ids):
         target=panels.setdefault(pid,{'panel_id':pid,'source_array':{'row':r,'column':c},
             'center_world_m':[x,y,.8],'inspection_waypoint_m':[x,.75 if r==1 else 3.75],
             'fault_ids':[],'source_faults':[]})
-        target['fault_ids'].append(oid);target['source_faults'].append(deepcopy(f))
+        source=deepcopy(f)
+        source['native_array']={'row':1,'column':c+2} if scene['source'].get('identity')=='grass_open' and r==2 and c in (3,4) else {'row':r,'column':c}
+        target['fault_ids'].append(oid);target['source_faults'].append(source)
     mission={'schema':SCHEMA,'map_id':'pv_farm_2x4_v1','frame_id':'pv_farm','units':'metres',
         'mapping':'logical Generated array -> one surrogate Gazebo panel; source module/cell IDs retained; image pixels are not world coordinates',
         'simulated':True,'physical_ground_truth_verified':False,'created_utc':datetime.now(timezone.utc).isoformat(),
@@ -49,13 +51,14 @@ def render_prepare(ns,mode):
     loc=ns['selected_location']()['id']
     if (ns['custom_row_count'](loc),ns['custom_panels_per_row'](loc))!=(2,4):return
     with st.expander('Prepare selected ROS inspection faults (development)',expanded=False):
-        # Read existing native geometry, never invent missing panel polygons.
+        st.caption('Source asset is 6+2 arrays: Gazebo R2C3/R2C4 use native R1C5/R1C6. Physical source polygons are unchanged.')
+        # Read explicitly mapped existing geometry; no invented polygons.
         native=ns['cached_native_thermal_master'](loc,ns['solar_render_cache_signature'](loc))
         if native is None:st.error('Native geometry unavailable');return
         supported=[f'R{r}C{c}' for r in (1,2) for c in range(1,5) if (r,c) in native[1]]
         missing=[f'R{r}C{c}' for r in (1,2) for c in range(1,5) if (r,c) not in native[1]]
         if missing:st.warning('Existing renderer cannot resolve these source targets: '+', '.join(missing))
-        panels=st.multiselect('Source arrays to fault',supported,default=[p for p in ['R1C1','R1C4','R2C2'] if p in supported],key='ros_prepare_panels')
+        panels=st.multiselect('Gazebo panels to fault (explicit source map)',supported,default=[p for p in ['R1C1','R2C3','R2C4'] if p in supported],key='ros_prepare_panels')
         fault=st.selectbox('Simulated fault class',ns['CLOSE_DIAGNOSTIC_FAULT_TYPES'],index=3,key='ros_prepare_class')
         level=st.slider('ROS preparation severity',1,10,7,key='ros_prepare_severity')
         def prepare():
