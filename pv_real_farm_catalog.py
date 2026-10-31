@@ -78,8 +78,11 @@ def real_farm_camera_generate_random(state,image,credible,count,seed,fault_types
     if not pool and count:raise ValueError("No resolved modules for random placement. Use Manual Select to confirm a provisional PV target.")
     selected=choose_targets([dict(m,position=np.float32(m["active_polygon_rgb"]).mean(0).tolist()) for m in pool],int(count),seed,placement)
     proposals=[]
+    # Independent module streams keep relative positions varied and stable even
+    # when target selection order changes. Morphology still uses the experiment seed.
     for module in selected:
-        proposals.extend(real_farm_generate_observations([module],1,int(seed)))
+        module_seed=seed_for(int(seed),module["module_id"],"camera-placement-v3")
+        proposals.extend(real_farm_generate_observations([module],1,module_seed))
     lookup={m["module_id"]:m for m in pool};rng=np.random.default_rng(int(seed));validated=[]
     for proposal in proposals:
         module=lookup[proposal["module_id"]];q=np.float32(module["active_polygon_rgb"])
@@ -99,7 +102,7 @@ def real_farm_camera_generate_random(state,image,credible,count,seed,fault_types
     if len(validated)!=int(count):raise ValueError("Some requested targets lack valid PV support; no batch was replaced")
     real_farm_camera_observation_source(state,image)
     real_farm_camera_remove_random(state)
-    identity=[real_farm_source_identity(image),int(seed),int(count),"controlled-distribution-v2",fault_types,assigned,placement]
+    identity=[real_farm_source_identity(image),int(seed),int(count),"controlled-distribution-v3",fault_types,assigned,placement]
     batch=hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:16]
     for (target,proposal),(fault,level) in zip(validated,assigned):
         observation=real_farm_camera_new_observation(state,image,target,severity=level)
