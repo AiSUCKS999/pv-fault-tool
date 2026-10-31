@@ -34,15 +34,22 @@ def render_export(ns,scene):
     with st.expander('ROS 2 mission export (simulation)',expanded=False):
         st.caption('Generated 2x4 arrays map to eight Gazebo panels. Module IDs remain provenance; no image-to-world calibration is claimed.')
         ids=[f['id'] for f in scene['faults']]
+        if 'ros_mission_fault_ids' in st.session_state:
+            st.session_state['ros_mission_fault_ids']=[i for i in st.session_state['ros_mission_fault_ids'] if i in ids]
         chosen=st.multiselect('Inspection faults',ids,default=ids,key='ros_mission_fault_ids',
             format_func=lambda oid:next(f"{oid} | row {f.get('row')} array {f.get('array')} module {f.get('module')} | {f['fault_type']}" for f in scene['faults'] if f['id']==oid))
         try:
             mission=export_mission(scene,chosen)
             st.download_button('EXPORT ROS MISSION JSON',json.dumps(mission,indent=2),file_name='pv_mission.json',mime='application/json')
-            if st.button('SEND TO LOCAL ROS INBOX (NEXT LAUNCH)'):
-                try:st.success('Saved local mission: '+str(write_local_inbox(mission)))
+            if st.button('Send Inspection Mission'):
+                try:
+                    attach_textures(scene,mission)
+                    write_local_inbox(mission)
+                    st.session_state['ros_sent_mission']=mission
+                    st.success('Mission queued for the foreground ROS terminal')
                 except (OSError,ValueError) as exc:st.error(str(exc))
         except ValueError as exc:st.info(str(exc))
+        render_results(st)
 
 
 def render_prepare(ns,mode):
@@ -88,6 +95,62 @@ def write_local_inbox(mission):
         raise ValueError('Local inbox is only available inside PV_Gazebo_WS')
     path=root/'outputs/local_ros_inbox.json'
     temp=path.with_suffix('.tmp')
-    temp.write_text(json.dumps(mission,indent=2),encoding='utf-8')
+    raw=json.dumps(mission,indent=2).encode('utf-8')
+    temp.write_bytes(raw)
+    saved=root/'outputs/sent_missions'/str(mission['mission_id']+'.json')
+    saved.parent.mkdir(parents=True,exist_ok=True);saved.write_bytes(raw)
     temp.replace(path)
     return path
+
+
+def attach_textures(scene,mission):
+    """Rectify actual rendered module pixels; never make up fault imagery."""
+    from pathlib import Path
+    import cv2,numpy as np
+    root=Path(__file__).resolve().parent.parent
+    folder=root/'outputs/mission_media'/mission['mission_id'];folder.mkdir(parents=True,exist_ok=True)
+    rgb=np.array(scene['far']['rgb'])
+    for target in mission['targets']:
+        for fault in target['source_faults']:
+            name=f"{target['panel_id']}-M{fault['module']}.png"
+            quad=np.float32(fault['polygon_rgb'])
+            dest=np.float32([[0,0],[255,0],[255,399],[0,399]])
+            # A texture is a rectified source projection, not new image detail.
+            patch=cv2.warpPerspective(rgb,cv2.getPerspectiveTransform(quad,dest),(256,400))
+            cv2.imwrite(str(folder/name),cv2.cvtColor(patch,cv2.COLOR_RGB2BGR))
+            fault['gazebo_texture']='mission_media/'+mission['mission_id']+'/'+name
+
+
+def read_results(mission):
+    from pathlib import Path
+    root=Path(__file__).resolve().parent.parent
+    path=root/'outputs/mission_status.json'
+    if not path.exists():return None
+    result=json.loads(path.read_text(encoding='utf-8'))
+    if result.get('mission_id')!=mission['mission_id']:return None
+    # Only show results associated with the exact sent mission contents.
+    snapshot=root/'outputs/sent_missions'/(mission['mission_id']+'.json')
+    if not snapshot.exists():snapshot=root/'outputs/executing_mission.json'
+    if not snapshot.exists():return None
+    raw=snapshot.read_bytes()
+    if json.loads(raw)!=mission or result.get('mission_sha256')!=hashlib.sha256(raw).hexdigest():return None
+    return result
+
+
+def render_results(st):
+    mission=st.session_state.get('ros_sent_mission')
+    if not mission:return
+    st.button('Refresh Inspection Results')
+    try:result=read_results(mission)
+    except (OSError,ValueError):result=None
+    if result is None:st.info('Waiting for this mission in the foreground ROS terminal');return
+    st.write(result['status'])
+    st.write('Visited: '+', '.join(result.get('visited',[])))
+    st.metric('Actual Gazebo travel',f"{result.get('gazebo_pose_travel_m',0):.2f} m")
+    from pathlib import Path
+    root=(Path(__file__).resolve().parent.parent/'outputs').resolve()
+    for item in result.get('inspection_images',[]):
+        if item.get('path'):
+            path=(root/item['path']).resolve()
+            if root in path.parents and path.is_file():st.image(str(path),caption=item['panel']+' · simulated Gazebo camera')
+    st.download_button('Download Inspection Results',json.dumps(result,indent=2),file_name=mission['mission_id']+'-results.json')
