@@ -902,6 +902,8 @@ def real_farm_camera_workflow(state,image,section="Thermal"):
     # Mode selector must not silently select a legacy sensor or module field.
     st.session_state["thermal_renderer_mode"]="Current Thermal"
     from pv_real_farm_rgb_view import annotated_rgb_fault_preview, view_bounds
+    from pv_scene_frames import presentation_panel
+    presentation_panel(globals(), "Real Farm")
     source=real_farm_source_identity(image)
     if st.session_state.get("real_farm_camera_ui_source")!=source:
         # A new upload starts at the full Far scene, with no hidden healthy/RGB

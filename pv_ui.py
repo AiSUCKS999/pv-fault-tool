@@ -4386,6 +4386,8 @@ def main():
             st.markdown("</div></div>", unsafe_allow_html=True)
 
     elif section == "Faults":
+        from pv_scene_frames import presentation_panel
+        presentation_panel(globals(), "Generated")
         rgb_scene = get_rgb_scene()
         scene = get_scene()
         regions = get_regions()
