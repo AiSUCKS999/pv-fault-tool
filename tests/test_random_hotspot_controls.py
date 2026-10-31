@@ -69,8 +69,8 @@ def test_random_generation_regeneration_and_removal_preserve_manual_hotspots(app
     layers = app.session_state["real_farm_camera_layers"][1]
     assert "master_scalar" in layers
     assert layers["acquisition_audit"]["post_sensor_peak"] > 0
-    assert any("With synthetic fault" in caption for group in app.get("image") for caption in group.captions)
-    assert any("RGB surface effects" in caption for group in app.get("image") for caption in group.captions)
+    assert any("With synthetic fault" in caption for group in app.get("imgs") for caption in [im.caption for im in group.proto.imgs])
+    assert any("RGB surface effects" in caption for group in app.get("imgs") for caption in [im.caption for im in group.proto.imgs])
     assert {button.label for button in app.get("download_button")} >= {"Download RGB faults", "Download thermal faults"}
     acquired = next(value for key, value in app.session_state["real_farm_camera_acquisitions"].items() if key[3] == "far")
     healthy_image = ns["real_farm_camera_acquisition"](layers, [], "far")

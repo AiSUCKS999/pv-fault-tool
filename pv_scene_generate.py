@@ -25,7 +25,8 @@ def assignment(count, classes, seed, policy="Random", counts=None, severity="Fix
     else:raise ValueError("Unsupported class distribution")
     low,high=map(int,limits)
     if not 1<=int(level)<=10 or not 1<=low<=high<=10:raise ValueError("Severity must be 1–10")
-    values=[int(level)]*count if severity=="Fixed" else rng.integers(low,high+1,count).tolist()
+    severity_rng=np.random.default_rng(int(seed)^0x534556)
+    values=[int(level)]*count if severity=="Fixed" else severity_rng.integers(low,high+1,count).tolist()
     return list(zip(codes,values))
 
 

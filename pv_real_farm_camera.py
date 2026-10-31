@@ -205,7 +205,7 @@ def real_farm_camera_pick_target(state,image,selected):
     from pv_geometry_component import quad_editor
     refresh=False
     with st.expander("Select / adjust PV polygon on RGB",expanded=True):
-        st.caption("Click an outlined proposal or another PV surface. Adjust its four corners if needed, save the outline, then confirm to create a hotspot. Simulation only; not training verification.")
+        pass  # Technical context: APP_DIAGNOSTICS.md
         identity=real_farm_source_identity(image)
         cache=state["camera_simulation"]
         pending=cache.get("pending")

@@ -176,7 +176,7 @@ def test_cold_rgb_random_cracking_generates_physical_rgb_and_paired_thermal(scen
     assert app.radio(key="real_farm_camera_display").value == "RGB + Thermal"
     assert {button.label for button in app.get("download_button")} >= {
         "Download RGB faults", "Download thermal faults"}
-    captions = [caption for group in app.get("image") for caption in group.captions]
+    captions = [caption for group in app.get("imgs") for caption in [im.caption for im in group.proto.imgs]]
     assert any("RGB surface effects" in caption for caption in captions)
     assert any("With synthetic fault" in caption for caption in captions)
     layers = app.session_state["real_farm_camera_layers"][1]

@@ -94,6 +94,18 @@ def _restore_backup(ns,raw):
     _error(ns,lambda:SceneJournal(ns["st"].session_state).restore(raw))
 
 
+def _confirm_current(ns,mode,stage):
+    def action():
+        journal=SceneJournal(ns["st"].session_state);exp=journal.active(mode)
+        value=ns["st"].session_state.get("scene_display_"+mode) or {}
+        revision=exp["revisions"][-1]
+        if (stage=="CLOSE" and value.get("signature")!=revision["signature"]) or current_signature(ns,mode)!=revision["signature"]:raise ValueError("Display changed; wait for the current scene before confirming")
+        index=int(value.get("index",0));faults=revision["faults"]
+        if stage=="CLOSE" and (value.get("distance")!="CLOSE" or not 0<=index<len(faults)):raise ValueError("Select a current Close target")
+        journal.confirm(exp,stage,faults[index]["id"] if stage=="CLOSE" else None)
+    _error(ns,action)
+
+
 def render_scene_workflow(ns,mode,section="DATA COLLECTION"):
     st=ns["st"];journal=SceneJournal(st.session_state)
     if section in {"Faults","DATA COLLECTION"}:setup(ns,mode)
@@ -131,9 +143,9 @@ def render_scene_workflow(ns,mode,section="DATA COLLECTION"):
             if exp:
                 st.caption(f"{exp['experiment_id']} · {exp['status']} · revision {len(exp['revisions'])}")
                 columns=st.columns(3)
-                columns[0].button("CONFIRM FAR RECORDED",on_click=journal.confirm,args=(exp,"FAR"),key="scene_far_confirm_"+mode)
+                columns[0].button("CONFIRM FAR RECORDED",on_click=_confirm_current,args=(ns,mode,"FAR"),key="scene_far_confirm_"+mode)
                 columns[1].button("CONFIRM CLOSE RECORDED",disabled=not selected or view.get("distance")!="CLOSE",
-                    on_click=journal.confirm,args=(exp,"CLOSE",selected["id"] if selected else None),key="scene_close_confirm_"+mode)
+                    on_click=_confirm_current,args=(ns,mode,"CLOSE"),key="scene_close_confirm_"+mode)
                 columns[2].button("SAVE EXPERIMENT",on_click=lambda:_error(ns,lambda:journal.finish(exp)),key="scene_finish_"+mode,type="primary")
                 completed={e.get("fault_id") for e in exp["events"] if e["action"]=="operator_confirmed_drone_capture" and e.get("stage")=="CLOSE" and e.get("revision")==len(exp["revisions"])}
                 st.progress(len(completed)/len(faults) if faults else 1,text=f"Close recordings confirmed: {len(completed)}/{len(faults)}")
@@ -148,6 +160,9 @@ def render_scene_workflow(ns,mode,section="DATA COLLECTION"):
             st.download_button("DOWNLOAD SESSION ZIP / BACKUP",bundle,file_name="pv_scene_session.zip",mime="application/zip",key="scene_bundle_"+mode)
         except ValueError as exc:st.error(str(exc))
     st.caption("Session progress is temporary. Download the ZIP to keep it. Recording buttons confirm external drone captures.")
+    with st.expander("Help / Diagnostics",expanded=False):
+        from pathlib import Path
+        st.markdown(Path(__file__).with_name("APP_DIAGNOSTICS.md").read_text(encoding="utf-8"))
     with st.expander("Restore session",expanded=False):
         upload=st.file_uploader("Experiment ZIP",type=["zip"],key="scene_restore_file_"+mode)
         if upload:st.button("RESTORE PROGRESS",on_click=_restore_backup,args=(ns,upload.getvalue()),key="scene_restore_"+mode)
