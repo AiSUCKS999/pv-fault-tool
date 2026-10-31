@@ -167,7 +167,7 @@ def render_scene_workflow(ns,mode,section="DATA COLLECTION"):
     if exp or journal.data["experiments"]:
         try:
             bundle=journal.bundle()
-            st.download_button("DOWNLOAD SESSION ZIP / BACKUP",bundle,file_name="pv_scene_session.zip",mime="application/zip",key="scene_bundle_"+mode)
+            st.download_button("DOWNLOAD SESSION ZIP / BACKUP",bundle,file_name="pv_scene_session.zip",mime="application/zip",key="scene_bundle_"+mode,on_click="ignore")
         except ValueError as exc:st.error(str(exc))
     with st.expander("Advanced Options · Diagnostics",expanded=False):
         st.caption("Session progress is temporary. Download a backup to keep it.")
