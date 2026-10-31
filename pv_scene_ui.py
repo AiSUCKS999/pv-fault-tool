@@ -127,6 +127,8 @@ def render_scene_workflow(ns,mode,section="DATA COLLECTION"):
         else:
             show_presentation(ns,saved[1],key=mode)
             frames=acquire_scene(ns,mode)
+            if frames["source"].get("missing_logical_arrays"):
+                st.warning("Source topology is irregular; faults use only source-supported modules.")
             from pv_ros_mission import render_export
             render_export(ns,frames)
             view=st.session_state.get("pv_scene_view_"+mode,{})

@@ -103,6 +103,9 @@ def acquire_scene(ns, mode):
         source={"identity":loc,"size":list(original.size),"rows":ns["custom_row_count"](loc),
                 "columns":ns["custom_panels_per_row"](loc),"occupied_arrays":len(regions),
                 "source_pixel_sha256":hashlib.sha256(original.tobytes()).hexdigest()}
+        expected={(r,c) for r in range(1,source["rows"]+1) for c in range(1,source["columns"]+1)}
+        source["missing_logical_arrays"]=[list(k) for k in sorted(expected-set(arrays))]
+        source["extra_native_arrays"]=[list(k) for k in sorted(set(arrays)-expected)]
         for fault in faults:
             a,b,c,d=fault["module_bbox"];pad=max(12,int(max(c-a,d-b)*.3))
             bounds=(max(0,int(a)-pad),max(0,int(b)-pad),min(original.width,int(c)+pad+1),min(original.height,int(d)+pad+1))
