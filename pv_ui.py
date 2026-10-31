@@ -2883,10 +2883,7 @@ def legacy_main():
 
         with preview_col:
             st.subheader("Close Panel Workflow")
-            st.caption(
-                "Use this tab to choose the row, panel, module, and target cell. "
-                "Use Cell Faults to assign faults across the selected panel."
-            )
+            pass  # Technical context: APP_DIAGNOSTICS.md
             st.metric("Selected row", selected_row["label"])
             st.metric("Selected panel", selected_cell.get("panel_number"))
             st.metric("Selected cell", selected_cell["id"])
@@ -3188,7 +3185,7 @@ def legacy_main():
         if big_screen_thermal is not None:
             render_classifier_check(big_screen_thermal)
         else:
-            st.caption("Switch Camera view to Thermal to run the classifier check without generating an extra thermal scene in RGB mode.")
+            pass  # Technical context: APP_DIAGNOSTICS.md
 
         st.subheader("Fault Table")
         st.table(fault_table_rows(display_records))
@@ -4317,7 +4314,15 @@ def main():
             cell_active=1,
         ))
 
-    top_summary_bar(location, view, metadata, metadata["fault_count"])
+    if section in {"Faults", "Review", "Export"} and not experimental_thermal:
+        from pv_scene_ui import render_scene_workflow
+        individual = st.checkbox("Individual fault / legacy controls", value=False, key="scene_individual_generated")
+        if not individual:
+            render_scene_workflow(globals(), "Generated", section)
+            return
+
+    if section != "DATA COLLECTION":
+        top_summary_bar(location, view, metadata, metadata["fault_count"])
     if section == "Faults":
         from pv_data_collection import active_case_banner
         active_case_banner("Generated")
@@ -4386,6 +4391,8 @@ def main():
             st.markdown("</div></div>", unsafe_allow_html=True)
 
     elif section == "Faults":
+        from pv_scene_frames import presentation_panel
+        presentation_panel(globals(), "Generated")
         rgb_scene = get_rgb_scene()
         scene = get_scene()
         regions = get_regions()
@@ -4646,7 +4653,7 @@ def main():
                     if not experimental_thermal:
                         generated_controls(globals(), location, selected_row_id, selected_cell_id)
                     st.markdown('<div class="pv-card"><div class="pv-section-title">Far View Thermal Observations</div>', unsafe_allow_html=True)
-                    st.caption("Optional thermal-only observations. Hotspots do not imply visible RGB scorching. Use Visible Far conditions above for paired surface appearance and thermal response.")
+                    pass  # Technical context: APP_DIAGNOSTICS.md
                     far_fault_types = [
                         fault_type for fault_type in globals().get(
                             "FAR_SCOUT_FAULT_TYPES",
@@ -4947,7 +4954,7 @@ def main():
 
     elif section == "Settings":
         st.markdown('<div class="pv-card"><div class="pv-section-title">Settings</div>', unsafe_allow_html=True)
-        st.caption("Generation settings are intentionally lightweight in the UI. Blender generation, topology, and safe placement are controlled by the renderer scripts.")
+        pass  # Technical context: APP_DIAGNOSTICS.md
         st.write(f"Custom layout: `{custom_layout_enabled()}`")
         st.write(f"Rows: `{custom_row_count(location['id'])}`")
         st.write(f"Nominal arrays per row: `{custom_panels_per_row(location['id'])}`")

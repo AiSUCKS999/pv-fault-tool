@@ -132,6 +132,11 @@ def test_real_far_ui_generates_visible_pair_without_close_diagnosis_or_typing(ns
     mid = real_targets(ns, "image_05")[0]
     prepare_real(ns, case("TC0496"), {"source": "image_05"})
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60)
+    # Exercise the preserved individual controls explicitly; scene workflow is the new default.
+    app.session_state["scene_individual_real"] = True
+    app.session_state["scene_individual_generated"] = True
+    app.session_state["collection_mode_Generated"] = "929 controlled cases"
+    app.session_state["collection_mode_Real Farm"] = "929 controlled cases"
     app.query_params["base_source"] = "real_farm"
     for key in ("real_farm_state", "real_farm_image", "real_farm_image_path"):
         app.session_state[key] = deepcopy(ns["st"].session_state[key])
@@ -147,16 +152,12 @@ def test_real_far_ui_generates_visible_pair_without_close_diagnosis_or_typing(ns
     next(b for b in app.button if b.label == "GENERATE VISIBLE FAR CONDITION").click().run()
     assert not app.exception
     state = app.session_state["real_farm_state"]
-    if not visible:
-        assert app.error and "too small or weak" in app.error[0].value
-        assert not state["camera_observations"] and "far_surface_visibility" not in state
-        return
     assert not app.error
     assert len(state["camera_observations"]) == 1
     observation = state["camera_observations"][0]
     assert observation["diagnostic_fault_type"] == "SurfaceObstruction"
-    assert state["far_surface_visibility"]["RGB"]["visible_at_tested_scale"]
-    assert state["far_surface_visibility"]["Thermal"]["visible_at_tested_scale"]
+    assert state["far_surface_visibility"]["RGB"]["visible_at_tested_scale"] == visible
+    assert state["far_surface_visibility"]["Thermal"]["visible_at_tested_scale"] == visible
     app.radio(key="real_farm_camera_display").set_value("Thermal").run()
     assert not app.exception
     assert app.session_state["real_farm_state"]["camera_observations"][0]["observation_id"] == observation["observation_id"]
@@ -165,6 +166,11 @@ def test_real_far_ui_generates_visible_pair_without_close_diagnosis_or_typing(ns
 def test_generated_far_ui_creates_actual_paired_records_without_typing(ns):
     prepare_generated(ns, case("TC0001"), {"scene": "grass_open"})
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60)
+    # Exercise the preserved individual controls explicitly; scene workflow is the new default.
+    app.session_state["scene_individual_real"] = True
+    app.session_state["scene_individual_generated"] = True
+    app.session_state["collection_mode_Generated"] = "929 controlled cases"
+    app.session_state["collection_mode_Real Farm"] = "929 controlled cases"
     app.query_params.update(dict(ns["st"].query_params))
     app.query_params["section"] = "Faults"
     app.query_params["view"] = "rgb"

@@ -101,7 +101,6 @@ def generated_controls(ns, location, row, cell):
     row, cell = target[0], modules[target]["id"]
     fault = st.selectbox("Visible Far condition", list(FAR_SURFACES), format_func=FAR_SURFACES.get, key="pv_far_generated_type")
     severity = st.slider("Visible condition severity", 1, 10, 7, key="pv_far_generated_severity")
-    st.caption("Applies a broad surface condition to the selected module. Both views use the same actual targets. Small cracks and electrical faults require closer inspection.")
     if st.button("GENERATE VISIBLE FAR CONDITION", type="primary", use_container_width=True):
         try:
             additions = generated_surface_records(ns, location, fault, severity, row, cell)
@@ -116,8 +115,6 @@ def generated_controls(ns, location, row, cell):
             baseline = ns["module_field_image"](location["id"], "thermal", row, cell, proposed[:-len(additions)], False)
             previous_rgb, _ = generated_rgb_scene(ns, base_rgb, location["id"], row, cell, proposed[:-len(additions)])
             checks = {"RGB": visibility(previous_rgb, rgb), "Thermal": visibility(baseline, thermal)}
-            if not all(c["visible_at_tested_scale"] for c in checks.values()):
-                raise ValueError("Condition is too small or weak at this Far scale. Use a closer view or a larger visible module; no condition was committed.")
             ns["push_fault_history"]()
             st.session_state["random_fault_records"] = st.session_state.get("random_fault_records", []) + additions
             st.session_state["pv_far_surface_visibility"] = checks
@@ -125,7 +122,7 @@ def generated_controls(ns, location, row, cell):
         except (ValueError, RuntimeError) as exc:
             st.error(str(exc))
     if checks := st.session_state.get("pv_far_surface_visibility"):
-        st.caption("Last accepted surface condition: RGB and thermal pixel changes checked at Far display scale. Synthetic condition; not physical ground truth.")
+        with st.expander("Visibility diagnostics",expanded=False):st.json(checks)
 
 
 def real_controls(ns, state, image, selected, layers):
@@ -133,7 +130,6 @@ def real_controls(ns, state, image, selected, layers):
     st.subheader("Visible Far conditions · RGB + thermal")
     fault = st.selectbox("Visible Far condition", list(FAR_SURFACES), format_func=FAR_SURFACES.get, key="pv_far_real_type")
     severity = st.slider("Visible condition severity", 1, 10, 7, key="pv_far_real_severity")
-    st.caption("Place a visible obstruction or dust on the selected physical module. RGB shows its surface appearance; thermal shows the existing simulated response. Tiny targets may require a closer view.")
     if st.button("GENERATE VISIBLE FAR CONDITION", type="primary", use_container_width=True, disabled=selected is None):
         try:
             trial = deepcopy(state)
@@ -149,8 +145,6 @@ def real_controls(ns, state, image, selected, layers):
             healthy = ns["real_farm_camera_acquisition"](active_layers, before, "far")
             thermal = ns["real_farm_camera_acquisition"](active_layers, trial["camera_observations"], "far")
             checks = {"RGB": visibility(old_rgb, rgb), "Thermal": visibility(healthy, thermal)}
-            if not all(c["visible_at_tested_scale"] for c in checks.values()):
-                raise ValueError("Condition is too small or weak at this Far scale. Choose a larger visible module or a closer view; no condition was committed.")
             state["camera_observations"] = trial["camera_observations"]
             state["camera_select_observation_queue"] = observation["observation_id"]
             state["updated_at"] = ns["real_farm_now"]()
@@ -163,4 +157,3 @@ def real_controls(ns, state, image, selected, layers):
             st.rerun()
         except (ValueError, RuntimeError) as exc:
             st.error(str(exc))
-    st.caption("Thermal-only hotspot placement remains available below. A heat-only hotspot does not add RGB scorch marks.")

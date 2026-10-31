@@ -167,6 +167,11 @@ def test_source_change_is_not_silently_paired_and_original_state_is_recoverable(
 
 def application(mode="Generated"):
     app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=35)
+    # Exercise the preserved individual controls explicitly; scene workflow is the new default.
+    app.session_state["scene_individual_real"] = True
+    app.session_state["scene_individual_generated"] = True
+    app.session_state["collection_mode_Generated"] = "929 controlled cases"
+    app.session_state["collection_mode_Real Farm"] = "929 controlled cases"
     if mode == "Generated": app.query_params["section"] = "DATA COLLECTION"
     else:
         app.query_params["base_source"] = "real_farm"
