@@ -89,10 +89,10 @@ function render() {
   document.querySelectorAll('[data-mode]').forEach(e=>e.setAttribute('aria-pressed',!calibrating && e.dataset.mode===state.mode));
   document.querySelectorAll('[data-distance]').forEach(e=>e.setAttribute('aria-pressed',!calibrating && e.dataset.distance===state.distance));
   $('boxes').setAttribute('aria-pressed',state.boxes && !state.clean && !calibrating);$('boxes').disabled=false;$('fit').value=state.fit;
-  $('zoom').value=state.zoom || 1;$('calibration').value=state.calibration || 'off';$('clean').setAttribute('aria-pressed',!!state.clean);
+  $('zoom').value=state.zoom || 1;$('calibration').value=state.calibration || 'off';$('clean')?.setAttribute('aria-pressed',!!state.clean);
   $('calibration-status').hidden=!calibrating;
   $('calibration-status').textContent=calibrating?'LED calibration · '+({gray:'Gray',detail:'PV Detail',fault:'Fixed Fault'}[state.calibration] || state.calibration):'';
-  $('status').textContent=`${payload.identity} · ${calibrating?'CALIBRATION':state.distance} · ${f.width} × ${f.height} source pixels · ${fault()?.id || 'Healthy'} · ${state.fit==='fit'?'FIT: whole image, letterboxing':'FILL: edges cropped'}${payload.limitation?' · '+payload.limitation:''}`;
+  if($('status'))$('status').textContent=`${payload.identity} · ${calibrating?'CALIBRATION':state.distance} · ${f.width} × ${f.height} source pixels · ${fault()?.id || 'Healthy'} · ${state.fit==='fit'?'FIT: whole image, letterboxing':'FILL: edges cropped'}${payload.limitation?' · '+payload.limitation:''}`;
   geometry();
 }
 function send() { channel?.postMessage({type:'view',state}); if(popup && !popup.closed) popup.postMessage({type:'pv-view',state},'*'); }
@@ -105,14 +105,14 @@ function changed() {render();send();operatorState();}
 function step(direction) {normalView(()=>{const n=(payload.faults||[]).length;if(n)state.index=(state.index+direction+n)%n;});}
 async function fullscreen() {
   try {if(document.fullscreenElement) await document.exitFullscreen();else await screen.requestFullscreen();}
-  catch(error){notice('Fullscreen unavailable. Use Open Display in Advanced Options.');}
+  catch(error){notice('Fullscreen unavailable. Use the browser fullscreen command.');}
 }
 document.querySelectorAll('[data-mode]').forEach(e=>e.onclick=()=>normalView(()=>{state.mode=e.dataset.mode;}));
 document.querySelectorAll('[data-distance]').forEach(e=>e.onclick=()=>normalView(()=>{state.distance=e.dataset.distance;}));
 $('fullscreen').onclick=fullscreen;$('previous').onclick=()=>step(-1);$('next').onclick=()=>step(1);
 $('fit').onchange=e=>{state.fit=e.target.value;changed();};$('boxes').onclick=toggleBoxes;
 $('zoom').oninput=e=>{state.zoom=Number(e.target.value);changed();};
-$('clean').onclick=()=>normalView(()=>{state.clean=!state.clean;});
+if($('clean'))$('clean').onclick=()=>normalView(()=>{state.clean=!state.clean;});
 $('calibration').onchange=e=>{
   if(e.target.value==='fault') {
     if(!fault()){e.target.value=state.calibration || 'off';notice('Generate a fault before using this pattern');return;}
@@ -121,7 +121,7 @@ $('calibration').onchange=e=>{
   if(e.target.value==='off') exitCalibration();else state.calibration=e.target.value;
   notice('');changed();
 };
-$('open').onclick=()=>{
+if($('open'))$('open').onclick=()=>{
   popup=window.open('',CHANNEL,'popup,width=1280,height=720');
   if(!popup){notice('Allow popups for the separate display');return;}
   const copy=document.documentElement.outerHTML.replace('const CONTROLLER=true','const CONTROLLER=false');

@@ -2,8 +2,11 @@
 # The sections are executed in one shared namespace to preserve the old script behavior
 # while making each part small enough to edit in VS Code.
 from pathlib import Path
+import sys
 
 _TOOL_DIR = Path(__file__).resolve().parent
+if str(_TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOL_DIR))
 _SECTION_FILES = [
     "pv_faults.py",
     "pv_patch_bank.py",
@@ -24,5 +27,13 @@ for _section in _SECTION_FILES:
     _path = _TOOL_DIR / _section
     exec(compile(_path.read_text(encoding="utf-8-sig"), str(_path), "exec"), globals())
 
+def public_main():
+    st.set_page_config(page_title="PV Fault Tool", layout="wide")
+    ui_css()
+    app_state_defaults()
+    from pv_public_ui import render_public_app
+    render_public_app(globals())
+
+
 if __name__ == "__main__":
-    main()
+    public_main()

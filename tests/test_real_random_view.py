@@ -29,7 +29,7 @@ def test_random_generation_switches_to_far_and_preserves_manual_observation(appl
     saved = ns["st"].session_state
     manual = deepcopy(saved["real_farm_state"]["camera_observations"][0])
     geometry = deepcopy(saved["real_farm_state"]["modules"])
-    app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=35)
+    app = AppTest.from_file(str(ROOT / 'tests/legacy_ui_fixture.py'), default_timeout=35)
     # Exercise the preserved individual controls explicitly; scene workflow is the new default.
     app.session_state["scene_individual_real"] = True
     app.session_state["scene_individual_generated"] = True

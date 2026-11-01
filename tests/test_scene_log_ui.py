@@ -58,7 +58,7 @@ def test_scene_backup_restore_export_and_failed_encode(sample,monkeypatch):
 
 
 def test_no_typing_generated_collection_and_current_review_export():
-    app=AppTest.from_file(str(ROOT/"app.py"),default_timeout=60)
+    app=AppTest.from_file(str(ROOT / 'tests/legacy_ui_fixture.py'),default_timeout=60)
     app.query_params.update(location="grass_open",custom_layout="1",row_count="1",panels_per_row="1",section="DATA COLLECTION")
     app.run();assert not app.exception
     assert app.radio(key="collection_mode_Generated").value=="Scene experiments"
@@ -91,7 +91,7 @@ def test_real_review_export_read_camera_collection():
     assert len(acquired["faults"])==2
     state=ns["st"].session_state["real_farm_state"]
     state["observations"]=[]
-    app=AppTest.from_file(str(ROOT/"app.py"),default_timeout=60)
+    app=AppTest.from_file(str(ROOT / 'tests/legacy_ui_fixture.py'),default_timeout=60)
     app.query_params["base_source"]="real_farm"
     for key in ("real_farm_state","real_farm_image","real_farm_image_path"):
         app.session_state[key]=deepcopy(ns["st"].session_state[key])
