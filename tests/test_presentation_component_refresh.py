@@ -13,4 +13,7 @@ def test_component_refreshes_changed_html_only():
             update(first);display=page.frame_locator('#display');display.locator('#version').click()
             update(first);assert display.locator('#version').evaluate('()=>clicks')==1
             update('<button id="version">B</button>');display.get_by_role('button',name='B',exact=True).wait_for()
+            page.evaluate("()=>window.addEventListener('message',e=>{if(e.data.type==='streamlit:setComponentValue')window.lastValue=e.data.value})")
+            display.locator('#version').evaluate("()=>parent.postMessage({type:'pv-operator-state',signature:'source-acquisition',state:{calibration:'off'}},'*')")
+            page.wait_for_function("window.lastValue?.signature==='source-acquisition'")
         finally:browser.close()

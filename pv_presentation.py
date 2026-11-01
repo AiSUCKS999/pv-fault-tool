@@ -51,7 +51,8 @@ def show_presentation(ns, payload, key="scene"):
     import streamlit.components.v1 as components
     viewer=components.declare_component("pv_scene_display",path=str(Path(__file__).with_name("pv_presentation_component")))
     value=viewer(html=presentation_html(payload, channel="pv-display-" + key),
-        signature=payload["revision"],key="scene_display_"+key,default=None)
+        # Refresh already-open viewers too; acquisition/event signatures remain unchanged.
+        signature=payload["revision"]+":normal-controls-v2",key="scene_display_"+key,default=None)
     if isinstance(value,dict) and value.get("signature")==payload["revision"]:
         ns["st"].session_state["pv_scene_view_"+key]=value
         from pv_scene_log import SceneJournal

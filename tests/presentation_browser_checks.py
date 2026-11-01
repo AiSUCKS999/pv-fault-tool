@@ -18,9 +18,8 @@ def exercise_normal_controls(view):
         for button in buttons:
             # Establish view-only preconditions in one notification. The calibration
             # selector and every exit button below are real browser interactions.
-            base.evaluate("()=>normalView(()=>{state.distance='FAR';state.mode='rgb';})")
+            base.evaluate("()=>{exitCalibration();state.distance='FAR';state.mode='rgb';state.fit='fill';state.zoom=2;}")
             view.locator('#calibration').select_option(pattern)
-            base.evaluate("()=>{state.fit='fill';state.zoom=2;changed();}")
             assert view.locator('[data-distance][aria-pressed=true]').count()==0
             assert view.locator('#calibration-status').is_visible()
             previous=base.evaluate('()=>({index:state.index,boxes:state.boxes})')
