@@ -16,12 +16,12 @@ def presentation_html(payload, *, controller=True, channel="pv-presentation"):
 body{display:flex;flex-direction:column}#controls{flex:none;padding:8px;background:#0c1520}
 #toolbar,#advanced-content{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 details{margin-top:6px}summary{cursor:pointer;padding:6px;color:#bdcbd9}#advanced-content{padding:8px 0}
-#notice{padding:4px 8px;color:#ffd28a}
+#calibration-status{padding:6px 8px;color:#ffd28a}#notice{padding:4px 8px;color:#ffd28a}
 button,select{font:inherit;color:#eee;background:#233446;border:1px solid #536579;border-radius:5px;padding:9px;cursor:pointer}
 button[aria-pressed=true]{background:#17677b}#status{padding:4px 8px;color:#bbc9d5;font-size:12px}
 #screen{position:relative;width:100%;flex:1;min-height:0;overflow:hidden;background:#000;outline:none}
 #screen:fullscreen{width:100vw;height:100vh;cursor:none}body.presentation #screen{position:fixed;inset:0;width:100vw;height:100vh}
-body.presentation #controls,body.presentation #status{display:none}
+body.presentation #controls,body.presentation #status,body.presentation #calibration-status{display:none}
 #gray{display:none;position:absolute;inset:0;background:rgb(128,128,128)}
 #plane{position:absolute;overflow:hidden}#plane img{position:absolute;width:100%;height:100%;inset:0}
 #compare{clip-path:inset(0 50% 0 0)}#labels{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
@@ -36,9 +36,9 @@ body.presentation #controls,body.presentation #status{display:none}
 <button id="open">OPEN DISPLAY</button><button data-mode="compare">COMPARE</button>
 <select id="fit" aria-label="Display scaling"><option value="fit">FIT · letterbox</option><option value="fill">FILL · crop edges</option></select>
 <button id="clean">CLEAN FILMING</button>
-<select id="calibration" aria-label="LED Calibration Mode"><option value="off">LED calibration: off</option><option value="gray">Gray</option><option value="detail">PV detail (original RGB)</option><option value="fault">Fixed actual fault</option></select>
+
 <label>Zoom <input id="zoom" aria-label="Presentation zoom" type="range" min="1" max="3" step="0.05" value="1"></label>
-</div><div id="status" role="status"></div></details></div><div id="notice" role="alert" hidden></div>
+</div><div id="status" role="status"></div></details><details id="calibration-options"><summary>LED Calibration (optional)</summary><select id="calibration" aria-label="LED Calibration Mode"><option value="off">LED calibration: off</option><option value="gray">Gray</option><option value="detail">PV detail (original RGB)</option><option value="fault">Fixed actual fault</option></select></details></div><div id="calibration-status" role="status" hidden></div><div id="notice" role="alert" hidden></div>
 <div id="screen" tabindex="0"><div id="gray"></div><div id="plane"><img id="base" draggable="false"><img id="compare" draggable="false"><svg id="labels"></svg></div></div>
 <script>const INITIAL=""" + data + ";const CONTROLLER=" + json.dumps(controller) + ";const CHANNEL=" + json.dumps(channel) + ";\n" + script + "</script></body></html>"
 

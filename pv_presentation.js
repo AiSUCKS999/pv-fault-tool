@@ -8,13 +8,27 @@ const screen = $('screen'), plane = $('plane');
 if (!CONTROLLER) document.body.classList.add('presentation');
 function fault() { return (payload.faults || [])[state.index]; }
 function liveFrame() { return state.distance === 'CLOSE' && fault() ? payload.close[fault().id] : payload.far; }
-function frame() {
+// Normal acquisitions never depend on a calibration pattern.
+function frame() { return liveFrame(); }
+function calibrationActive() { return !!state.calibration && state.calibration!=='off'; }
+function displayFrame() {
   if(state.calibration==='fault' && state.fixed) return state.fixed.frame;
   if(state.calibration==='detail') return fault() ? payload.close[fault().id] : payload.far;
-  return liveFrame();
+  return frame();
+}
+function exitCalibration() {
+  if(calibrationActive()) {
+    state.zoom=1;state.fit='fit';state.clean=false;
+  }
+  state.calibration='off';state.fixed=null;
+}
+function normalView(action) { exitCalibration();notice('');action();changed(); }
+function toggleBoxes() {
+  const show=!(state.boxes && !state.clean && !calibrationActive());
+  normalView(()=>{state.boxes=show;if(show)state.clean=false;});
 }
 function geometry() {
-  const f = frame(); if (!f) return;
+  const f = displayFrame(); if (!f) return;
   const w = screen.clientWidth, h = screen.clientHeight;
   const scale = Math[state.fit === 'fill' ? 'max' : 'min'](w/f.width, h/f.height) * (state.zoom || 1);
   Object.assign(plane.style, {width:f.width*scale+'px',height:f.height*scale+'px',left:(w-f.width*scale)/2+'px',top:(h-f.height*scale)/2+'px'});
@@ -53,13 +67,13 @@ function drawBoxes(svg,f) {
     const background=element('rect',{x:lx,y:ly,width:rx-lx,height:by-ly,rx:3/scale,fill:'#07141f','fill-opacity':.94,stroke:'#39e6cb','stroke-width':1,'vector-effect':'non-scaling-stroke'});
     const text=element('text',{x:lx+pad,y:ly+height*.70,'font-size':font});text.textContent=name;
     label.append(background,text);group.append(title,rect,line,label);
-    group.onclick=()=>{state.index=payload.faults.findIndex(x=>x.id===box.id);state.distance='CLOSE';changed();};svg.append(group);
+    group.onclick=()=>normalView(()=>{state.index=payload.faults.findIndex(x=>x.id===box.id);state.distance='CLOSE';});svg.append(group);
   }
 }
 function render() {
   if (state.index >= (payload.faults || []).length) state.index = 0;
-  const f=frame(); if (!f) return;
-  const calibrating=state.calibration && state.calibration!=='off';
+  const f=displayFrame(); if (!f) return;
+  const calibrating=calibrationActive();
   $('gray').style.display=state.calibration==='gray'?'block':'none';
   plane.style.visibility=state.calibration==='gray'?'hidden':'visible';
   screen.style.cursor=(calibrating || state.clean)?'none':'';
@@ -72,37 +86,40 @@ function render() {
   $('compare').style.clipPath=`inset(0 ${100-state.split}% 0 0)`;
   const svg=$('labels'); svg.replaceChildren(); svg.setAttribute('viewBox',`0 0 ${f.width} ${f.height}`);
   if(state.boxes && !state.clean && !calibrating) drawBoxes(svg,f);
-  document.querySelectorAll('[data-mode]').forEach(e=>e.setAttribute('aria-pressed',e.dataset.mode===state.mode));
-  document.querySelectorAll('[data-distance]').forEach(e=>e.setAttribute('aria-pressed',e.dataset.distance===state.distance));
-  $('boxes').setAttribute('aria-pressed',state.boxes && !state.clean && !calibrating);$('boxes').disabled=!!calibrating;$('fit').value=state.fit;
+  document.querySelectorAll('[data-mode]').forEach(e=>e.setAttribute('aria-pressed',!calibrating && e.dataset.mode===state.mode));
+  document.querySelectorAll('[data-distance]').forEach(e=>e.setAttribute('aria-pressed',!calibrating && e.dataset.distance===state.distance));
+  $('boxes').setAttribute('aria-pressed',state.boxes && !state.clean && !calibrating);$('boxes').disabled=false;$('fit').value=state.fit;
   $('zoom').value=state.zoom || 1;$('calibration').value=state.calibration || 'off';$('clean').setAttribute('aria-pressed',!!state.clean);
-  $('status').textContent=`${payload.identity} · ${state.distance} · ${f.width} × ${f.height} source pixels · ${fault()?.id || 'Healthy'} · ${state.fit==='fit'?'FIT: whole image, letterboxing':'FILL: edges cropped'}${payload.limitation?' · '+payload.limitation:''}`;
+  $('calibration-status').hidden=!calibrating;
+  $('calibration-status').textContent=calibrating?'LED calibration · '+({gray:'Gray',detail:'PV Detail',fault:'Fixed Fault'}[state.calibration] || state.calibration):'';
+  $('status').textContent=`${payload.identity} · ${calibrating?'CALIBRATION':state.distance} · ${f.width} × ${f.height} source pixels · ${fault()?.id || 'Healthy'} · ${state.fit==='fit'?'FIT: whole image, letterboxing':'FILL: edges cropped'}${payload.limitation?' · '+payload.limitation:''}`;
   geometry();
 }
 function send() { channel?.postMessage({type:'view',state}); if(popup && !popup.closed) popup.postMessage({type:'pv-view',state},'*'); }
 let lastOperator='';
 function operatorState() {
   const next=JSON.stringify([state.distance,state.mode,state.index,state.boxes,state.fit,state.zoom,state.clean,state.calibration,state.fixed?.id]);
-  if(CONTROLLER && next!==lastOperator){lastOperator=next;parent.postMessage({type:'pv-operator-state',state:{...state,fixed:undefined,calibration_settings:state.calibration!=='off'?{pattern:state.calibration,gray_code:state.calibration==='gray'?128:null,fault_id:state.fixed?.id || null,modality:state.calibration==='detail'?'original':state.fixed?.mode || state.mode,zoom:state.zoom || 1,fit:state.fit,viewport:[screen.clientWidth,screen.clientHeight],source_size:[frame().width,frame().height]}:null},signature:payload.revision},'*');}
+  if(CONTROLLER && next!==lastOperator){lastOperator=next;parent.postMessage({type:'pv-operator-state',state:{...state,fixed:undefined,calibration_settings:state.calibration!=='off'?{pattern:state.calibration,gray_code:state.calibration==='gray'?128:null,fault_id:state.fixed?.id || null,modality:state.calibration==='detail'?'original':state.fixed?.mode || state.mode,zoom:state.zoom || 1,fit:state.fit,viewport:[screen.clientWidth,screen.clientHeight],source_size:[displayFrame().width,displayFrame().height]}:null},signature:payload.revision},'*');}
 }
 function changed() {render();send();operatorState();}
-function step(direction) {const n=(payload.faults||[]).length;if(n)state.index=(state.index+direction+n)%n;changed();}
+function step(direction) {normalView(()=>{const n=(payload.faults||[]).length;if(n)state.index=(state.index+direction+n)%n;});}
 async function fullscreen() {
   try {if(document.fullscreenElement) await document.exitFullscreen();else await screen.requestFullscreen();}
   catch(error){notice('Fullscreen unavailable. Use Open Display in Advanced Options.');}
 }
-document.querySelectorAll('[data-mode]').forEach(e=>e.onclick=()=>{state.mode=e.dataset.mode;changed();});
-document.querySelectorAll('[data-distance]').forEach(e=>e.onclick=()=>{state.distance=e.dataset.distance;changed();});
+document.querySelectorAll('[data-mode]').forEach(e=>e.onclick=()=>normalView(()=>{state.mode=e.dataset.mode;}));
+document.querySelectorAll('[data-distance]').forEach(e=>e.onclick=()=>normalView(()=>{state.distance=e.dataset.distance;}));
 $('fullscreen').onclick=fullscreen;$('previous').onclick=()=>step(-1);$('next').onclick=()=>step(1);
-$('fit').onchange=e=>{state.fit=e.target.value;changed();};$('boxes').onclick=()=>{state.boxes=!(state.boxes && !state.clean);if(state.boxes)state.clean=false;changed();};
+$('fit').onchange=e=>{state.fit=e.target.value;changed();};$('boxes').onclick=toggleBoxes;
 $('zoom').oninput=e=>{state.zoom=Number(e.target.value);changed();};
-$('clean').onclick=()=>{state.clean=!state.clean;changed();};
+$('clean').onclick=()=>normalView(()=>{state.clean=!state.clean;});
 $('calibration').onchange=e=>{
   if(e.target.value==='fault') {
     if(!fault()){e.target.value=state.calibration || 'off';notice('Generate a fault before using this pattern');return;}
     state.fixed={id:fault().id,frame:payload.close[fault().id],mode:state.mode==='compare'?'thermal':state.mode==='original'?'rgb':state.mode};
   }
-  state.calibration=e.target.value;changed();
+  if(e.target.value==='off') exitCalibration();else state.calibration=e.target.value;
+  notice('');changed();
 };
 $('open').onclick=()=>{
   popup=window.open('',CHANNEL,'popup,width=1280,height=720');
@@ -120,9 +137,13 @@ document.addEventListener('keydown',event=>{
   if(key==='enter'){fullscreen();return;}
   if(key==='escape'){if(document.fullscreenElement)document.exitFullscreen();return;}
   if(key==='arrowright'){event.preventDefault();step(1);return;}if(key==='arrowleft'){event.preventDefault();step(-1);return;}
+  if(key==='b'){toggleBoxes();return;}
+  if(!['f','c','r','t','o','v','x'].includes(key))return;
+  if(key!=='x')exitCalibration();
+  notice('');
   if(key==='f')state.distance='FAR';else if(key==='c')state.distance='CLOSE';
   else if(key==='r')state.mode='rgb';else if(key==='t')state.mode='thermal';else if(key==='o')state.mode='original';else if(key==='v')state.mode='compare';
-  else if(key==='b'){if(state.calibration!=='off')return;state.boxes=!(state.boxes && !state.clean);if(state.boxes)state.clean=false;}else if(key==='x')state.fit=state.fit==='fit'?'fill':'fit';else return;changed();
+  else if(key==='x')state.fit=state.fit==='fit'?'fill':'fit';else return;changed();
 });
 screen.addEventListener('pointermove',event=>{if(state.mode==='compare' && (!state.calibration || state.calibration==='off')){state.split=Math.max(0,Math.min(100,(event.clientX-plane.getBoundingClientRect().left)/plane.clientWidth*100));changed();}});
 screen.ondblclick=fullscreen;new ResizeObserver(render).observe(screen);document.addEventListener('fullscreenchange',render);

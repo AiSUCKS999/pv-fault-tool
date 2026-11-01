@@ -28,6 +28,7 @@ def test_calibration_browser_and_clean_filming(tmp_path):
             page.locator('#boxes').click();assert page.locator('[data-fault]').count()==1
             page.locator('#advanced > summary').click()
             page.locator('#clean').click();assert page.locator('[data-fault]').count()==0
+            page.locator('#calibration-options > summary').click()
             page.locator('#calibration').select_option('gray')
             page.locator('#fullscreen').click();page.wait_for_function('document.fullscreenElement!==null')
             assert page.locator('#gray').evaluate('e=>getComputedStyle(e).backgroundColor')=='rgb(128, 128, 128)'
@@ -38,14 +39,18 @@ def test_calibration_browser_and_clean_filming(tmp_path):
             assert page.locator('#base').get_attribute('src')==frame['original']
             page.locator('#calibration').select_option('fault')
             pinned=page.locator('#base').get_attribute('src')
-            page.keyboard.press('t');page.keyboard.press('f')
-            assert page.locator('#base').get_attribute('src')==pinned==frame['rgb']
+            page.locator('#screen').click();page.keyboard.press('t');page.keyboard.press('f')
+            assert pinned==frame['rgb']
+            assert page.evaluate('state.calibration')=='off'
+            assert page.locator('#base').get_attribute('src')==frame['thermal']
             for fit in ['fit','fill']:
                 page.locator('#fit').select_option(fit)
                 page.locator('#zoom').fill('1.5');page.locator('#zoom').dispatch_event('input')
                 assert abs(page.locator('#plane').evaluate('e=>e.clientWidth/e.clientHeight')-1.6)<.01
             assert page.evaluate('payload')==before
             page.locator('#calibration').select_option('off')
+            assert page.evaluate('state.clean') is False
+            page.locator('#clean').click();assert page.locator('[data-fault]').count()==0
             page.locator('#clean').click();assert page.locator('[data-fault]').count()==1
             # Separate display remains image-only during calibration too.
             page.locator('#calibration').select_option('gray')

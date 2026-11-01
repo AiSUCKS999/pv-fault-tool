@@ -60,8 +60,11 @@ def test_multifault_clean_images_and_labeled_boxes(tmp_path):
             page.locator('#clean').click();assert page.locator('[data-fault]').count()==0
             # One click must enable boxes even after Clean Filming was enabled.
             page.locator('#boxes').click();assert page.locator('[data-fault]').count()==3
+            page.locator('#calibration-options > summary').click()
             page.locator('#calibration').select_option('gray');assert page.locator('[data-fault]').count()==0
-            assert page.locator('#boxes').is_disabled()
+            assert page.locator('#boxes').is_enabled()
+            page.locator('#boxes').click();assert page.evaluate('state.calibration')=='off'
+            assert page.locator('[data-fault]').count()==3
         finally:browser.close()
     assert hashes=={key:hashlib.sha256(scene['far'][key].tobytes()).hexdigest() for key in hashes}
     (out/'acceptance.json').write_text(json.dumps({'faults':[f['id'] for f in scene['faults']],'image_hashes_unchanged':hashes,'far_close_modalities':6,'label_overlap':'none in tested frames','fullscreen':'passed','clean_toggle':'passed'},indent=2))
