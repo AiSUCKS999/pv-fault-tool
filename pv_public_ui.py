@@ -196,3 +196,5 @@ def render_public_app(ns):
     except Exception as exc:
         if ns.get('is_allocation_failure',lambda error:False)(exc):st.error('This photograph exceeds available memory. Choose a smaller source.')
         else:raise
+
+PUBLIC_UI_REVISION = "simple-public-20261101-v1"

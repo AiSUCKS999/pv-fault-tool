@@ -27,12 +27,29 @@ for _section in _SECTION_FILES:
     _path = _TOOL_DIR / _section
     exec(compile(_path.read_text(encoding="utf-8-sig"), str(_path), "exec"), globals())
 
+PUBLIC_UI_REVISION = "simple-public-20261101-v1"
+
+
+def load_public_interface():
+    # Community Cloud can rerun app.py while retaining imported UI modules.
+    # Refresh only UI code once per deployment, never the simulation engines.
+    import importlib
+    presentation = importlib.import_module("pv_presentation")
+    refreshed = getattr(presentation, "PUBLIC_UI_REVISION", None) != PUBLIC_UI_REVISION
+    if refreshed:
+        importlib.reload(presentation)
+    interface = importlib.import_module("pv_public_ui")
+    if (refreshed or getattr(interface, "PUBLIC_UI_REVISION", None) != PUBLIC_UI_REVISION
+            or getattr(interface, "show_presentation", None) is not presentation.show_presentation):
+        importlib.reload(interface)
+    return interface
+
+
 def public_main():
     st.set_page_config(page_title="PV Fault Tool", layout="wide")
     ui_css()
     app_state_defaults()
-    from pv_public_ui import render_public_app
-    render_public_app(globals())
+    load_public_interface().render_public_app(globals())
 
 
 if __name__ == "__main__":

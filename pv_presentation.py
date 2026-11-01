@@ -68,3 +68,5 @@ def show_presentation(ns, payload, key="scene"):
         ns["st"].session_state["pv_scene_view_"+key]=value
         from pv_scene_log import SceneJournal
         SceneJournal(ns["st"].session_state).record_presentation(key,value)
+
+PUBLIC_UI_REVISION = "simple-public-20261101-v1"
