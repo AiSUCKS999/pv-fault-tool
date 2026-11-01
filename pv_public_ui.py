@@ -163,6 +163,14 @@ def render_public_app(ns):
         section_key='public_section_'+mode
         default=st.session_state.get(section_key,'Scene Setup')
         section=st.radio('Workflow',SECTIONS,index=SECTIONS.index(default),key=section_key)
+    # Retain the existing Real Farm memory safeguard; these are reproducible
+    # caches, not photographs, fault records, scene frames or journal data.
+    if mode=='Generated':st.session_state.pop('real_farm_generated_cache_released',None)
+    elif not st.session_state.get('real_farm_generated_cache_released'):
+        for name in ('cached_native_thermal_master','cached_solar_render_thermal_base','cached_module_field_thermal_scene'):
+            cached=ns.get(name)
+            if cached is not None and hasattr(cached,'clear'):cached.clear()
+        st.session_state['real_farm_generated_cache_released']=True
     values={'base_source':'generated' if mode=='Generated' else 'real_farm','section':section}
     for key,value in values.items():
         if st.query_params.get(key)!=value:st.query_params[key]=value
@@ -185,3 +193,6 @@ def render_public_app(ns):
             elif section=='Export':export(ns,mode,frames)
     except (ValueError,RuntimeError,KeyError,OSError) as exc:st.error(str(exc))
     except MemoryError:st.error('This photograph exceeds available memory. Choose a smaller source.')
+    except Exception as exc:
+        if ns.get('is_allocation_failure',lambda error:False)(exc):st.error('This photograph exceeds available memory. Choose a smaller source.')
+        else:raise
