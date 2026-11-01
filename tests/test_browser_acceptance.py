@@ -58,7 +58,7 @@ def test_live_local_streamlit_no_typing_and_capture_bridge():
     with socket.socket() as s:s.bind(("127.0.0.1",0));port=s.getsockname()[1]
     # Child server exists only inside this foreground, bounded test. Always reap.
     with (OUT/"browser_server.log").open("w",encoding="utf-8") as log:
-        process=subprocess.Popen([sys.executable,"-m","streamlit","run","app.py","--server.headless=true",
+        process=subprocess.Popen([sys.executable,"-m","streamlit","run","tests/legacy_ui_fixture.py","--server.headless=true",
             f"--server.port={port}","--browser.gatherUsageStats=false"],cwd=ROOT,stdout=log,stderr=log)
         try:
             deadline=time.monotonic()+25

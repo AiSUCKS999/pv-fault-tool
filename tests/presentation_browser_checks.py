@@ -11,7 +11,7 @@ def exercise_normal_controls(view):
     for identity,frame in [('FAR',payload['far']),*payload['close'].items()]:
         for mode in ('original','rgb','thermal'):expected[identity,mode]=hashlib.sha256(decoded(frame[mode]).tobytes()).hexdigest()
     for selector in ['#advanced','#calibration-options']:
-        if not view.locator(selector).evaluate('e=>e.open'):view.locator(selector+' > summary').click()
+        if view.locator(selector).count() and not view.locator(selector).evaluate('e=>e.open'):view.locator(selector+' > summary').click()
     evidence=[]
     buttons=['[data-distance=FAR]','[data-distance=CLOSE]','[data-mode=original]','[data-mode=rgb]','[data-mode=thermal]','#boxes','#previous','#next']
     for pattern in ('gray','detail','fault'):

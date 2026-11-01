@@ -4,12 +4,12 @@ import json
 from pathlib import Path
 
 
-def presentation_html(payload, *, controller=True, channel="pv-presentation"):
+def presentation_html(payload, *, controller=True, channel="pv-presentation", simple=False):
     # No dimensions are baked into the viewport. Each image retains its native
     # pixels; contain/cover choose letterboxing/cropping, never stretching.
     data = json.dumps(payload, ensure_ascii=True).replace("<", "\\u003c")
     script = Path(__file__).with_name("pv_presentation.js").read_text(encoding="utf-8")
-    return """<!doctype html><html><head><meta charset="utf-8">
+    html = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PV presentation</title><style>
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;color:#eee;font:14px system-ui;overflow:hidden}
@@ -42,6 +42,17 @@ body.presentation #controls,body.presentation #status,body.presentation #calibra
 <div id="screen" tabindex="0"><div id="gray"></div><div id="plane"><img id="base" draggable="false"><img id="compare" draggable="false"><svg id="labels"></svg></div></div>
 <script>const INITIAL=""" + data + ";const CONTROLLER=" + json.dumps(controller) + ";const CHANNEL=" + json.dumps(channel) + ";\n" + script + "</script></body></html>"
 
+    if simple:
+        # Delete the legacy control markup; it is not moved to another accordion.
+        start=html.index('<details id="advanced">')
+        end=html.index('<details id="calibration-options">',start)
+        html=html[:start]+html[end:]
+        calibration_controls='<select id="fit" aria-label="Display scaling"><option value="fit">FIT</option><option value="fill">FILL</option></select><label>Zoom <input id="zoom" aria-label="Presentation zoom" type="range" min="1" max="3" step="0.05" value="1"></label>'
+        html=html.replace('</select></details>', '</select>'+calibration_controls+'</details>',1)
+        html=html.replace('PRESENT FULLSCREEN','FULLSCREEN')
+    return html
+
+
 
 def image_data(png):
     return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
@@ -50,14 +61,10 @@ def image_data(png):
 def show_presentation(ns, payload, key="scene"):
     import streamlit.components.v1 as components
     viewer=components.declare_component("pv_scene_display",path=str(Path(__file__).with_name("pv_presentation_component")))
-    value=viewer(html=presentation_html(payload, channel="pv-display-" + key),
+    value=viewer(html=presentation_html(payload, channel="pv-display-" + key, simple=True),
         # Refresh already-open viewers too; acquisition/event signatures remain unchanged.
-        signature=payload["revision"]+":normal-controls-v2",key="scene_display_"+key,default=None)
+        signature=payload["revision"]+":simple-controls-v3",key="scene_display_"+key,default=None)
     if isinstance(value,dict) and value.get("signature")==payload["revision"]:
         ns["st"].session_state["pv_scene_view_"+key]=value
         from pv_scene_log import SceneJournal
         SceneJournal(ns["st"].session_state).record_presentation(key,value)
-    with ns["st"].expander("Advanced Options · Export & Help", expanded=False):
-        ns["st"].caption("Keys: F/C Far/Close · R/T RGB/Thermal · O Original · B Bounding Box · arrows previous/next · Enter fullscreen. FIT keeps the whole image; FILL crops without distortion.")
-        ns["st"].download_button("Download standalone presentation", presentation_html(payload),
-            file_name="pv_presentation.html", mime="text/html", key="presentation_download_"+key)

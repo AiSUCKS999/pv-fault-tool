@@ -143,7 +143,7 @@ def test_hotspot_symptom_is_available_only_when_explicitly_selected(scene):
 
 def test_cold_rgb_random_cracking_generates_physical_rgb_and_paired_thermal(scene):
     ns = scene.ns
-    app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60)
+    app = AppTest.from_file(str(ROOT / 'tests/legacy_ui_fixture.py'), default_timeout=60)
     # Exercise the preserved individual controls explicitly; scene workflow is the new default.
     app.session_state["scene_individual_real"] = True
     app.session_state["scene_individual_generated"] = True

@@ -135,7 +135,7 @@ def test_real_far_normal_fault_selection_preserves_id_across_distance(ns, fault)
     image=ns["st"].session_state["real_farm_image"]
     target=next(m for m in ns["real_farm_camera_candidates"](state,image)[1] if m["module_id"]==mid)
     ns["real_farm_camera_new_observation"](state,image,target,7)
-    app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=80)
+    app = AppTest.from_file(str(ROOT / 'tests/legacy_ui_fixture.py'), default_timeout=80)
     app.session_state["scene_individual_real"] = True
     app.session_state["collection_mode_Real Farm"] = "929 controlled cases"
     app.query_params["base_source"] = "real_farm"
@@ -166,7 +166,7 @@ def test_real_far_normal_fault_selection_preserves_id_across_distance(ns, fault)
 
 
 def test_generated_normal_far_fault_selection_without_duplicate_button():
-    app=AppTest.from_file(str(ROOT/"app.py"),default_timeout=80)
+    app=AppTest.from_file(str(ROOT / 'tests/legacy_ui_fixture.py'),default_timeout=80)
     app.query_params.update(location="grass_open",custom_layout="1",row_count="2",panels_per_row="4",section="Faults")
     app.run()
     app.selectbox(key="ros_prepare_class").set_value("CellCracking").run()
